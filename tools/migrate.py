@@ -30,8 +30,6 @@ DB_VERSIONS = {
     "airlabs": "versionsAirlabs",
     "flightradar": "versionsFlightRadar",
     "fr": "versionsFlightRadar",
-    "powerplatform": "versionsPowerPlatform",
-    "pp": "versionsPowerPlatform",
     "aviationedge": "versionsAviationEdge",
     "ae": "versionsAviationEdge",
 }

@@ -24,7 +24,7 @@ from service_auth import verify_service_token
 router = Router(prefix="/files", tags=["Files"], dependencies=[Depends(verify_service_token)])
 
 # Must match the file-processor PROCESSORS keys.
-_ALLOWED_KINDS = {"json", "csv", "excel", "cirium"}
+_ALLOWED_KINDS = {"csv", "excel", "cirium"}
 
 
 def _save_sync(upload_file, dest: Path) -> None:
@@ -55,6 +55,7 @@ async def upload_file(
     response: Response,
     file: UploadFile = File(...),
     kind: str = Form(...),
+    group: str = Form(default=None),
 ):
     if kind not in _ALLOWED_KINDS:
         return warning_response(
@@ -80,13 +81,18 @@ async def upload_file(
     await _set_status(request, job_id, str(dest), "queued")
 
     # 2) forward to the file-processor service (server-to-server, streamed from disk)
+    # `group` groups a caller's files for per-user FIFO ordering in file-processor; omitted
+    # => file-processor treats each file as its own group (no grouping).
+    forward_data = {"kind": kind, "job_id": job_id}
+    if group:
+        forward_data["group"] = group
     try:
         with dest.open("rb") as fh:
             async with httpx.AsyncClient(timeout=120) as client:
                 resp = await client.post(
                     FILE_PROCESSOR_URL.rstrip("/") + "/process",
                     headers={"X-Service-Token": FILE_PROCESSOR_TOKEN},
-                    data={"kind": kind, "job_id": job_id},
+                    data=forward_data,
                     files={"file": (safe_name, fh)},
                 )
         resp.raise_for_status()
@@ -106,7 +112,7 @@ async def upload_file(
 
     return success_response(
         request=request, response=response,
-        data={"job_id": job_id, "kind": kind, "filename": safe_name},
+        data={"job_id": job_id, "kind": kind, "filename": safe_name, "group": group or job_id},
         msg="File accepted and forwarded for processing",
         status_code=status.HTTP_202_ACCEPTED,
     )
