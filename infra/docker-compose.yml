@@ -1,0 +1,52 @@
+# Shared infrastructure: ONE PostgreSQL (pgvector) + ONE Redis for ALL microservices
+# (core-api, file-processor, external-worker, portal). Use this only if you self-host the
+# shared cluster; in production you likely point services at a managed Postgres/Redis.
+#
+#   DB_USER=... DB_PASSWORD=... docker compose -f infra/docker-compose.yml up -d
+#
+# NOTE: the platform uses MULTIPLE logical databases (ai12_main, ai12_service, …, portal).
+# This compose creates only the default DB — create the rest once (psql / init script):
+#   CREATE DATABASE ai12_main; ... CREATE DATABASE portal;
+# pgvector image is required (DocumentEmbedding/GlobalEmbedding use the vector type).
+name: aixii-infra
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    networks: [aixii]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    restart: unless-stopped
+    networks: [aixii]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:
+  redisdata:
+
+networks:
+  aixii:
+    external: true
