@@ -16,7 +16,8 @@ async def verify_service_token(x_service_token: str | None = Header(default=None
 
     If SERVICE_TOKEN is unset the route is closed (denies all) rather than open.
     """
-    if not SERVICE_TOKEN or not x_service_token or not hmac.compare_digest(x_service_token, SERVICE_TOKEN):
+    if (not SERVICE_TOKEN or not x_service_token
+            or not hmac.compare_digest(x_service_token.encode("utf-8"), SERVICE_TOKEN.encode("utf-8"))):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing service token",

@@ -7,7 +7,8 @@
 # NOTE: the platform uses MULTIPLE logical databases (ai12_main, ai12_service, …, portal).
 # This compose creates only the default DB — create the rest once (psql / init script):
 #   CREATE DATABASE ai12_main; ... CREATE DATABASE portal;
-# pgvector image is required (DocumentEmbedding/GlobalEmbedding use the vector type).
+# pgvector image retained for migration-downgrade compatibility (older revisions recreate
+# `vector` columns) and any future vector models. No current model uses the vector type.
 name: aixii-infra
 
 services:
