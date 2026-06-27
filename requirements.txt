@@ -1,0 +1,31 @@
+# API Server segment
+# --- base deps (inlined; was shared/requirements-base.txt) ---
+SQLAlchemy==2.0.49
+asyncpg==0.31.0
+pgvector==0.4.2
+pydantic==2.13.4
+pydantic[email]
+pydantic-settings==2.14.1
+inflect==7.5.0
+python-dotenv==1.2.2
+redis==5.3.1
+arq==0.26.3
+# Utils.Middlewares (DBProxy/performance_timer) subclasses FastAPI APIRouter,
+# so fastapi is required by every segment (workers included).
+fastapi==0.136.1
+
+uvicorn==0.46.0
+starlette==1.0.0
+python-multipart==0.0.29
+orjson==3.11.9
+
+# Excel/aircraft upload handling in request path (DBQueries/AircraftsExcel)
+pandas==3.0.3
+numpy==1.26.4
+openpyxl==3.1.5
+
+# DB migrations
+alembic==1.18.4
+
+# server-to-server forward to file-processor
+httpx==0.28.1
