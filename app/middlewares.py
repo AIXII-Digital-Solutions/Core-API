@@ -114,11 +114,13 @@ def register_middlewares(app):
     @app.exception_handler(Exception)
     async def custom_exception_handler(request: Request, exc: Exception):
         correlation_id = getattr(request.state, "correlation_id", None)
+        # Full detail goes to the logs only; the client gets a generic message + the
+        # correlation id (so ops can find the matching log) — never the exception internals.
         logger.critical(f"Unhandled error: {exc} \n CorrelationID = {correlation_id}", exc_info=True)
         response = DefaultResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             details=DetailField(
-                msg=f"{exc.__class__.__name__}: {str(exc)}",
+                msg="Internal server error",
                 correlationId=correlation_id
             ),
             data=None

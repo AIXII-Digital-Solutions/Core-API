@@ -37,7 +37,7 @@ Point `DB_HOST` / `REDIS_HOST` at the SHARED cluster. Need one locally?
    python tools/migrate.py revision main "add X"   # --autogenerate
    python tools/migrate.py upgrade  main head
    ```
-   DBs: `main service cirium airlabs flightradar powerplatform aviationedge` (portal is owned by the portal service).
+   DBs: `main service cirium airlabs flightradar aviationedge` (portal is owned by the portal service).
 3. If a worker uses a changed table, copy the updated model file into that worker's repo and commit.
 
 Migrations are a deliberate, pre-deploy step (set `RUN_MIGRATIONS=true` + `MIGRATE_DBS="…"`

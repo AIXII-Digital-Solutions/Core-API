@@ -18,3 +18,4 @@ api_data/
 # IDE
 .idea/
 .vscode/
+/CLAUDE.md

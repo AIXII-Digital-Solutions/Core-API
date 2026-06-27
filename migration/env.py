@@ -102,14 +102,6 @@ elif db_name in {"fr", "flightradar"}:
     versions_dir = "versionsFlightRadar"
     Base = FlightRadarBase
 
-elif db_name in {"pp", "power", "powerplatform"}:
-    from Database.config import PowerPlatformBase
-    from Database.PowerPlatformModels import *
-    DATABASE_URL = get_db_url("powerplatform")
-    target_metadata = PowerPlatformBase.metadata
-    versions_dir = "versionsPowerPlatform"
-    Base = PowerPlatformBase
-
 elif db_name in {"aviationedge", "ae"}:
     from Database.config import AviationEdgeBase
     from Database.AviationEdgeModels import *
@@ -119,7 +111,7 @@ elif db_name in {"aviationedge", "ae"}:
     Base = AviationEdgeBase
 
 else:
-    raise ValueError("Unknown DB. Use: alembic -x db=main|service|cirium|airlabs|flightradar|powerplatform|aviationedge ...")
+    raise ValueError("Unknown DB. Use: alembic -x db=main|service|cirium|airlabs|flightradar|aviationedge ...")
 
 
 # Set runtime DB URL
