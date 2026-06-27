@@ -89,6 +89,11 @@ MS_WEBHOOK_SECRET: str = require_env("MS_WEBHOOK_SECRET")  # REQUIRED — must e
 # Empty by default -> service-token-protected routes are effectively closed.
 SERVICE_TOKEN: str = require_env("SERVICE_TOKEN", "")
 
+# Server-side pepper mixed into the sha256 of every API-key secret before it is stored/compared
+# (api_tokens.token_hash). Set a long random value in production; rotating it invalidates ALL
+# issued API keys. Empty is allowed (hashing still works) but weaker — set it.
+API_TOKEN_PEPPER: str = require_env("API_TOKEN_PEPPER", "")
+
 # file-processor service: core-api saves an upload then forwards it here (HTTP).
 FILE_PROCESSOR_URL: str = require_env("FILE_PROCESSOR_URL", "http://localhost:8001")
 FILE_PROCESSOR_TOKEN: str = require_env("FILE_PROCESSOR_TOKEN", "")  # must equal file-processor SERVICE_TOKEN
