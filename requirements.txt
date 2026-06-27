@@ -16,7 +16,7 @@ fastapi==0.136.1
 
 uvicorn==0.46.0
 starlette==1.0.0
-python-multipart==0.0.29
+python-multipart==0.0.31
 orjson==3.11.9
 
 # Excel/aircraft upload handling in request path (DBQueries/AircraftsExcel)
