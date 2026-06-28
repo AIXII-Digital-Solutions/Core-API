@@ -19,3 +19,6 @@ api_data/
 .idea/
 .vscode/
 /CLAUDE.md
+/docs/db-aixii-setup.md
+/docs/db-aixii-setup.sql
+_admin
