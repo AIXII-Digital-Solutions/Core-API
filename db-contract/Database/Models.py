@@ -10,6 +10,9 @@ from .AviationEdgeModels import *
 # Add new models below
 # ======================
 
+from .ApiModels import *
+from .IcaoModels import *
+
 
 
 

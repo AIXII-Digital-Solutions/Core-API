@@ -24,14 +24,8 @@ from alembic.config import Config
 ROOT = Path(__file__).resolve().parents[1]
 
 DB_VERSIONS = {
-    "main": "versionsMain",
-    "service": "versionsService",
-    "cirium": "versionsCirium",
-    "airlabs": "versionsAirlabs",
-    "flightradar": "versionsFlightRadar",
-    "fr": "versionsFlightRadar",
-    "aviationedge": "versionsAviationEdge",
-    "ae": "versionsAviationEdge",
+    "aixii": "versionsAixii",      # all aviation domains (schemas) in one DB
+    "service": "versionsService",  # job_statuses / schedule_registry / api_tokens
 }
 
 
