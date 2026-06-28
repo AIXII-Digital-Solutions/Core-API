@@ -462,3 +462,14 @@ class Delta(CiriumViewBase):
     Registration: Mapped[str] = mapped_column(String, nullable=True, name="Registration")
     Serial_Number: Mapped[str] = mapped_column(String, nullable=True, name="Serial Number")
     Status: Mapped[str] = mapped_column(String, nullable=True, name="Status")
+
+
+class CiriumAirlines(CiriumViewBase):
+    """cirium.airlines — DISTINCT (Operator, Operator ICAO, Operator IATA) over ciriumaircrafts,
+    one row per Operator. Materialized view, refreshed by external-worker. Read-only reference
+    list for the predictive-utilisation airline picker. Logical PK = airline."""
+    __tablename__ = "airlines"
+
+    airline: Mapped[str] = mapped_column(String, name="airline", primary_key=True)
+    icao: Mapped[str] = mapped_column(String, nullable=True, name="icao")
+    iata: Mapped[str] = mapped_column(String, nullable=True, name="iata")

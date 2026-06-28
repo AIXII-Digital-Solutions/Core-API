@@ -38,12 +38,14 @@ SCOPE_SCHEDULER_READ = "scheduler:read"
 SCOPE_SCHEDULER_WRITE = "scheduler:write"
 SCOPE_QUEUES_ADMIN = "queues:admin"
 SCOPE_TOKENS_ADMIN = "tokens:admin"
+SCOPE_PREDICTIVE_READ = "predictive:read"
+SCOPE_PREDICTIVE_WRITE = "predictive:write"
 SCOPE_ADMIN = "admin"  # superscope: satisfies any required scope
 
 ALL_SCOPES = {
     SCOPE_FLIGHTS_READ, SCOPE_STATUS_READ, SCOPE_FILES_WRITE,
     SCOPE_SCHEDULER_READ, SCOPE_SCHEDULER_WRITE, SCOPE_QUEUES_ADMIN,
-    SCOPE_TOKENS_ADMIN, SCOPE_ADMIN,
+    SCOPE_TOKENS_ADMIN, SCOPE_PREDICTIVE_READ, SCOPE_PREDICTIVE_WRITE, SCOPE_ADMIN,
 }
 
 # How long to coalesce last_used_at writes (avoid a DB write on every authorised request).
