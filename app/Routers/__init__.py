@@ -9,3 +9,4 @@ from .Scheduler import router as scheduler
 from .QueueAdmin import router as queues
 from .Tokens import router as tokens
 from .PredictiveUtilisation import router as predictive_utilisation
+from .Airlines import router as airlines
