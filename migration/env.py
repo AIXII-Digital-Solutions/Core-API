@@ -28,21 +28,20 @@ if _env_file.exists():
 
 
 def get_db_url(db_name: str) -> str:
-    """DSN for the DB whose name contains ``db_name`` (matches DBSettings logic)."""
+    """DSN for the PHYSICAL database behind a logical name (mirrors DBSettings.physical_db):
+    everything except `service` -> the `aixii` database."""
     user = os.getenv("DB_USER", "")
     password = os.getenv("DB_PASSWORD", "")
     host = os.getenv("DB_HOST", "localhost")
     port = os.getenv("DB_PORT", "5432")
     if not user or not password:
         raise ValueError("Database credentials not provided (DB_USER / DB_PASSWORD)")
-    db_list = [d.strip() for d in os.getenv("DB_NAME", "").split(",") if d.strip()]
-    matches = [d for d in db_list if db_name.lower() in d.lower()]
-    if not matches:
-        raise ValueError(f"No database similar to '{db_name}' found in {db_list}")
-    if len(matches) > 1:
-        raise ValueError(f"Ambiguous name '{db_name}', matches: {matches}")
+    if str(db_name).strip().lower() == "service":
+        real = os.getenv("DB_SERVICE_NAME", "service")
+    else:
+        real = os.getenv("DB_AIXII_NAME", "aixii")
     return (f"postgresql+asyncpg://{user}:{quote_plus(password)}@"
-            f"{host}:{port}/{matches[0]}")
+            f"{host}:{port}/{real}")
 
 # Alembic Config
 config = context.config
@@ -52,83 +51,76 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 # Which DB?
-# NOTE: `-x db=...` selects ONLY target_metadata + the DB URL below. It does NOT
-# switch the revision directory — Alembic builds the ScriptDirectory from alembic.ini
-# BEFORE this env runs, so the `versions_dir` computed per-branch is informational only.
-# To target a specific DB's revision tree you MUST either (a) activate the matching
-# `version_locations = migration/versions<Db>` line in alembic.ini (and comment the
-# others), or (b) pass `--version-path migration/versions<Db>` on the command line.
-# Running a `revision` without doing so writes the new script into whatever single
-# version_locations is active (currently versionsCirium) and chains onto its head.
+# NOTE: `-x db=...` selects ONLY target_metadata + the DB URL below. It does NOT switch the
+# revision directory — Alembic builds the ScriptDirectory from alembic.ini BEFORE this env runs.
+# Use tools/migrate.py (it sets version_locations per `-x db=` first); never bare `alembic`.
+#
+# After the AIXII consolidation there are exactly TWO targets:
+#   aixii   — every aviation domain as a SCHEMA in one DB (combined metadata + include_schemas)
+#   service — the separate service DB (job_statuses / schedule_registry / api_tokens)
+# `main`/core is being rewritten and is intentionally NOT migrated yet.
 db_name = context.get_x_argument(as_dictionary=True).get("db")
 
-if db_name == "main":
-    from Database.config import MainBase
-    from Database.MainModels import *
-    DATABASE_URL = get_db_url("main")
-    target_metadata = MainBase.metadata
-    versions_dir = "versionsMain"
-    Base = MainBase
+if db_name == "aixii":
+    from Database.config import (CiriumBase, AirlabsBase, FlightRadarBase, AviationEdgeBase,
+                                 ApiBase, IcaoBase)
+    from Database.CiriumModels import *        # noqa: F401,F403  (register tables on the Bases)
+    from Database.AirlabsModels import *       # noqa: F401,F403
+    from Database.FlightRadarModels import *   # noqa: F401,F403
+    from Database.AviationEdgeModels import *  # noqa: F401,F403
+    from Database.ApiModels import *           # noqa: F401,F403
+    from Database.IcaoModels import *          # noqa: F401,F403
+    DATABASE_URL = get_db_url("aixii")
+    # a list of MetaData (one per aviation schema) — alembic autogenerate compares all of them
+    target_metadata = [
+        CiriumBase.metadata,
+        AirlabsBase.metadata,
+        FlightRadarBase.metadata,
+        AviationEdgeBase.metadata,
+        ApiBase.metadata,
+        IcaoBase.metadata,
+    ]
+    versions_dir = "versionsAixii"
+    include_schemas = True
 
 elif db_name == "service":
     from Database.config import ServiceBase
-    from Database.ServiceModels import *
+    from Database.ServiceModels import *       # noqa: F401,F403
     DATABASE_URL = get_db_url("service")
     target_metadata = ServiceBase.metadata
     versions_dir = "versionsService"
-    Base = ServiceBase
-
-elif db_name == "cirium":
-    from Database.config import CiriumBase
-    from Database.CiriumModels import *
-    DATABASE_URL = get_db_url("cirium")
-    target_metadata = CiriumBase.metadata
-    versions_dir = "versionsCirium"
-    Base = CiriumBase
-
-elif db_name == "airlabs":
-    from Database.config import AirlabsBase
-    from Database.AirlabsModels import *
-    DATABASE_URL = get_db_url("airlabs")
-    target_metadata = AirlabsBase.metadata
-    versions_dir = "versionsAirlabs"
-    Base = AirlabsBase
-
-elif db_name in {"fr", "flightradar"}:
-    from Database.config import FlightRadarBase
-    from Database.FlightRadarModels import *
-    DATABASE_URL = get_db_url("flightradar")
-    target_metadata = FlightRadarBase.metadata
-    versions_dir = "versionsFlightRadar"
-    Base = FlightRadarBase
-
-elif db_name in {"aviationedge", "ae"}:
-    from Database.config import AviationEdgeBase
-    from Database.AviationEdgeModels import *
-    DATABASE_URL = get_db_url("aviationedge")
-    target_metadata = AviationEdgeBase.metadata
-    versions_dir = "versionsAviationEdge"
-    Base = AviationEdgeBase
+    include_schemas = False
 
 else:
-    raise ValueError("Unknown DB. Use: alembic -x db=main|service|cirium|airlabs|flightradar|aviationedge ...")
+    raise ValueError("Unknown DB. Use: alembic -x db=aixii|service ...")
 
 
-# Set runtime DB URL
-config.set_main_option("sqlalchemy.url", DATABASE_URL)
+# Set runtime DB URL.
+# The password is URL-encoded (quote_plus), so the DSN can contain `%XX` escapes. Alembic's
+# Config is a ConfigParser with BasicInterpolation, which treats a lone `%` as interpolation
+# syntax and raises "invalid interpolation syntax". Double the `%` here so set_main_option's
+# before_set validation passes; ConfigParser collapses `%%`->`%` again when env_from_config
+# reads the section back, and SQLAlchemy then URL-decodes `%XX` to the real password.
+config.set_main_option("sqlalchemy.url", DATABASE_URL.replace("%", "%%"))
+
+
+def _all_metadata():
+    return target_metadata if isinstance(target_metadata, (list, tuple)) else [target_metadata]
 
 
 # ---------------------------------------------------------------------------
-# FILTER: exclude tables not present in SQLAlchemy models
+# FILTER: include only tables present in our models (across all schemas).
+# Under include_schemas reflected objects arrive as bare `name` + a separate `schema`,
+# while metadata keys are `schema.table` — so compare on (schema, name).
 # ---------------------------------------------------------------------------
 def include_object(object, name, type_, reflected, compare_to):
     if type_ == "table":
-        if name in target_metadata.tables:
-            print("Include:", name)
-            return True
-        else:
-            print("Skip   :", name)
-            return False
+        schema = getattr(object, "schema", None)
+        key = f"{schema}.{name}" if schema else name
+        for m in _all_metadata():
+            if key in m.tables or name in m.tables:
+                return True
+        return False
     return True
 
 
@@ -140,6 +132,7 @@ def get_alembic_config_kwargs():
         target_metadata=target_metadata,
         compare_type=True,
         include_object=include_object,
+        include_schemas=include_schemas,
     )
 
 
@@ -191,7 +184,7 @@ def run_migrations_online() -> None:
 
 
 # Debug output: list model tables discovered by SQLAlchemy
-print("Models detected in metadata:", list(Base.metadata.tables.keys()))
+print("Models detected in metadata:", [t for m in _all_metadata() for t in m.tables.keys()])
 
 # Run Alembic
 if context.is_offline_mode():

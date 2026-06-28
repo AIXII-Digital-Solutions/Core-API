@@ -26,13 +26,13 @@ router = Router(
 @router.get('/{type}')
 async def get_db(type: str, request: Request, background_tasks: BackgroundTasks):
     if type.lower() == 'lease_agr':
-        main_db = await request.state.db.get_db("main")
-        result = await main_db.execute(
-            select(Lease_Output)
-            .order_by(Lease_Output.id.asc())
-        )
-
-        rows = result.scalars().all()
+        # NOTE: Lease_Output is a `main`/core model — core is being rewritten and is not
+        # migrated into aixii yet, so this endpoint will not return data until core is rebuilt.
+        async with request.app.state.db_client.session("main") as main_db:
+            result = await main_db.execute(
+                select(Lease_Output).order_by(Lease_Output.id.asc())
+            )
+            rows = result.scalars().all()
 
         wb = Workbook()
         ws = wb.active
