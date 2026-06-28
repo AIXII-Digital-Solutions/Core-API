@@ -15,9 +15,12 @@ class Registrations(Base):
     status: Mapped[str] = mapped_column(String, nullable=False)
 
 
-class Airlines(Base):
-    airline_name: Mapped[str] = mapped_column(String, index=True)
-    icao: Mapped[str] = mapped_column(String, index=True)
+# Airlines now lives in ApiModels as `api.airlines` (with an extra `iata` column). Disabled here
+# so it does not compete with ApiModels.Airlines in the `Database.Models` star-import aggregator.
+# Re-enable only if core re-introduces its own schema-less airlines table.
+# class Airlines(Base):
+#     airline_name: Mapped[str] = mapped_column(String, index=True)
+#     icao: Mapped[str] = mapped_column(String, index=True)
 
 
 class Guests(Base):
