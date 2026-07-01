@@ -454,6 +454,7 @@ class _AsgView:
     Manufacturer: Mapped[str] = mapped_column(String, nullable=True, name="Manufacturer")
     Aircraft_Sub_Series: Mapped[str] = mapped_column(String, nullable=True, name="Aircraft Sub Series")
     Operator: Mapped[str] = mapped_column(String, nullable=True, name="Operator")
+    Manager: Mapped[str] = mapped_column(String, nullable=True, name="Manager")
     Owner: Mapped[str] = mapped_column(String, nullable=True, name="Owner")
 
 
@@ -481,6 +482,9 @@ class _DeltaView:
     Registration: Mapped[str] = mapped_column(String, nullable=True, name="Registration")
     Serial_Number: Mapped[str] = mapped_column(String, nullable=True, name="Serial Number")
     Status: Mapped[str] = mapped_column(String, nullable=True, name="Status")
+    Operator: Mapped[str] = mapped_column(String, nullable=True, name="Operator")
+    Manager: Mapped[str] = mapped_column(String, nullable=True, name="Manager")
+    Owner: Mapped[str] = mapped_column(String, nullable=True, name="Owner")
 
 
 class DeltaCommercial(_DeltaView, CiriumViewBase):
