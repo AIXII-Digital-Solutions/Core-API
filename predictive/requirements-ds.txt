@@ -1,0 +1,12 @@
+# Data-science deps for the forecasting calibration package (predictive/).
+# The main app's requirements.txt deliberately carries no sci-stack; these are
+# additive and only needed to run the archetype diagnostic.
+#
+# PCA, KDE and the day-of-week OLS are hand-rolled on numpy (no scipy/scikit-learn)
+# to keep the footprint minimal and Python-3.14-wheel-safe. The supervised projector
+# (LDA/logit, brief sec. 7.4) is a later follow-on and may add scikit-learn then.
+#
+# asyncpg / python-dotenv already come from the repo-root requirements.txt.
+pandas>=2.2
+matplotlib>=3.8
+numpy>=1.26
