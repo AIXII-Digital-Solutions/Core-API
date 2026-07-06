@@ -568,3 +568,15 @@ class CiriumAirlines(CiriumViewBase):
     airline: Mapped[str] = mapped_column(String, name="airline", primary_key=True)
     icao: Mapped[str] = mapped_column(String, nullable=True, name="icao")
     iata: Mapped[str] = mapped_column(String, nullable=True, name="iata")
+
+
+class CiriumRegistrations(CiriumViewBase):
+    """cirium.registrations — one row per unique Registration with its LATEST Operator + Status
+    (DISTINCT ON, newest revision first). Materialized view, refreshed by external-worker alongside
+    the other cirium matviews. Read-only reference for the registration picker. Logical PK =
+    registration."""
+    __tablename__ = "registrations"
+
+    registration: Mapped[str] = mapped_column(String, name="registration", primary_key=True)
+    operator: Mapped[str] = mapped_column(String, nullable=True, name="operator")
+    status: Mapped[str] = mapped_column(String, nullable=True, name="status")
