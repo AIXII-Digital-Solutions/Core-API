@@ -86,6 +86,19 @@ class ApiToken(Base):
     created_by: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
 
 
+class ForecastLastRequest(Base):
+    """The last POST /forecast/ trigger, so the portal can read back what was last run. core-api
+    APPENDS one row per request; the GET returns the most recent (optionally per request_type).
+    ``request_type`` tags the algorithm ('1' = current Cirium×FR24 panel) so future algorithms/tables
+    can be told apart; ``request_params`` holds the exact trigger params (operator|registrations +
+    date). ``created_at`` (from the tz mixin) is the request datetime.
+    """
+    __tablename__ = "forecast_last_requests"
+
+    request_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    request_params: Mapped[dict] = mapped_column(JSONB, nullable=False)
+
+
 _current_module = sys.modules[__name__]
 
 __all__ = [
