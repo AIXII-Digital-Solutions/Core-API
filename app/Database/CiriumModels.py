@@ -578,5 +578,8 @@ class CiriumRegistrations(CiriumViewBase):
     __tablename__ = "registrations"
 
     registration: Mapped[str] = mapped_column(String, name="registration", primary_key=True)
+    # upper(registration) with every non-[A-Z0-9] stripped -> separator-insensitive search
+    # ("YLLTD" matches "YL-LTD"). Indexed (text_pattern_ops) for prefix LIKE.
+    registration_norm: Mapped[str] = mapped_column(String, nullable=True, name="registration_norm")
     operator: Mapped[str] = mapped_column(String, nullable=True, name="operator")
     status: Mapped[str] = mapped_column(String, nullable=True, name="status")
