@@ -36,6 +36,7 @@ def _assemble_sql(a5_where: str) -> str:
 INSERT INTO forecast.acys_actuals
     ("Registration","Period","Date","Time Departed","Time Landed",
      "IATA Origin","IATA Destination","IATA Destination Actual",
+     "ICAO Origin","ICAO Destination","ICAO Destination Actual",
      "Operator","Master Series","Manufacturer","Aircraft Sub Series","Primary Usage",
      "Contract Year","Circle Distance","Flight Time",
      "Agreed Value","Total Seats","Total PAX","Actual Distance FR","Flight Time FR")
@@ -56,16 +57,22 @@ WITH array5 AS (
 ),
 array6 AS (
     SELECT f.reg, f.datetime_takeoff, f.datetime_landed,
-           f.orig_iata, f.dest_iata, f.dest_iata_actual, f.circle_distance, f.flight_time,
+           f.orig_iata, f.dest_iata, f.dest_iata_actual,
+           f.orig_icao, f.dest_icao, f.dest_icao_actual,
+           f.circle_distance, f.flight_time,
            coalesce(f.datetime_takeoff, f.first_seen) AS flight_dt
     FROM flightradar.flightsummary f
     WHERE f.reg IN (SELECT registration FROM array5)
       AND coalesce(f.datetime_takeoff, f.first_seen) >= $1
       AND coalesce(f.datetime_takeoff, f.first_seen) <  $2
+      -- drop a flight with NO origin, or NO destination (neither actual nor planned)
+      AND nullif(f.orig_iata, '') IS NOT NULL
+      AND coalesce(nullif(f.dest_iata_actual, ''), nullif(f.dest_iata, '')) IS NOT NULL
 )
 SELECT a5.registration, a5.period, CAST(a6.flight_dt AS date),
        a6.datetime_takeoff, a6.datetime_landed,
        a6.orig_iata, a6.dest_iata, a6.dest_iata_actual,
+       a6.orig_icao, a6.dest_icao, a6.dest_icao_actual,
        a5.operator, a5.master_series, a5.manufacturer, a5.sub_series, a5.primary_usage,
        {_CONTRACT_YEAR}, a6.circle_distance, (a6.datetime_landed - a6.datetime_takeoff),
        a5.agreed_value, a5.total_seats, a5.total_seats * CAST($5 AS double precision),

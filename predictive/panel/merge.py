@@ -15,27 +15,40 @@ from predictive.db import DB
 
 _COLS = """"Registration","Period","Date","Time Departed","Time Landed",
        "IATA Origin","IATA Destination","IATA Destination Actual",
+       "ICAO Origin","ICAO Destination","ICAO Destination Actual",
        "Operator","Master Series","Manufacturer","Aircraft Sub Series","Primary Usage",
        "Contract Year","Circle Distance","Flight Time",
        "Agreed Value","Total Seats","Total PAX","Actual Distance FR","Flight Time FR\""""
 
 
+# Airport lookup CHAIN for one airport: main.airports by IATA -> main.airports by ICAO ->
+# flightradar.airports by IATA (pri orders the sources; LIMIT 1 = first that matched).
+def _airport_lookup(iata_expr: str, icao_expr: str) -> str:
+    return f"""(
+        SELECT city, country, airport_name, lat, lon FROM (
+            SELECT city, country, name AS airport_name, latitude AS lat, longitude AS lon, 1 AS pri
+              FROM main.airports WHERE iata = {iata_expr}
+            UNION ALL
+            SELECT city, country, name, latitude, longitude, 2
+              FROM main.airports WHERE icao = {icao_expr}
+            UNION ALL
+            SELECT city, country_name, name, lat, lon, 3
+              FROM flightradar.airports WHERE iata = {iata_expr}
+        ) s ORDER BY pri LIMIT 1
+    )"""
+
+
 def _merge_sql(final_scope: str) -> str:
+    origin = _airport_lookup('p."IATA Origin"', 'p."ICAO Origin"')
+    dest = _airport_lookup('coalesce(p."IATA Destination Actual", p."IATA Destination")',
+                           'coalesce(p."ICAO Destination Actual", p."ICAO Destination")')
     return f"""
 INSERT INTO forecast.acys_summary
     ({_COLS},
      "Origin Country","Origin City","Origin Airport Name",
      "Destination Country","Destination City","Destination Airport Name",
      origin_lat, origin_lon, dest_lat, dest_lon)
-WITH airports AS (
-    SELECT DISTINCT ON ("IATA Code")
-           "IATA Code" AS iata, "Country" AS country, "City" AS city, "Airport Name" AS airport_name,
-           "Latitude" AS lat, "Longitude" AS lon
-    FROM main.virtual_airport_list
-    WHERE "IATA Code" IS NOT NULL AND "IATA Code" <> ''
-    ORDER BY "IATA Code"
-),
-panel AS (
+WITH panel AS (
     SELECT {_COLS} FROM forecast.acys_actuals WHERE "Date" IS NOT NULL {final_scope}
     UNION ALL
     SELECT {_COLS} FROM forecast.acys_forecast
@@ -43,8 +56,8 @@ panel AS (
 SELECT p.*, o.country, o.city, o.airport_name, d.country, d.city, d.airport_name,
        o.lat, o.lon, d.lat, d.lon
 FROM panel p
-LEFT JOIN airports o ON o.iata = p."IATA Origin"
-LEFT JOIN airports d ON d.iata = p."IATA Destination"
+LEFT JOIN LATERAL {origin} o ON true
+LEFT JOIN LATERAL {dest} d ON true
 """
 
 
