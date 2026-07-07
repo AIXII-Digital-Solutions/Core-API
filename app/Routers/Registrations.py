@@ -1,11 +1,15 @@
 """Registration reference search (typeahead) over the cirium.registrations materialized view.
 
-Analogue of /airlines, but for tail numbers. Each row is a unique Registration with its LATEST
-Operator + Status. Instead of the airlines' `icao_only`, this takes `active_only` (default true):
-when true it keeps only aircraft whose Status is operationally active — "In Service" or "Storage" —
-excluding retired / written-off / on-order / cancelled / etc. Empty `q` returns an empty list;
-registration-prefix matches rank first, then alphabetical; capped by `limit`.
+Analogue of /airlines, for tail numbers. Each row is a unique Registration with its LATEST Operator +
+Status. Search is separator-insensitive: "YLLTD" matches "YL-LTD" (matched on registration_norm =
+upper, non-alphanumerics stripped). Filters:
+  * q            — registration substring (normalized); prefix matches rank first.
+  * operator     — operator-name SUBSTRING (ILIKE) -> all matching operators' registrations (combine with q).
+  * active_only  — keep only operationally active aircraft (Status 'In Service' / 'Storage').
+  * all_on_empty — when true, an empty search (no q, no operator) returns the first N rows instead of [].
 """
+from typing import Optional
+
 from fastapi import Request, Response, Depends, Query, status
 from sqlalchemy import select, desc
 
@@ -24,13 +28,19 @@ router = Router(prefix="/registrations", tags=["Registrations"])
 _ACTIVE_STATUSES = ["In Service", "Storage"]
 
 
+def _normalize(s: str) -> str:
+    """upper + strip non-alphanumerics — matches the matview's registration_norm."""
+    return "".join(ch for ch in s.upper() if ch.isalnum())
+
+
 @router.get(
     path="/",
     description=(
-        "Typeahead search over cirium.registrations: registration substring. Empty `q` returns an "
-        "empty list. `active_only` (default true) keeps only operationally active aircraft "
-        "(Status 'In Service' or 'Storage'), excluding retired/written-off/on-order/cancelled/etc.; "
-        "set false to search all. Prefix matches rank first, then alphabetical; capped by `limit`."
+        "Typeahead over cirium.registrations. `q` = registration substring, separator-insensitive "
+        "('YLLTD' matches 'YL-LTD'). `operator` = operator-name substring -> all matching operators' "
+        "tails (combine with q to narrow). `active_only` (default true) keeps only 'In Service' / 'Storage'. "
+        "`all_on_empty` (default false): an empty search returns the first N instead of []. "
+        "Prefix matches rank first, then alphabetical; capped by `limit`."
     ),
     responses=build_responses(include={status.HTTP_200_OK, status.HTTP_500_INTERNAL_SERVER_ERROR}),
     dependencies=[Depends(authorize(SCOPE_PREDICTIVE_READ))],
@@ -38,30 +48,32 @@ _ACTIVE_STATUSES = ["In Service", "Storage"]
 async def search_registrations(
     request: Request,
     response: Response,
-    q: str = Query("", description="Search text: registration substring."),
+    q: str = Query("", description="Registration substring (separator-insensitive)."),
+    operator: Optional[str] = Query(None, description="Operator name substring -> all matching operators' registrations."),
     limit: int = Query(10, ge=1, le=50, description="Max results returned."),
-    active_only: bool = Query(True, description="If true (default), only 'In Service' / 'Storage' aircraft."),
+    active_only: bool = Query(True, description="If true (default), only 'In Service' / 'Storage'."),
+    all_on_empty: bool = Query(False, description="If true, an empty search returns the first N rows."),
 ):
     try:
-        q = q.strip()
-        if not q:
-            return success_response(request=request, response=response, data=[])
+        nq = _normalize(q.strip()) if q else ""
+        operator = operator.strip() if operator else None
+        has_search = bool(nq) or bool(operator)
 
-        pattern = f"%{q}%"     # contains
-        prefix = f"{q}%"       # starts-with (for ranking)
-        conds = [CiriumRegistrations.registration.ilike(pattern)]
+        conds = []
+        order = [CiriumRegistrations.registration]
         if active_only:
             conds.append(CiriumRegistrations.status.in_(_ACTIVE_STATUSES))
+        if operator:
+            conds.append(CiriumRegistrations.operator.ilike(f"%{operator}%"))
+        if nq:
+            conds.append(CiriumRegistrations.registration_norm.like(f"%{nq}%"))
+            order = [desc(CiriumRegistrations.registration_norm.like(f"{nq}%")),  # prefix first
+                     CiriumRegistrations.registration]
 
-        stmt = (
-            select(CiriumRegistrations)
-            .where(*conds)
-            .order_by(
-                desc(CiriumRegistrations.registration.ilike(prefix)),   # prefix matches first
-                CiriumRegistrations.registration,                        # then alphabetical
-            )
-            .limit(limit)
-        )
+        if not has_search and not all_on_empty:
+            return success_response(request=request, response=response, data=[])
+
+        stmt = select(CiriumRegistrations).where(*conds).order_by(*order).limit(limit)
         async with request.app.state.db_client.session("aixii") as session:
             rows = (await session.execute(stmt)).scalars().all()
         data = [{"registration": r.registration, "operator": r.operator, "status": r.status} for r in rows]
