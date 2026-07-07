@@ -37,11 +37,26 @@ async def search_airlines(
     q: str = Query("", description="Search text: airline name substring, or ICAO/IATA prefix."),
     limit: int = Query(10, ge=1, le=50, description="Max results returned."),
     icao_only: bool = Query(False, description="If true, return only airlines that have an ICAO code."),
+    all_on_empty: bool = Query(False, description="If true, an empty query returns the first N airlines."),
 ):
     try:
         q = q.strip()
         if not q:
-            return success_response(request=request, response=response, data=[])
+            if not all_on_empty:
+                return success_response(request=request, response=response, data=[])
+            conds = [CiriumAirlines.icao.isnot(None)] if icao_only else []
+            stmt = (
+                select(CiriumAirlines).where(*conds)
+                .order_by(
+                    desc(or_(CiriumAirlines.icao.isnot(None), CiriumAirlines.iata.isnot(None))),
+                    CiriumAirlines.airline,
+                )
+                .limit(limit)
+            )
+            async with request.app.state.db_client.session("aixii") as session:
+                rows = (await session.execute(stmt)).scalars().all()
+            data = [{"airline": r.airline, "icao": r.icao, "iata": r.iata} for r in rows]
+            return success_response(request=request, response=response, data=data)
 
         pattern = f"%{q}%"     # name: contains
         prefix = f"{q}%"       # codes (and prefix-ranking): starts-with
