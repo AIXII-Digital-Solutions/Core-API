@@ -27,21 +27,26 @@ INSERT INTO forecast.acys_summary
      "Origin Country","Origin City","Origin Airport Name",
      "Destination Country","Destination City","Destination Airport Name",
      origin_lat, origin_lon, dest_lat, dest_lon)
-WITH airports AS (
-    -- primary main.virtual_airport_list, fallback flightradar.airports for IATAs missing there
-    -- (DISTINCT ON keeps pri=1 when present, else pri=2)
-    SELECT DISTINCT ON (iata) iata, country, city, airport_name, lat, lon
-    FROM (
-        SELECT "IATA Code" AS iata, "Country" AS country, "City" AS city,
-               "Airport Name" AS airport_name, "Latitude" AS lat, "Longitude" AS lon, 1 AS pri
-        FROM main.virtual_airport_list
-        WHERE "IATA Code" IS NOT NULL AND "IATA Code" <> ''
-        UNION ALL
-        SELECT iata, country_name, city, name, lat, lon, 2 AS pri
-        FROM flightradar.airports
-        WHERE iata IS NOT NULL AND iata <> ''
-    ) a
-    ORDER BY iata, pri
+WITH va AS (   -- main.virtual_airport_list, one row per IATA (prefer the most complete)
+    SELECT DISTINCT ON ("IATA Code")
+           "IATA Code" AS iata, "Country" AS country, "City" AS city,
+           "Airport Name" AS airport_name, "Latitude" AS lat, "Longitude" AS lon
+    FROM main.virtual_airport_list
+    WHERE "IATA Code" IS NOT NULL AND "IATA Code" <> ''
+    ORDER BY "IATA Code", ("City" IS NULL), ("Airport Name" IS NULL)
+),
+fa AS (        -- flightradar.airports fallback (iata already unique)
+    SELECT iata, country_name AS country, city, name AS airport_name, lat, lon
+    FROM flightradar.airports
+    WHERE iata IS NOT NULL AND iata <> ''
+),
+airports AS (
+    -- per-field merge: prefer virtual, fill gaps from flightradar. City in particular is ~97% NULL
+    -- in virtual_airport_list, so it comes from flightradar whenever it has the airport.
+    SELECT coalesce(va.iata, fa.iata) AS iata, coalesce(va.country, fa.country) AS country,
+           coalesce(va.city, fa.city) AS city, coalesce(va.airport_name, fa.airport_name) AS airport_name,
+           coalesce(va.lat, fa.lat) AS lat, coalesce(va.lon, fa.lon) AS lon
+    FROM va FULL OUTER JOIN fa ON va.iata = fa.iata
 ),
 panel AS (
     SELECT {_COLS} FROM forecast.acys_actuals WHERE "Date" IS NOT NULL {final_scope}
@@ -52,7 +57,8 @@ SELECT p.*, o.country, o.city, o.airport_name, d.country, d.city, d.airport_name
        o.lat, o.lon, d.lat, d.lon
 FROM panel p
 LEFT JOIN airports o ON o.iata = p."IATA Origin"
-LEFT JOIN airports d ON d.iata = p."IATA Destination"
+-- destination: prefer the ACTUAL landing airport, fall back to the planned destination
+LEFT JOIN airports d ON d.iata = coalesce(p."IATA Destination Actual", p."IATA Destination")
 """
 
 
