@@ -89,7 +89,7 @@ class ApiToken(Base):
 class ForecastLastRequest(Base):
     """The last POST /forecast/ trigger, so the portal can read back what was last run. core-api
     APPENDS one row per request; the GET returns the most recent (optionally per request_type).
-    ``request_type`` tags the algorithm ('1' = current Cirium×FR24 panel) so future algorithms/tables
+    ``request_type`` tags the algorithm ('ACYS' = current Cirium×FR24 panel) so future algorithms/tables
     can be told apart; ``request_params`` holds the exact trigger params (operator|registrations +
     date). ``created_at`` (from the tz mixin) is the request datetime.
     """
