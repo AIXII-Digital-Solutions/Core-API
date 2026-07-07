@@ -57,16 +57,17 @@ def _merge_sql(final_scope: str) -> str:
                            'coalesce(p."ICAO Destination Actual", p."ICAO Destination")')
     return f"""
 INSERT INTO forecast.acys_summary
-    ({_COLS},"Age",
+    ({_COLS},"Age","Data Type",
      "Origin Country","Origin City","Origin Airport Name",
      "Destination Country","Destination City","Destination Airport Name",
      origin_lat, origin_lon, dest_lat, dest_lon)
 WITH panel AS (
-    SELECT {_COLS} FROM forecast.acys_actuals WHERE "Date" IS NOT NULL {final_scope}
+    -- tag each branch so acys_summary rows carry Data Type = Actuals / Forecast
+    SELECT {_COLS}, 'Actuals' AS "Data Type" FROM forecast.acys_actuals WHERE "Date" IS NOT NULL {final_scope}
     UNION ALL
-    SELECT {_COLS} FROM forecast.acys_forecast
+    SELECT {_COLS}, 'Forecast' AS "Data Type" FROM forecast.acys_forecast
 )
-SELECT {_PROJ}, o.country, o.city, o.airport_name, d.country, d.city, d.airport_name,
+SELECT {_PROJ}, p."Data Type", o.country, o.city, o.airport_name, d.country, d.city, d.airport_name,
        o.lat, o.lon, d.lat, d.lon
 FROM panel p
 LEFT JOIN LATERAL {origin} o ON true
