@@ -28,12 +28,20 @@ INSERT INTO forecast.acys_summary
      "Destination Country","Destination City","Destination Airport Name",
      origin_lat, origin_lon, dest_lat, dest_lon)
 WITH airports AS (
-    SELECT DISTINCT ON ("IATA Code")
-           "IATA Code" AS iata, "Country" AS country, "City" AS city, "Airport Name" AS airport_name,
-           "Latitude" AS lat, "Longitude" AS lon
-    FROM main.virtual_airport_list
-    WHERE "IATA Code" IS NOT NULL AND "IATA Code" <> ''
-    ORDER BY "IATA Code"
+    -- primary main.virtual_airport_list, fallback flightradar.airports for IATAs missing there
+    -- (DISTINCT ON keeps pri=1 when present, else pri=2)
+    SELECT DISTINCT ON (iata) iata, country, city, airport_name, lat, lon
+    FROM (
+        SELECT "IATA Code" AS iata, "Country" AS country, "City" AS city,
+               "Airport Name" AS airport_name, "Latitude" AS lat, "Longitude" AS lon, 1 AS pri
+        FROM main.virtual_airport_list
+        WHERE "IATA Code" IS NOT NULL AND "IATA Code" <> ''
+        UNION ALL
+        SELECT iata, country_name, city, name, lat, lon, 2 AS pri
+        FROM flightradar.airports
+        WHERE iata IS NOT NULL AND iata <> ''
+    ) a
+    ORDER BY iata, pri
 ),
 panel AS (
     SELECT {_COLS} FROM forecast.acys_actuals WHERE "Date" IS NOT NULL {final_scope}
