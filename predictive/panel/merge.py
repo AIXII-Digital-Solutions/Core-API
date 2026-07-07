@@ -1,10 +1,10 @@
-"""Merge forecast.history_1 (FLIGHTS ONLY) + forecast.future_1 into forecast.final_1 (step 8) —
-standalone harness mirror of the production path (external-worker). Prefer POST /forecast.
+"""Merge forecast.acys_actuals (FLIGHTS ONLY) + forecast.acys_forecast into forecast.acys_summary
+(step 8) — standalone harness mirror of the production path (external-worker). Prefer POST /forecast.
 
-final_1 is per-request: TRUNCATEd and rebuilt. Pass --operator/--registrations to scope history_1
-to the current request (matching the endpoint); with no scope it takes ALL accumulated history.
-Adds the 3 columns (Contract Year / Circle Distance / Flight Time carried from history/future) and
-origin/destination airport geography from main.virtual_airport_list (deduped to one row per IATA).
+acys_summary is per-request: TRUNCATEd and rebuilt. Pass --operator/--registrations to scope
+acys_actuals to the current request (matching the endpoint); with no scope it takes ALL accumulated
+actuals. Adds origin/destination airport geography (Country/City/Airport Name + lat/lon) from
+main.virtual_airport_list (deduped to one row per IATA).
 """
 from __future__ import annotations
 
@@ -16,28 +16,32 @@ from predictive.db import DB
 _COLS = """"Registration","Period","Date","Time Departed","Time Landed",
        "IATA Origin","IATA Destination","IATA Destination Actual",
        "Operator","Master Series","Manufacturer","Aircraft Sub Series","Primary Usage",
-       "Contract Year","Circle Distance","Flight Time\""""
+       "Contract Year","Circle Distance","Flight Time",
+       "Agreed Value","Total Seats","Total PAX","Actual Distance FR","Flight Time FR\""""
 
 
 def _merge_sql(final_scope: str) -> str:
     return f"""
-INSERT INTO forecast.final_1
+INSERT INTO forecast.acys_summary
     ({_COLS},
      "Origin Country","Origin City","Origin Airport Name",
-     "Destination Country","Destination City","Destination Airport Name")
+     "Destination Country","Destination City","Destination Airport Name",
+     origin_lat, origin_lon, dest_lat, dest_lon)
 WITH airports AS (
     SELECT DISTINCT ON ("IATA Code")
-           "IATA Code" AS iata, "Country" AS country, "City" AS city, "Airport Name" AS airport_name
+           "IATA Code" AS iata, "Country" AS country, "City" AS city, "Airport Name" AS airport_name,
+           "Latitude" AS lat, "Longitude" AS lon
     FROM main.virtual_airport_list
     WHERE "IATA Code" IS NOT NULL AND "IATA Code" <> ''
     ORDER BY "IATA Code"
 ),
 panel AS (
-    SELECT {_COLS} FROM forecast.history_1 WHERE "Date" IS NOT NULL {final_scope}
+    SELECT {_COLS} FROM forecast.acys_actuals WHERE "Date" IS NOT NULL {final_scope}
     UNION ALL
-    SELECT {_COLS} FROM forecast.future_1
+    SELECT {_COLS} FROM forecast.acys_forecast
 )
-SELECT p.*, o.country, o.city, o.airport_name, d.country, d.city, d.airport_name
+SELECT p.*, o.country, o.city, o.airport_name, d.country, d.city, d.airport_name,
+       o.lat, o.lon, d.lat, d.lon
 FROM panel p
 LEFT JOIN airports o ON o.iata = p."IATA Origin"
 LEFT JOIN airports d ON d.iata = p."IATA Destination"
@@ -50,8 +54,8 @@ def _log(msg: str) -> None:
 
 async def merge_final(operator: str | None = None, registrations: list[str] | None = None,
                       *, truncate: bool = True) -> int:
-    """Rebuild forecast.final_1 from history_1 (flights only, optionally scoped to operator and/or
-    registrations = UNION) + future_1."""
+    """Rebuild forecast.acys_summary from acys_actuals (flights only, optionally scoped to operator
+    and/or registrations = UNION) + acys_forecast."""
     parts, args = [], []
     n = 0
     if operator:
@@ -62,19 +66,19 @@ async def merge_final(operator: str | None = None, registrations: list[str] | No
 
     async with DB(statement_timeout_ms=0) as db:
         if truncate:
-            await db.execute("TRUNCATE forecast.final_1")
+            await db.execute("TRUNCATE forecast.acys_summary")
         sql = _merge_sql(final_scope)
         tag = await (db.conn.execute(sql, *args) if args else db.conn.execute(sql))
         inserted = int(tag.rsplit(" ", 1)[-1]) if tag else 0
-    _log(f"[forecast.merge] final_1: {inserted} row(s) (history flights-only"
-         f"{' scoped' if args else ''} + future_1, airport-enriched)")
+    _log(f"[forecast.merge] acys_summary: {inserted} row(s) (actuals flights-only"
+         f"{' scoped' if args else ''} + acys_forecast, airport-enriched)")
     return inserted
 
 
 def _parse_args(argv=None):
-    p = argparse.ArgumentParser(description="Merge history_1 + future_1 -> final_1 (airport-enriched).")
-    p.add_argument("--operator", help="scope history_1 to this operator")
-    p.add_argument("--registrations", help="scope history_1 to these comma-separated registrations")
+    p = argparse.ArgumentParser(description="Merge acys_actuals + acys_forecast -> acys_summary.")
+    p.add_argument("--operator", help="scope acys_actuals to this operator")
+    p.add_argument("--registrations", help="scope acys_actuals to these comma-separated registrations")
     p.add_argument("--no-truncate", action="store_true", help="append instead of TRUNCATE+rebuild")
     return p.parse_args(argv)
 

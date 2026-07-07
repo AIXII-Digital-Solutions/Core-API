@@ -1,14 +1,16 @@
 """Forecast panel trigger + last-request read-back.
 
-POST /forecast/       — validate (operator OR registrations) and enqueue the external-worker
-                        `forecast_panel` job (build forecast.history_1 from Cirium × FR24, merge into
-                        forecast.final_1). Records the request in service.forecast_last_requests and
-                        returns the job_id. The worker publishes a SEQUENTIAL status per step, read
-                        from /status/{job_id} (poll) or /status/stream (SSE).
+POST /forecast/       — validate (operator and/or registrations) and enqueue the external-worker
+                        `forecast_panel` job (build forecast.acys_actuals from Cirium × FR24, merge
+                        into forecast.acys_summary). Records the request in
+                        service.forecast_last_requests and returns the job_id. The worker publishes a
+                        SEQUENTIAL status per step, read from /status/{job_id} (poll) or
+                        /status/stream (SSE).
 GET  /forecast/last   — the most recent trigger (datetime + request_type + params).
 
-history_1 accumulates across requests (this operator/tail slice is refreshed); future_1/final_1 are
-per-request. A `queued` status row is written up front so the job is pollable immediately.
+acys_actuals accumulates across requests (this operator/tail slice is refreshed);
+acys_forecast/acys_summary are per-request. A `queued` status row is written up front so the job is
+pollable immediately.
 """
 import json
 import uuid
@@ -73,8 +75,8 @@ async def _mark_queued(request: Request, job_id: str, label: str) -> None:
 
 @router.post(
     path="/",
-    description="Start the forecast panel build (Cirium × FR24 → forecast.final_1) for an operator "
-                "OR a list of registrations.",
+    description="Start the forecast panel build (Cirium × FR24 → forecast.acys_summary) for an "
+                "operator and/or a list of registrations.",
     status_code=status.HTTP_202_ACCEPTED,
     responses=build_responses(include={
         status.HTTP_202_ACCEPTED, status.HTTP_404_NOT_FOUND,
