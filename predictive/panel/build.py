@@ -39,7 +39,8 @@ INSERT INTO forecast.acys_actuals
      "ICAO Origin","ICAO Destination","ICAO Destination Actual",
      "Operator","Master Series","Manufacturer","Aircraft Sub Series","Primary Usage",
      "Contract Year","Circle Distance","Flight Time",
-     "Agreed Value","Total Seats","Total PAX","Actual Distance FR","Flight Time FR")
+     "Agreed Value","Total Seats","Total PAX","Actual Distance FR","Flight Time FR",
+     "Delivery Date","Lease Type","Lease Dry Wet","Operational Lessor")
 WITH array5 AS (
     SELECT DISTINCT ON (ca."Registration", to_date(r.period,'MM-YYYY'))
            ca."Registration" AS registration, r.period AS period,
@@ -48,7 +49,9 @@ WITH array5 AS (
            ca."Manufacturer" AS manufacturer, ca."Aircraft Sub Series" AS sub_series,
            ca."Primary Usage" AS primary_usage,
            ca."Indicative Market Value (US$m)" AS agreed_value,
-           ca."Number of Seats" AS total_seats
+           ca."Number of Seats" AS total_seats,
+           ca."Delivery Date" AS delivery_date, ca."Lease Type" AS lease_type,
+           ca."Lease Dry / Wet" AS lease_dry_wet, ca."Operational Lessor" AS operational_lessor
     FROM cirium.ciriumaircrafts ca
     JOIN cirium.aircraftrevision r ON r.id = ca.revision_id
     WHERE {a5_where}
@@ -76,7 +79,8 @@ SELECT a5.registration, a5.period, CAST(a6.flight_dt AS date),
        a5.operator, a5.master_series, a5.manufacturer, a5.sub_series, a5.primary_usage,
        {_CONTRACT_YEAR}, a6.circle_distance, (a6.datetime_landed - a6.datetime_takeoff),
        a5.agreed_value, a5.total_seats, a5.total_seats * CAST($5 AS double precision),
-       a6.circle_distance, {_FLIGHT_TIME_FR}
+       a6.circle_distance, {_FLIGHT_TIME_FR},
+       a5.delivery_date, a5.lease_type, a5.lease_dry_wet, a5.operational_lessor
 FROM array5 a5
 LEFT JOIN array6 a6
        ON a6.reg = a5.registration AND date_trunc('month', a6.flight_dt) = a5.period_month
