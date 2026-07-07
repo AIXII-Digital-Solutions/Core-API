@@ -35,7 +35,7 @@ logger = setup_logger("forecast_api")
 router = Router(prefix="/forecast", tags=["Forecast"])
 
 _REF = "forecast_panel"
-_REQUEST_TYPE = "1"                 # current Cirium×FR24 panel algorithm
+_REQUEST_TYPE = "ACYS"              # current Cirium×FR24 panel algorithm
 _STATUS_CHANNEL = "status:events"   # must match the workers' status.py / StatusCheck.py
 
 
@@ -149,7 +149,7 @@ async def start_forecast(body: ForecastRequest, request: Request, response: Resp
 )
 async def last_forecast(
     request: Request, response: Response,
-    request_type: Optional[str] = Query(None, description="Filter by request_type (e.g. '1')."),
+    request_type: Optional[str] = Query(None, description="Filter by request_type (e.g. 'ACYS')."),
 ):
     try:
         stmt = select(ForecastLastRequest).order_by(ForecastLastRequest.created_at.desc()).limit(1)
