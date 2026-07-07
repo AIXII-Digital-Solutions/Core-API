@@ -1,19 +1,22 @@
-"""Assemble forecast.history_1 (steps 5-7) — standalone harness mirror of the production path
+"""Assemble forecast.acys_actuals (steps 5-7) — standalone harness mirror of the production path
 (external-worker API/ForecastAPI/panel.py, which the POST /forecast endpoint drives). Prefer the
 endpoint; this CLI writes the SAME shared forecast.* tables.
 
-Modes: by --operator OR by --registrations. history_1 ACCUMULATES (only THIS scope is deleted+rebuilt,
-other operators/tails stay). See the endpoint/worker for the authoritative docstring.
+Modes: --operator and/or --registrations (UNION scope). acys_actuals ACCUMULATES (only THIS scope is
+deleted+rebuilt). See the endpoint/worker for the authoritative docstring.
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 from datetime import date
 
 from predictive.db import DB
 
 HISTORY_START = date(2023, 7, 1)
+# Total PAX = Total Seats * this load factor. Env-tunable; default 0.8 (same var as the worker).
+PAX_LOAD_FACTOR = float(os.getenv("FORECAST_PAX_LOAD_FACTOR", "0.8"))
 
 # Contract Year: fiscal window (anchored at the request date's month/day = $3/$4) containing the
 # flight date, labelled by its START year; NULL when there's no flight.
@@ -24,22 +27,27 @@ _CONTRACT_YEAR = """CASE WHEN a6.flight_dt IS NULL THEN NULL ELSE
         THEN 1 ELSE 0 END)::text
 END"""
 
+_FLIGHT_TIME_FR = "CASE WHEN a6.flight_time >= 0 THEN a6.flight_time * interval '1 second' ELSE NULL END"
+
 
 def _assemble_sql(a5_where: str) -> str:
-    # $1=start_date, $2=as_of, $3=anchor_month, $4=anchor_day, $5=scope
+    # $1=start_date $2=as_of $3=anchor_month $4=anchor_day $5=pax_factor, then scope $6..
     return f"""
-INSERT INTO forecast.history_1
+INSERT INTO forecast.acys_actuals
     ("Registration","Period","Date","Time Departed","Time Landed",
      "IATA Origin","IATA Destination","IATA Destination Actual",
      "Operator","Master Series","Manufacturer","Aircraft Sub Series","Primary Usage",
-     "Contract Year","Circle Distance","Flight Time")
+     "Contract Year","Circle Distance","Flight Time",
+     "Agreed Value","Total Seats","Total PAX","Actual Distance FR","Flight Time FR")
 WITH array5 AS (
     SELECT DISTINCT ON (ca."Registration", to_date(r.period,'MM-YYYY'))
            ca."Registration" AS registration, r.period AS period,
            to_date(r.period,'MM-YYYY') AS period_month,
            ca."Operator" AS operator, ca."Master Series" AS master_series,
            ca."Manufacturer" AS manufacturer, ca."Aircraft Sub Series" AS sub_series,
-           ca."Primary Usage" AS primary_usage
+           ca."Primary Usage" AS primary_usage,
+           ca."Indicative Market Value (US$m)" AS agreed_value,
+           ca."Number of Seats" AS total_seats
     FROM cirium.ciriumaircrafts ca
     JOIN cirium.aircraftrevision r ON r.id = ca.revision_id
     WHERE {a5_where}
@@ -48,7 +56,7 @@ WITH array5 AS (
 ),
 array6 AS (
     SELECT f.reg, f.datetime_takeoff, f.datetime_landed,
-           f.orig_iata, f.dest_iata, f.dest_iata_actual, f.circle_distance,
+           f.orig_iata, f.dest_iata, f.dest_iata_actual, f.circle_distance, f.flight_time,
            coalesce(f.datetime_takeoff, f.first_seen) AS flight_dt
     FROM flightradar.flightsummary f
     WHERE f.reg IN (SELECT registration FROM array5)
@@ -59,7 +67,9 @@ SELECT a5.registration, a5.period, CAST(a6.flight_dt AS date),
        a6.datetime_takeoff, a6.datetime_landed,
        a6.orig_iata, a6.dest_iata, a6.dest_iata_actual,
        a5.operator, a5.master_series, a5.manufacturer, a5.sub_series, a5.primary_usage,
-       {_CONTRACT_YEAR}, a6.circle_distance, (a6.datetime_landed - a6.datetime_takeoff)
+       {_CONTRACT_YEAR}, a6.circle_distance, (a6.datetime_landed - a6.datetime_takeoff),
+       a5.agreed_value, a5.total_seats, a5.total_seats * CAST($5 AS double precision),
+       a6.circle_distance, {_FLIGHT_TIME_FR}
 FROM array5 a5
 LEFT JOIN array6 a6
        ON a6.reg = a5.registration AND date_trunc('month', a6.flight_dt) = a5.period_month
@@ -72,15 +82,15 @@ def _log(msg: str) -> None:
 
 async def build_history(operator: str | None = None, registrations: list[str] | None = None,
                         *, as_of: date | None = None) -> int:
-    """Assemble forecast.history_1 for operator and/or registrations (UNION). history_1 accumulates
-    (only this scope is deleted+rebuilt). Returns rows inserted."""
+    """Assemble forecast.acys_actuals for operator and/or registrations (UNION). acys_actuals
+    accumulates (only this scope is deleted+rebuilt). Returns rows inserted."""
     if not operator and not registrations:
         raise ValueError("provide operator and/or registrations")
     as_of = as_of or date.today()
 
-    # assemble params: $1=start_date $2=as_of $3=anchor_month $4=anchor_day, then scope $5..
+    # assemble params: $1=start $2=as_of $3=month $4=day $5=pax_factor, then scope $6..
     a5, dele, scope_args, del_args = [], [], [], []
-    n, dn = 4, 0
+    n, dn = 5, 0
     if operator:
         n += 1; a5.append(f'ca."Operator" = ${n}'); scope_args.append(operator)
         dn += 1; dele.append(f'"Operator" = ${dn}'); del_args.append(operator)
@@ -88,19 +98,20 @@ async def build_history(operator: str | None = None, registrations: list[str] | 
         n += 1; a5.append(f'ca."Registration" = ANY(${n})'); scope_args.append(list(registrations))
         dn += 1; dele.append(f'"Registration" = ANY(${dn})'); del_args.append(list(registrations))
     a5_where = "(" + " OR ".join(a5) + ")"
-    del_sql = "DELETE FROM forecast.history_1 WHERE (" + " OR ".join(dele) + ")"
+    del_sql = "DELETE FROM forecast.acys_actuals WHERE (" + " OR ".join(dele) + ")"
 
     async with DB(statement_timeout_ms=0) as db:
         await db.conn.execute(del_sql, *del_args)                              # accumulate: this scope only
         tag = await db.conn.execute(_assemble_sql(a5_where),
-                                    HISTORY_START, as_of, as_of.month, as_of.day, *scope_args)
+                                    HISTORY_START, as_of, as_of.month, as_of.day, PAX_LOAD_FACTOR,
+                                    *scope_args)
         inserted = int(tag.rsplit(" ", 1)[-1]) if tag else 0
-    _log(f"[forecast.build] operator={operator} regs={registrations} as_of={as_of} -> history_1 +{inserted}")
+    _log(f"[forecast.build] operator={operator} regs={registrations} as_of={as_of} -> acys_actuals +{inserted}")
     return inserted
 
 
 def _parse_args(argv=None):
-    p = argparse.ArgumentParser(description="Assemble forecast.history_1 (operator and/or registrations).")
+    p = argparse.ArgumentParser(description="Assemble forecast.acys_actuals (operator and/or registrations).")
     p.add_argument("--operator", help='Cirium "Operator" value, e.g. "Avianca"')
     p.add_argument("--registrations", help="comma-separated registration list")
     p.add_argument("--as-of", type=date.fromisoformat, default=None,
