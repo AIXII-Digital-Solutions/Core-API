@@ -18,7 +18,20 @@ _COLS = """"Registration","Period","Date","Time Departed","Time Landed",
        "ICAO Origin","ICAO Destination","ICAO Destination Actual",
        "Operator","Master Series","Manufacturer","Aircraft Sub Series","Primary Usage",
        "Contract Year","Circle Distance","Flight Time",
-       "Agreed Value","Total Seats","Total PAX","Actual Distance FR","Flight Time FR\""""
+       "Agreed Value","Total Seats","Total PAX","Actual Distance FR","Flight Time FR",
+       "Delivery Date","Lease Type","Lease Dry Wet","Operational Lessor\""""
+
+# acys_summary projection: same order as _COLS, but Agreed Value = 0 for a Wet lease, then Age
+# (decimal years) appended. These two derivations are acys_summary-ONLY.
+_PROJ = """p."Registration", p."Period", p."Date", p."Time Departed", p."Time Landed",
+       p."IATA Origin", p."IATA Destination", p."IATA Destination Actual",
+       p."ICAO Origin", p."ICAO Destination", p."ICAO Destination Actual",
+       p."Operator", p."Master Series", p."Manufacturer", p."Aircraft Sub Series", p."Primary Usage",
+       p."Contract Year", p."Circle Distance", p."Flight Time",
+       CASE WHEN p."Lease Dry Wet" = 'Wet' THEN 0 ELSE p."Agreed Value" END,
+       p."Total Seats", p."Total PAX", p."Actual Distance FR", p."Flight Time FR",
+       p."Delivery Date", p."Lease Type", p."Lease Dry Wet", p."Operational Lessor",
+       round((p."Date" - p."Delivery Date")::numeric / 365.25, 2)"""
 
 
 # Airport lookup CHAIN for one airport: main.airports by IATA -> main.airports by ICAO ->
@@ -44,7 +57,7 @@ def _merge_sql(final_scope: str) -> str:
                            'coalesce(p."ICAO Destination Actual", p."ICAO Destination")')
     return f"""
 INSERT INTO forecast.acys_summary
-    ({_COLS},
+    ({_COLS},"Age",
      "Origin Country","Origin City","Origin Airport Name",
      "Destination Country","Destination City","Destination Airport Name",
      origin_lat, origin_lon, dest_lat, dest_lon)
@@ -53,7 +66,7 @@ WITH panel AS (
     UNION ALL
     SELECT {_COLS} FROM forecast.acys_forecast
 )
-SELECT p.*, o.country, o.city, o.airport_name, d.country, d.city, d.airport_name,
+SELECT {_PROJ}, o.country, o.city, o.airport_name, d.country, d.city, d.airport_name,
        o.lat, o.lon, d.lat, d.lon
 FROM panel p
 LEFT JOIN LATERAL {origin} o ON true
