@@ -27,50 +27,6 @@ class Registration(Base):
     airline: Mapped["Airlines"] = relationship("Airlines", lazy="selectin")
 
 
-class PredictiveUtilisation(Base):
-    """Stage-1 predictive-utilisation rows: each flightradar.flightsummary row in the past
-    window joined with its step-3.3 aircraft fields, scoped per airline by airline_icao.
-    Filled/replaced by external-worker (raw SQL); read-back endpoint is a later stage."""
-    airline_icao: Mapped[str] = mapped_column(String, index=True, nullable=True, default=None)
-
-    # --- flightradar.flightsummary columns ---
-    fr24_id: Mapped[str] = mapped_column(String, nullable=True, default=None)
-    flight: Mapped[str] = mapped_column(String, nullable=True, default=None)
-    callsign: Mapped[str] = mapped_column(String, nullable=True, default=None)
-    operating_as: Mapped[str] = mapped_column(String, nullable=True, default=None)
-    painted_as: Mapped[str] = mapped_column(String, nullable=True, default=None)
-    type: Mapped[str] = mapped_column(String, nullable=True, default=None)
-    reg: Mapped[str] = mapped_column(String, nullable=True, default=None)
-    orig_icao: Mapped[str] = mapped_column(String, nullable=True, default=None)
-    orig_iata: Mapped[str] = mapped_column(String, nullable=True, default=None)
-    datetime_takeoff: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True, default=None)
-    runway_takeoff: Mapped[str] = mapped_column(String, nullable=True, default=None)
-    dest_icao: Mapped[str] = mapped_column(String, nullable=True, default=None)
-    dest_iata: Mapped[str] = mapped_column(String, nullable=True, default=None)
-    dest_icao_actual: Mapped[str] = mapped_column(String, nullable=True, default=None)
-    dest_iata_actual: Mapped[str] = mapped_column(String, nullable=True, default=None)
-    datetime_landed: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True, default=None)
-    runway_landed: Mapped[str] = mapped_column(String, nullable=True, default=None)
-    flight_time: Mapped[int] = mapped_column(Integer, nullable=True, default=None)
-    actual_distance: Mapped[float] = mapped_column(Float, nullable=True, default=None)
-    circle_distance: Mapped[float] = mapped_column(Float, nullable=True, default=None)
-    category: Mapped[str] = mapped_column(String, nullable=True, default=None)
-    hex: Mapped[str] = mapped_column(String, nullable=True, default=None)
-    first_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True, default=None)
-    last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True, default=None)
-    flight_ended: Mapped[bool] = mapped_column(Boolean, nullable=True, default=None)
-
-    # --- step-3.3 aircraft fields (cirium.ciriumaircrafts, joined by reg) ---
-    msn: Mapped[str] = mapped_column(String, nullable=True, default=None)
-    airline: Mapped[str] = mapped_column(String, nullable=True, default=None)
-    status: Mapped[str] = mapped_column(String, nullable=True, default=None)
-    delivery_date: Mapped[date] = mapped_column(Date, nullable=True, default=None)
-    in_service_date: Mapped[date] = mapped_column(Date, nullable=True, default=None)
-    first_flight_date: Mapped[date] = mapped_column(Date, nullable=True, default=None)
-    indicative_value: Mapped[float] = mapped_column(Float, nullable=True, default=None)
-    num_of_seats: Mapped[int] = mapped_column(Integer, nullable=True, default=None)
-
-
 _current_module = sys.modules[__name__]
 
 __all__ = [
