@@ -7,17 +7,25 @@ they publish to as Server-Sent Events.
 """
 from typing import Optional
 
-from fastapi import Request, Response, Query, status
+from arq.jobs import Job
+from fastapi import Request, Response, Query, status, Depends
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 
+from Config import setup_logger
 from settings import Router
+from Queue import EXTERNAL_QUEUE
 from Database import JobStatus
+from api_auth import authorize
 from Utils import success_response, warning_response
+
+logger = setup_logger("status_api")
 
 router = Router(prefix="/status", tags=["Status"])
 
 STATUS_CHANNEL = "status:events"  # must match the workers' status.py
+_CANCEL_KEY = "job:cancel:{}"     # must match the worker's panel.py cooperative-cancel flag
+_TERMINAL = {"success", "error", "skipped", "cancelled"}
 
 
 def _serialize(j: JobStatus) -> dict:
@@ -89,3 +97,37 @@ async def get_status(job_id: str, request: Request, response: Response):
             status_code=status.HTTP_404_NOT_FOUND,
         )
     return success_response(request=request, response=response, data=_serialize(row))
+
+
+@router.post("/{job_id}/cancel", dependencies=[Depends(authorize())])
+async def cancel_status(job_id: str, request: Request, response: Response):
+    """Cancel a running job. Sets a cooperative Redis flag (checked by the worker's forecast/fetch loop,
+    which then stops with a terminal `cancelled` status) AND sends a generic ARQ abort so ANY job's
+    running task is cancelled. Idempotent: a job that already finished returns its state unchanged."""
+    async with request.app.state.db_client.session("service") as session:
+        row = (
+            await session.execute(select(JobStatus).where(JobStatus.job_id == job_id))
+        ).scalar_one_or_none()
+    if row is None:
+        return warning_response(request=request, response=response,
+                                msg=f"No job with id '{job_id}'",
+                                status_code=status.HTTP_404_NOT_FOUND)
+    if row.state in _TERMINAL:
+        return success_response(request=request, response=response,
+                                data={"job_id": job_id, "state": row.state},
+                                msg="Job already finished")
+    # 1) cooperative flag — the worker checks it and stops cleanly with a `cancelled` status
+    try:
+        await request.app.state.redis.set(_CANCEL_KEY.format(job_id), "1", ex=3600)
+    except Exception:
+        logger.exception("failed to set cancel flag for %s", job_id)
+    # 2) generic ARQ abort — cancels the running task for ANY job (backstop / non-cooperative jobs)
+    aborted = False
+    try:
+        job = Job(job_id, redis=request.state.arq, _queue_name=EXTERNAL_QUEUE)
+        aborted = await job.abort(timeout=2)
+    except Exception as _ex:
+        logger.warning("arq abort for %s failed: %s", job_id, _ex)
+    return success_response(request=request, response=response,
+                            data={"job_id": job_id, "aborted": aborted},
+                            msg="Cancellation requested")
