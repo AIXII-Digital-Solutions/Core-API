@@ -75,8 +75,9 @@ async def _mark_queued(request: Request, job_id: str, label: str) -> None:
 
 @router.post(
     path="/",
-    description="Start the forecast panel build (Cirium × FR24 → forecast.acys_summary) for an "
-                "operator and/or a list of registrations.",
+    description="Start the forecast panel build (Cirium × FR24 → forecast.acys_summary_by_day; "
+                "grouped rollup in the forecast.acys_summary_grouped view) for an operator and/or "
+                "a list of registrations.",
     status_code=status.HTTP_202_ACCEPTED,
     responses=build_responses(include={
         status.HTTP_202_ACCEPTED, status.HTTP_404_NOT_FOUND,
