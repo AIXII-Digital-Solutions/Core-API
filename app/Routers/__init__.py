@@ -8,7 +8,6 @@ from .FlightRadar import router as flight_radar
 from .Scheduler import router as scheduler
 from .QueueAdmin import router as queues
 from .Tokens import router as tokens
-from .PredictiveUtilisation import router as predictive_utilisation
 from .Airlines import router as airlines
 from .Forecast import router as forecast
 from .Registrations import router as registrations
