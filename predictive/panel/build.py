@@ -1,9 +1,12 @@
-"""Assemble forecast.acys_actuals (steps 5-7) — standalone harness mirror of the production path
-(external-worker API/ForecastAPI/panel.py, which the POST /forecast endpoint drives). Prefer the
-endpoint; this CLI writes the SAME shared forecast.* tables.
+"""Assemble forecast.acys_actuals — standalone harness mirror of the production path (external-worker
+API/ForecastAPI/panel.py, which the POST /forecast endpoint drives). Prefer the endpoint; this CLI
+writes the SAME shared forecast.* tables.
 
+One row per FLIGHT: Cirium aircraft (latest revision per Registration+Period-month, Period >= 07-2022)
+INNER-joined to its flightradar.flightsummary flight (matched by reg AND first_seen's month == Period
+month). Circle Distance is the GREAT-CIRCLE (haversine, km) between origin & destination coordinates.
 Modes: --operator and/or --registrations (UNION scope). acys_actuals ACCUMULATES (only THIS scope is
-deleted+rebuilt). See the endpoint/worker for the authoritative docstring.
+deleted+rebuilt).
 """
 from __future__ import annotations
 
@@ -13,25 +16,27 @@ import os
 from datetime import date
 
 from predictive.db import DB
+from predictive.panel._geo import ne, geo_lookup, great_circle
 
-HISTORY_START = date(2023, 7, 1)
+HISTORY_START = date(2022, 7, 1)   # Period >= 07-2022 (2.2) and flightsummary first_seen >= this
 # Total PAX = Total Seats * this load factor. Env-tunable; default 0.8 (same var as the worker).
 PAX_LOAD_FACTOR = float(os.getenv("FORECAST_PAX_LOAD_FACTOR", "0.8"))
 
 # Contract Year: fiscal window (anchored at the request date's month/day = $3/$4) containing the
-# flight date, labelled by its START year; NULL when there's no flight.
-_CONTRACT_YEAR = """CASE WHEN a6.flight_dt IS NULL THEN NULL ELSE
-    'CY' || (extract(year from a6.flight_dt)::int - CASE
-        WHEN extract(month from a6.flight_dt)::int < $3
-          OR (extract(month from a6.flight_dt)::int = $3 AND extract(day from a6.flight_dt)::int < $4)
-        THEN 1 ELSE 0 END)::text
-END"""
+# flight's first_seen, labelled by its START year.
+_CONTRACT_YEAR = """'CY' || (extract(year from a6.first_seen)::int - CASE
+        WHEN extract(month from a6.first_seen)::int < $3
+          OR (extract(month from a6.first_seen)::int = $3 AND extract(day from a6.first_seen)::int < $4)
+        THEN 1 ELSE 0 END)::text"""
 
 _FLIGHT_TIME_FR = "CASE WHEN a6.flight_time >= 0 THEN a6.flight_time * interval '1 second' ELSE NULL END"
 
 
 def _assemble_sql(a5_where: str) -> str:
     # $1=start_date $2=as_of $3=anchor_month $4=anchor_day $5=pax_factor, then scope $6..
+    o_geo = geo_lookup(ne("a6.orig_iata"), ne("a6.orig_icao"))
+    d_geo = geo_lookup(f'coalesce({ne("a6.dest_iata_actual")}, {ne("a6.dest_iata")})',
+                       f'coalesce({ne("a6.dest_icao_actual")}, {ne("a6.dest_icao")})')
     return f"""
 INSERT INTO forecast.acys_actuals
     ("Registration","Period","Date","Time Departed","Time Landed",
@@ -59,31 +64,32 @@ WITH array5 AS (
     ORDER BY ca."Registration", to_date(r.period,'MM-YYYY'), ca.revision_id DESC
 ),
 array6 AS (
-    SELECT f.reg, f.datetime_takeoff, f.datetime_landed,
+    SELECT f.reg, f.first_seen, f.datetime_takeoff, f.datetime_landed,
            f.orig_iata, f.dest_iata, f.dest_iata_actual,
            f.orig_icao, f.dest_icao, f.dest_icao_actual,
-           f.circle_distance, f.flight_time,
-           coalesce(f.datetime_takeoff, f.first_seen) AS flight_dt
+           f.actual_distance, f.flight_time
     FROM flightradar.flightsummary f
     WHERE f.reg IN (SELECT registration FROM array5)
-      AND coalesce(f.datetime_takeoff, f.first_seen) >= $1
-      AND coalesce(f.datetime_takeoff, f.first_seen) <  $2
-      -- drop a flight with NO origin, or NO destination (neither actual nor planned)
-      AND nullif(f.orig_iata, '') IS NOT NULL
-      AND coalesce(nullif(f.dest_iata_actual, ''), nullif(f.dest_iata, '')) IS NOT NULL
+      AND f.first_seen >= $1
+      AND f.first_seen <  $2
+      -- DROP a flight with NO ICAO origin, or NO ICAO destination (neither actual nor planned)
+      AND nullif(f.orig_icao, '') IS NOT NULL
+      AND coalesce(nullif(f.dest_icao_actual, ''), nullif(f.dest_icao, '')) IS NOT NULL
 )
-SELECT a5.registration, a5.period, CAST(a6.flight_dt AS date),
+SELECT a5.registration, a5.period, CAST(a6.first_seen AS date),
        a6.datetime_takeoff, a6.datetime_landed,
        a6.orig_iata, a6.dest_iata, a6.dest_iata_actual,
        a6.orig_icao, a6.dest_icao, a6.dest_icao_actual,
        a5.operator, a5.master_series, a5.manufacturer, a5.sub_series, a5.primary_usage,
-       {_CONTRACT_YEAR}, a6.circle_distance, (a6.datetime_landed - a6.datetime_takeoff),
+       {_CONTRACT_YEAR}, {great_circle('o', 'd')}, (a6.datetime_landed - a6.datetime_takeoff),
        a5.agreed_value, a5.total_seats, a5.total_seats * CAST($5 AS double precision),
-       a6.circle_distance, {_FLIGHT_TIME_FR},
+       a6.actual_distance, {_FLIGHT_TIME_FR},
        a5.delivery_date, a5.lease_type, a5.lease_dry_wet, a5.operational_lessor
 FROM array5 a5
-LEFT JOIN array6 a6
-       ON a6.reg = a5.registration AND date_trunc('month', a6.flight_dt) = a5.period_month
+JOIN array6 a6
+       ON a6.reg = a5.registration AND date_trunc('month', a6.first_seen) = a5.period_month
+LEFT JOIN LATERAL {o_geo} o ON true
+LEFT JOIN LATERAL {d_geo} d ON true
 """
 
 
