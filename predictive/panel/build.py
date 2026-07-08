@@ -70,7 +70,8 @@ array6 AS (
            f.actual_distance, f.flight_time
     FROM flightradar.flightsummary f
     WHERE f.reg IN (SELECT registration FROM array5)
-      AND f.first_seen >= $1
+      -- lower bound is ALWAYS the start of CY2022 (anchor month/day in 2022) -> CY2021 excluded
+      AND f.first_seen >= make_date(2022, $3, $4)
       AND f.first_seen <  $2
       -- DROP a flight with NO ICAO origin, or NO ICAO destination (neither actual nor planned)
       AND nullif(f.orig_icao, '') IS NOT NULL
