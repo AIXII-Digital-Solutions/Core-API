@@ -2,10 +2,10 @@
 
 POST /forecast/       — validate (operator and/or registrations) and enqueue the external-worker
                         `forecast_panel` job (build forecast.acys_actuals from Cirium × FR24, merge
-                        into forecast.acys_summary). Records the request in
-                        service.forecast_last_requests and returns the job_id. The worker publishes a
+                        into forecast.acys_summary_by_day). Returns the job_id. The worker publishes a
                         SEQUENTIAL status per step, read from /status/{job_id} (poll) or
-                        /status/stream (SSE).
+                        /status/stream (SSE), and writes the service.forecast_last_requests row ONLY
+                        after the whole panel finishes successfully (not at trigger time).
 GET  /forecast/last   — the most recent trigger (datetime + request_type + params).
 
 acys_actuals accumulates across requests (this operator/tail slice is refreshed);
@@ -114,13 +114,8 @@ async def start_forecast(body: ForecastRequest, request: Request, response: Resp
         job_id = uuid.uuid4().hex
         await _mark_queued(request, job_id, label)
 
-        # record the request for /forecast/last read-back
-        async with request.app.state.db_client.session("service") as session:
-            session.add(ForecastLastRequest(
-                request_type=_REQUEST_TYPE,
-                request_params={"operator": operator, "registrations": registrations, "date": as_of},
-            ))
-            await session.commit()
+        # NOTE: the forecast_last_requests row is written by the WORKER, and ONLY after the whole
+        # panel finishes successfully — not here at trigger time (a failed/cancelled run leaves no row).
 
         await request.state.arq.enqueue_job(
             _REF,
