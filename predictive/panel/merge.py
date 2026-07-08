@@ -1,10 +1,10 @@
-"""Merge forecast.acys_actuals (FLIGHTS ONLY) + forecast.acys_forecast into forecast.acys_summary
-(step 8) — standalone harness mirror of the production path (external-worker). Prefer POST /forecast.
+"""Merge forecast.acys_actuals (FLIGHTS ONLY) + forecast.acys_forecast into forecast.acys_summary —
+standalone harness mirror of the production path (external-worker). Prefer POST /forecast.
 
-acys_summary is per-request: TRUNCATEd and rebuilt. Pass --operator/--registrations to scope
-acys_actuals to the current request (matching the endpoint); with no scope it takes ALL accumulated
-actuals. Adds origin/destination airport geography (Country/City/Airport Name + lat/lon) from
-main.virtual_airport_list (deduped to one row per IATA).
+acys_summary is per-request: TRUNCATEd and rebuilt. Adds Age / origin+destination geography
+(Country/City/Airport Name + lat/lon) / # Of Flights / Data Type, applies the Wet rule (Agreed
+Value = 0), then GROUPS identical (aircraft, month, route) rows — summing Actual Distance FR,
+Circle Distance, Flight Time FR, Flight Time and counting # Of Flights.
 """
 from __future__ import annotations
 
@@ -12,8 +12,10 @@ import argparse
 import asyncio
 
 from predictive.db import DB
+from predictive.panel._geo import ne, geo_lookup
 
-_COLS = """"Registration","Period","Date","Time Departed","Time Landed",
+# Columns carried verbatim from acys_actuals / acys_forecast into the merge panel.
+_PANEL_COLS = """"Registration","Period","Date","Time Departed","Time Landed",
        "IATA Origin","IATA Destination","IATA Destination Actual",
        "ICAO Origin","ICAO Destination","ICAO Destination Actual",
        "Operator","Master Series","Manufacturer","Aircraft Sub Series","Primary Usage",
@@ -21,57 +23,71 @@ _COLS = """"Registration","Period","Date","Time Departed","Time Landed",
        "Agreed Value","Total Seats","Total PAX","Actual Distance FR","Flight Time FR",
        "Delivery Date","Lease Type","Lease Dry Wet","Operational Lessor\""""
 
-# acys_summary projection: same order as _COLS, but Agreed Value = 0 for a Wet lease, then Age
-# (decimal years) appended. These two derivations are acys_summary-ONLY.
-_PROJ = """p."Registration", p."Period", p."Date", p."Time Departed", p."Time Landed",
-       p."IATA Origin", p."IATA Destination", p."IATA Destination Actual",
-       p."ICAO Origin", p."ICAO Destination", p."ICAO Destination Actual",
-       p."Operator", p."Master Series", p."Manufacturer", p."Aircraft Sub Series", p."Primary Usage",
-       p."Contract Year", p."Circle Distance", p."Flight Time",
-       CASE WHEN p."Lease Dry Wet" = 'Wet' THEN 0 ELSE p."Agreed Value" END,
-       p."Total Seats", p."Total PAX", p."Actual Distance FR", p."Flight Time FR",
-       p."Delivery Date", p."Lease Type", p."Lease Dry Wet", p."Operational Lessor",
-       round((p."Date" - p."Delivery Date")::numeric / 365.25, 2)"""
-
-
-# Airport lookup CHAIN for one airport: main.airports by IATA -> main.airports by ICAO ->
-# flightradar.airports by IATA (pri orders the sources; LIMIT 1 = first that matched).
-def _airport_lookup(iata_expr: str, icao_expr: str) -> str:
-    return f"""(
-        SELECT city, country, airport_name, lat, lon FROM (
-            SELECT city, country, name AS airport_name, latitude AS lat, longitude AS lon, 1 AS pri
-              FROM main.airports WHERE iata = {iata_expr}
-            UNION ALL
-            SELECT city, country, name, latitude, longitude, 2
-              FROM main.airports WHERE icao = {icao_expr}
-            UNION ALL
-            SELECT city, country_name, name, lat, lon, 3
-              FROM flightradar.airports WHERE iata = {iata_expr}
-        ) s ORDER BY pri LIMIT 1
-    )"""
-
 
 def _merge_sql(final_scope: str) -> str:
-    origin = _airport_lookup('p."IATA Origin"', 'p."ICAO Origin"')
-    dest = _airport_lookup('coalesce(p."IATA Destination Actual", p."IATA Destination")',
-                           'coalesce(p."ICAO Destination Actual", p."ICAO Destination")')
+    o_geo = geo_lookup(ne('p."IATA Origin"'), ne('p."ICAO Origin"'))
+    dia, di = ne('p."IATA Destination Actual"'), ne('p."IATA Destination"')
+    dica, dic = ne('p."ICAO Destination Actual"'), ne('p."ICAO Destination"')
+    d_geo = geo_lookup(f"coalesce({dia}, {di})", f"coalesce({dica}, {dic})")
     return f"""
 INSERT INTO forecast.acys_summary
-    ({_COLS},"Age","Data Type",
+    ("Registration","Period","Date","Time Departed","Time Landed",
+     "IATA Origin","IATA Destination","IATA Destination Actual",
+     "ICAO Origin","ICAO Destination","ICAO Destination Actual",
+     "Operator","Master Series","Manufacturer","Aircraft Sub Series","Primary Usage",
+     "Contract Year","Circle Distance","Flight Time",
+     "Agreed Value","Total Seats","Total PAX","Actual Distance FR","Flight Time FR",
+     "Delivery Date","Lease Type","Lease Dry Wet","Operational Lessor",
+     "Age","Data Type","# Of Flights",
      "Origin Country","Origin City","Origin Airport Name",
      "Destination Country","Destination City","Destination Airport Name",
      origin_lat, origin_lon, dest_lat, dest_lon)
 WITH panel AS (
-    -- tag each branch so acys_summary rows carry Data Type = Actuals / Forecast
-    SELECT {_COLS}, 'Actuals' AS "Data Type" FROM forecast.acys_actuals WHERE "Date" IS NOT NULL {final_scope}
+    SELECT {_PANEL_COLS}, 'Actuals' AS "Data Type" FROM forecast.acys_actuals
+    WHERE "Date" IS NOT NULL {final_scope}
     UNION ALL
-    SELECT {_COLS}, 'Forecast' AS "Data Type" FROM forecast.acys_forecast
+    SELECT {_PANEL_COLS}, 'Forecast' AS "Data Type" FROM forecast.acys_forecast
+),
+enriched AS (
+    SELECT p.*,
+           o.city AS o_city, o.country AS o_country, o.airport_name AS o_name, o.lat AS o_lat, o.lon AS o_lon,
+           d.city AS d_city, d.country AS d_country, d.airport_name AS d_name, d.lat AS d_lat, d.lon AS d_lon
+    FROM panel p
+    LEFT JOIN LATERAL {o_geo} o ON true
+    LEFT JOIN LATERAL {d_geo} d ON true
 )
-SELECT {_PROJ}, p."Data Type", o.country, o.city, o.airport_name, d.country, d.city, d.airport_name,
-       o.lat, o.lon, d.lat, d.lon
-FROM panel p
-LEFT JOIN LATERAL {origin} o ON true
-LEFT JOIN LATERAL {dest} d ON true
+SELECT
+    "Registration","Period",
+    min("Date"), min("Time Departed"), max("Time Landed"),
+    "IATA Origin","IATA Destination","IATA Destination Actual",
+    "ICAO Origin","ICAO Destination","ICAO Destination Actual",
+    "Operator","Master Series","Manufacturer","Aircraft Sub Series","Primary Usage",
+    "Contract Year",
+    sum("Circle Distance"),
+    sum("Flight Time"),
+    CASE WHEN "Lease Dry Wet" = 'Wet' THEN 0 ELSE "Agreed Value" END,
+    "Total Seats","Total PAX",
+    sum("Actual Distance FR"),
+    sum("Flight Time FR"),
+    "Delivery Date","Lease Type","Lease Dry Wet","Operational Lessor",
+    round((min("Date") - "Delivery Date")::numeric / 365.25, 2),
+    "Data Type",
+    count(*),
+    o_country, o_city, o_name,
+    d_country, d_city, d_name,
+    o_lat, o_lon, d_lat, d_lon
+FROM enriched
+GROUP BY
+    "Registration","Period",
+    "IATA Origin","IATA Destination","IATA Destination Actual",
+    "ICAO Origin","ICAO Destination","ICAO Destination Actual",
+    "Operator","Master Series","Manufacturer","Aircraft Sub Series","Primary Usage",
+    "Contract Year",
+    "Agreed Value","Total Seats","Total PAX",
+    "Delivery Date","Lease Type","Lease Dry Wet","Operational Lessor",
+    "Data Type",
+    o_country, o_city, o_name, o_lat, o_lon,
+    d_country, d_city, d_name, d_lat, d_lon
 """
 
 
@@ -82,7 +98,7 @@ def _log(msg: str) -> None:
 async def merge_final(operator: str | None = None, registrations: list[str] | None = None,
                       *, truncate: bool = True) -> int:
     """Rebuild forecast.acys_summary from acys_actuals (flights only, optionally scoped to operator
-    and/or registrations = UNION) + acys_forecast."""
+    and/or registrations = UNION) + acys_forecast, grouped by (aircraft, month, route)."""
     parts, args = [], []
     n = 0
     if operator:
@@ -97,7 +113,7 @@ async def merge_final(operator: str | None = None, registrations: list[str] | No
         sql = _merge_sql(final_scope)
         tag = await (db.conn.execute(sql, *args) if args else db.conn.execute(sql))
         inserted = int(tag.rsplit(" ", 1)[-1]) if tag else 0
-    _log(f"[forecast.merge] acys_summary: {inserted} row(s) (actuals flights-only"
+    _log(f"[forecast.merge] acys_summary: {inserted} grouped row(s) (actuals flights-only"
          f"{' scoped' if args else ''} + acys_forecast, airport-enriched)")
     return inserted
 
