@@ -3,7 +3,7 @@ import sys
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import String, Integer, DateTime, Index, Boolean
+from sqlalchemy import String, Integer, DateTime, Index, Boolean, Float
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.dialects.postgresql import JSONB
 
@@ -97,6 +97,27 @@ class ForecastLastRequest(Base):
 
     request_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     request_params: Mapped[dict] = mapped_column(JSONB, nullable=False)
+
+
+class ForecastStepTiming(Base):
+    """Self-calibration ledger for the forecast panel's progress/ETA model. The worker APPENDS one row
+    per COMPLETED step of every run: the ``step`` key (search|fetch|assemble|forecast|merge), its measured
+    wall-clock ``duration_s`` and the ``units`` of work it processed (registrations / requests / operators /
+    flights — step-dependent), plus a free-form ``context`` describing the request (ranges, counts). The
+    next run reads a recent moving average of duration-per-unit per step to estimate ETA WITHOUT hardcoded
+    constants (constants seed only the very first run, before this ledger has data). Written by external-worker
+    via raw SQL; core-api owns the schema. Rows are cheap (~5 per run) and read within a recent time window.
+    """
+    __tablename__ = "forecast_step_timings"
+
+    step: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    duration_s: Mapped[float] = mapped_column(Float, nullable=False)
+    units: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    context: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+
+    __table_args__ = (
+        Index("ix_forecast_step_timings_step_created", "step", "created_at"),
+    )
 
 
 _current_module = sys.modules[__name__]
