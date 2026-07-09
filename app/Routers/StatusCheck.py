@@ -26,6 +26,9 @@ router = Router(prefix="/status", tags=["Status"])
 STATUS_CHANNEL = "status:events"  # must match the workers' status.py
 _CANCEL_KEY = "job:cancel:{}"     # must match the worker's panel.py cooperative-cancel flag
 _TERMINAL = {"success", "error", "skipped", "cancelled"}
+# SSE keepalive: emit a comment at least this often even with no status events, so an idle stretch never
+# trips a reverse-proxy read timeout (nginx proxy_read_timeout defaults to 60s) and drops the stream.
+_SSE_KEEPALIVE_SECONDS = 15
 
 
 def _serialize(j: JobStatus) -> dict:
@@ -63,14 +66,33 @@ async def list_status(
 
 @router.get("/stream")
 async def stream_status(request: Request):
-    """Server-Sent Events: live job-status updates published by the workers."""
+    """Server-Sent Events: live job-status updates published by the workers.
+
+    Robust against reverse-proxy idle timeouts: emits a `: ping` comment every _SSE_KEEPALIVE_SECONDS
+    even when no status event is flowing (between jobs, or during a quiet step), so nginx never sees the
+    stream go silent and never drops the upstream. `X-Accel-Buffering: no` disables nginx buffering so
+    each event (and ping) reaches the client immediately. The loop also stops promptly on client
+    disconnect. The channel is global; consumers filter by `job_id` client-side."""
     redis = request.app.state.redis
 
     async def event_gen():
         pubsub = redis.pubsub()
         await pubsub.subscribe(STATUS_CHANNEL)
         try:
-            async for msg in pubsub.listen():
+            yield ": connected\n\n"   # first bytes immediately so the stream is established
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    msg = await pubsub.get_message(ignore_subscribe_messages=True,
+                                                   timeout=_SSE_KEEPALIVE_SECONDS)
+                except Exception as _ex:      # transient pubsub read error — ping and retry
+                    logger.warning("status stream read error: %s", _ex)
+                    yield ": ping\n\n"
+                    continue
+                if msg is None:               # no event within the window -> keepalive
+                    yield ": ping\n\n"
+                    continue
                 if msg.get("type") != "message":
                     continue
                 data = msg["data"]
@@ -78,10 +100,17 @@ async def stream_status(request: Request):
                     data = data.decode()
                 yield f"data: {data}\n\n"
         finally:
-            await pubsub.unsubscribe(STATUS_CHANNEL)
-            await pubsub.aclose()
+            try:
+                await pubsub.unsubscribe(STATUS_CHANNEL)
+                await pubsub.aclose()
+            except Exception:
+                pass
 
-    return StreamingResponse(event_gen(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_gen(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive",
+                 "X-Accel-Buffering": "no"},
+    )
 
 
 @router.get("/{job_id}")
