@@ -19,7 +19,8 @@ _TABLE = """
 CREATE TABLE forecast.acys_forecast_coefficients (
     id                     bigserial PRIMARY KEY,
     "Operator"             text    NOT NULL,
-    "Master Series"        text    NOT NULL,          -- sub-fleet (aircraft type)
+    "Master Series"        text,                       -- broader type (for chart grouping)
+    "Aircraft Sub Series"  text    NOT NULL,          -- the forecast SUB-FLEET key (fit/fleet/routes group by this)
     "Forecast Month"       date    NOT NULL,          -- 1st of the forecast month
     "Calendar Month"       integer NOT NULL,          -- 1..12 (month-of-year, for the seasonal curve)
     "Frontier"             date,                       -- last complete actual month (the fit boundary)
@@ -53,7 +54,7 @@ END $$;
 def upgrade() -> None:
     op.execute(_TABLE)
     op.execute('CREATE INDEX ix_acys_fc_coeff_operator ON forecast.acys_forecast_coefficients ("Operator")')
-    op.execute('CREATE INDEX ix_acys_fc_coeff_op_sf ON forecast.acys_forecast_coefficients ("Operator", "Master Series")')
+    op.execute('CREATE INDEX ix_acys_fc_coeff_op_sf ON forecast.acys_forecast_coefficients ("Operator", "Aircraft Sub Series")')
     op.execute(_GRANT)
 
 
