@@ -34,6 +34,29 @@ def _dateint(col: str) -> str:
 _MK = """"Registration" || '|' || coalesce("Aircraft Sub Series",'') || '|' || "Period\""""
 _PERIOD_DATE = """to_date("Period", 'MM-YYYY')"""
 
+# The "Date" column is day-precise, aligned to the CY anchor: it is `as_of.day + 1` of each Period month (the
+# day AFTER the anchor day, e.g. 16-Sep for a 15-Sep anchor), EXCEPT the HORIZON month, which is `as_of.day`
+# (the last forecast day, e.g. 15-Sep). as_of.day and the horizon month are read from `max("Date")` in
+# acys_summary_by_day (the horizon carries as_of.day). Days are clamped to the month length so a large
+# as_of.day never overflows make_date. `a` is the CROSS-JOINed single-row anchor CTE below.
+# "DateInt" AND "ROUTE_KEY" are derived from this SAME day-precise date (not the 1st) so all three agree:
+# the PowerBI matrix pulls its displayed date from the calendar dimension via the DateInt join, so DateInt
+# must point at the anchor day (16-Sep), otherwise the join lands on the 1st and the visual would read 01-Sep.
+# by_reg's DateInt derives from grouped."Date", so it follows automatically.
+_ANCHOR_CTE = """anchor AS (
+    SELECT extract(day from mx)::int AS anchor_day, date_trunc('month', mx)::date AS horizon_month
+    FROM (SELECT max("Date") AS mx FROM forecast.acys_summary_by_day) t
+)"""
+
+
+def _period_daily() -> str:
+    pd = _PERIOD_DATE
+    dim = f"extract(day from (date_trunc('month', {pd}) + interval '1 month' - interval '1 day'))::int"
+    y, mo = f"extract(year from {pd})::int", f"extract(month from {pd})::int"
+    return (f"""CASE WHEN date_trunc('month', {pd}) = a.horizon_month
+                THEN make_date({y}, {mo}, LEAST(a.anchor_day, {dim}))
+                ELSE make_date({y}, {mo}, LEAST(a.anchor_day + 1, {dim})) END""")
+
 # OD City&Country: "O (Country) & D (Country)"; concat_ws skips a NULL side, nullif drops the all-NULL case
 _OD = """nullif(concat_ws(' & ', "Origin City&Country", "Destination City&Country"), '')"""
 
@@ -68,7 +91,7 @@ _GROUP_COLS = """"Registration","Period",
 # GROUP BY columns, so the hash of them is one-to-one with the row. It is content-derived, hence STABLE
 # across refreshes (unlike row_number(), which would renumber and break PowerBI relationships). ROW(...)::text
 # canonically encodes NULLs and quoting, so distinct rows never collide into the same hash input.
-_ROUTE_KEY = (f"""{_MK} || '|' || ({_dateint(_PERIOD_DATE)})::text """
+_ROUTE_KEY = (f"""{_MK} || '|' || ({_dateint(_period_daily())})::text """
               """|| '|' || coalesce("IATA Origin",'') || '|' || coalesce("IATA Destination",'') """
               f"""|| '|' || md5(ROW({_GROUP_COLS})::text)""")
 
@@ -104,12 +127,13 @@ cyv AS (
            sum(av.v * av.flights) / nullif(sum(av.flights), 0)  AS awavg
     FROM av
     GROUP BY av.reg, av.cy
-)
+),
+{_ANCHOR_CTE}
 SELECT
     {_MK} AS "MERGED_KEY",
 {routekey}    {_GROUP_COLS},
-    {_PERIOD_DATE} AS "Date",
-    {_dateint(_PERIOD_DATE)} AS "DateInt",
+    {_period_daily()} AS "Date",
+    {_dateint(_period_daily())} AS "DateInt",
 {od}{_AGG},
     max(cyv.inception) AS "Agreed Value on Inception",
     max(cyv.at_end)    AS "Agreed Value at the End of the Contract",
@@ -117,7 +141,8 @@ SELECT
     max(cyv.awavg)     AS "Activity-Weighted Average Agreed Value"
 FROM forecast.acys_summary_by_day s
 LEFT JOIN cyv ON cyv.reg = s."Registration" AND cyv.cy = s."Contract Year"
-GROUP BY {_GROUP_COLS}
+CROSS JOIN anchor a
+GROUP BY {_GROUP_COLS}, a.anchor_day, a.horizon_month
 """
 
 
