@@ -118,7 +118,7 @@ _ROUTE_KEY = (f"""{_MK} || '|' || ({_dateint(_period_daily())})::text """
               f"""|| '|' || md5(ROW({_GROUP_COLS})::text)""")
 
 _AGG = """    min("Age")                AS "Age",
-    count(*)                  AS "# Of Flights",
+    count(s."Date")           AS "# Of Flights",
     sum("Circle Distance")    AS "Circle Distance",
     sum("Actual Distance FR") AS "Actual Distance FR",
     sum("Flight Time")        AS "Flight Time",
