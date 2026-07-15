@@ -34,18 +34,31 @@ def _dateint(col: str) -> str:
 _MK = """"Registration" || '|' || coalesce("Aircraft Sub Series",'') || '|' || "Period\""""
 _PERIOD_DATE = """to_date("Period", 'MM-YYYY')"""
 
-# The "Date" column is day-precise, aligned to the CY anchor: it is `as_of.day + 1` of each Period month (the
-# day AFTER the anchor day, e.g. 16-Sep for a 15-Sep anchor), EXCEPT the HORIZON month, which is `as_of.day`
-# (the last forecast day, e.g. 15-Sep). as_of.day and the horizon month are read from `max("Date")` in
-# acys_summary_by_day (the horizon carries as_of.day). Days are clamped to the month length so a large
-# as_of.day never overflows make_date. `a` is the CROSS-JOINed single-row anchor CTE below.
-# "DateInt" AND "ROUTE_KEY" are derived from this SAME day-precise date (not the 1st) so all three agree:
-# the PowerBI matrix pulls its displayed date from the calendar dimension via the DateInt join, so DateInt
-# must point at the anchor day (16-Sep), otherwise the join lands on the 1st and the visual would read 01-Sep.
-# by_reg's DateInt derives from grouped."Date", so it follows automatically.
+# The "Date" column is day-precise and aligned to the Contract-Year boundary. A Contract Year runs
+# (anchor_day+1)-<anchor_month> .. anchor_day-<anchor_month> of the next year (e.g. CY2025 = 19-Aug-2025 ..
+# 18-Aug-2026 for an 18-Aug anchor). So:
+#   * a NON-anchor-month cell sits at `anchor_day + 1` of its month (the canonical within-CY day), and
+#   * the ANCHOR month (= as_of.month, e.g. August) SPLITS into the two CYs that share it:
+#       - the ENDING half  (rows whose CY = year(Period) - 1, i.e. days 1..anchor_day) -> `anchor_day`
+#       - the STARTING half (rows whose CY = year(Period),   i.e. days anchor_day+1..EOM) -> `anchor_day + 1`
+#     So at each CY boundary you get e.g. `CY2025 18/08/2026` AND `CY2026 19/08/2026`. The global forecast
+#     horizon is just the terminal ENDING half (its anchor month has only the CY=year-1 rows), hence anchor_day.
+# TWO higher-priority overrides handle the Actuals->Forecast seam, which falls mid-month (forecast starts at
+# last_fact+1 = today, so the LAST actual day and FIRST forecast day sit inside the same month):
+#   * the Actuals cell of the month that holds the last actual  -> that exact last-actual date  (e.g. 14/07/2026)
+#   * the Forecast cell of the month that holds the first forecast -> that exact first-forecast date (15/07/2026)
+# so the seam reads Actuals 14/07 / Forecast 15/07 instead of both collapsing onto the canonical 19/07.
+# anchor_day/anchor_month/last_actual/first_forecast all come from acys_summary_by_day. Days are clamped to the
+# month length so a large as_of.day never overflows make_date. "DateInt" AND "ROUTE_KEY" derive from this SAME
+# day-precise date so all three agree AND each cell maps, via the DateInt calendar join, back onto its OWN CY in
+# z_dates_acys (18-Aug -> CY2025, 19-Aug -> CY2026). by_reg's DateInt derives from grouped."Date", so it follows.
 _ANCHOR_CTE = """anchor AS (
-    SELECT extract(day from mx)::int AS anchor_day, date_trunc('month', mx)::date AS horizon_month
-    FROM (SELECT max("Date") AS mx FROM forecast.acys_summary_by_day) t
+    SELECT extract(day from mx)::int AS anchor_day, extract(month from mx)::int AS anchor_month,
+           la AS last_actual, ff AS first_forecast
+    FROM (SELECT max("Date") AS mx,
+                 max("Date") FILTER (WHERE "Data Type" = 'Actuals')  AS la,
+                 min("Date") FILTER (WHERE "Data Type" = 'Forecast') AS ff
+          FROM forecast.acys_summary_by_day) t
 )"""
 
 
@@ -53,7 +66,16 @@ def _period_daily() -> str:
     pd = _PERIOD_DATE
     dim = f"extract(day from (date_trunc('month', {pd}) + interval '1 month' - interval '1 day'))::int"
     y, mo = f"extract(year from {pd})::int", f"extract(month from {pd})::int"
-    return (f"""CASE WHEN date_trunc('month', {pd}) = a.horizon_month
+    # "Contract Year" is text 'CY2026'; its 4-digit year. The ENDING half of the anchor month has CY = y-1.
+    cy_year = 'right("Contract Year", 4)::int'
+    return (f"""CASE
+                WHEN "Data Type" = 'Actuals'
+                     AND date_trunc('month', {pd}) = date_trunc('month', a.last_actual)
+                THEN a.last_actual
+                WHEN "Data Type" = 'Forecast'
+                     AND date_trunc('month', {pd}) = date_trunc('month', a.first_forecast)
+                THEN a.first_forecast
+                WHEN {mo} = a.anchor_month AND {cy_year} = {y} - 1
                 THEN make_date({y}, {mo}, LEAST(a.anchor_day, {dim}))
                 ELSE make_date({y}, {mo}, LEAST(a.anchor_day + 1, {dim})) END""")
 
@@ -142,7 +164,7 @@ SELECT
 FROM forecast.acys_summary_by_day s
 LEFT JOIN cyv ON cyv.reg = s."Registration" AND cyv.cy = s."Contract Year"
 CROSS JOIN anchor a
-GROUP BY {_GROUP_COLS}, a.anchor_day, a.horizon_month
+GROUP BY {_GROUP_COLS}, a.anchor_day, a.anchor_month, a.last_actual, a.first_forecast
 """
 
 
