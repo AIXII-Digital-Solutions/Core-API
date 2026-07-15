@@ -34,6 +34,51 @@ def _dateint(col: str) -> str:
 _MK = """"Registration" || '|' || coalesce("Aircraft Sub Series",'') || '|' || "Period\""""
 _PERIOD_DATE = """to_date("Period", 'MM-YYYY')"""
 
+# The "Date" column is day-precise and aligned to the Contract-Year boundary. A Contract Year runs
+# (anchor_day+1)-<anchor_month> .. anchor_day-<anchor_month> of the next year (e.g. CY2025 = 19-Aug-2025 ..
+# 18-Aug-2026 for an 18-Aug anchor). So:
+#   * a NON-anchor-month cell sits at `anchor_day + 1` of its month (the canonical within-CY day), and
+#   * the ANCHOR month (= as_of.month, e.g. August) SPLITS into the two CYs that share it:
+#       - the ENDING half  (rows whose CY = year(Period) - 1, i.e. days 1..anchor_day) -> `anchor_day`
+#       - the STARTING half (rows whose CY = year(Period),   i.e. days anchor_day+1..EOM) -> `anchor_day + 1`
+#     So at each CY boundary you get e.g. `CY2025 18/08/2026` AND `CY2026 19/08/2026`. The global forecast
+#     horizon is just the terminal ENDING half (its anchor month has only the CY=year-1 rows), hence anchor_day.
+# TWO higher-priority overrides handle the Actuals->Forecast seam, which falls mid-month (forecast starts at
+# last_fact+1 = today, so the LAST actual day and FIRST forecast day sit inside the same month):
+#   * the Actuals cell of the month that holds the last actual  -> that exact last-actual date  (e.g. 14/07/2026)
+#   * the Forecast cell of the month that holds the first forecast -> that exact first-forecast date (15/07/2026)
+# so the seam reads Actuals 14/07 / Forecast 15/07 instead of both collapsing onto the canonical 19/07.
+# anchor_day/anchor_month/last_actual/first_forecast all come from acys_summary_by_day. Days are clamped to the
+# month length so a large as_of.day never overflows make_date. "DateInt" AND "ROUTE_KEY" derive from this SAME
+# day-precise date so all three agree AND each cell maps, via the DateInt calendar join, back onto its OWN CY in
+# z_dates_acys (18-Aug -> CY2025, 19-Aug -> CY2026). by_reg's DateInt derives from grouped."Date", so it follows.
+_ANCHOR_CTE = """anchor AS (
+    SELECT extract(day from mx)::int AS anchor_day, extract(month from mx)::int AS anchor_month,
+           la AS last_actual, ff AS first_forecast
+    FROM (SELECT max("Date") AS mx,
+                 max("Date") FILTER (WHERE "Data Type" = 'Actuals')  AS la,
+                 min("Date") FILTER (WHERE "Data Type" = 'Forecast') AS ff
+          FROM forecast.acys_summary_by_day) t
+)"""
+
+
+def _period_daily() -> str:
+    pd = _PERIOD_DATE
+    dim = f"extract(day from (date_trunc('month', {pd}) + interval '1 month' - interval '1 day'))::int"
+    y, mo = f"extract(year from {pd})::int", f"extract(month from {pd})::int"
+    # "Contract Year" is text 'CY2026'; its 4-digit year. The ENDING half of the anchor month has CY = y-1.
+    cy_year = 'right("Contract Year", 4)::int'
+    return (f"""CASE
+                WHEN "Data Type" = 'Actuals'
+                     AND date_trunc('month', {pd}) = date_trunc('month', a.last_actual)
+                THEN a.last_actual
+                WHEN "Data Type" = 'Forecast'
+                     AND date_trunc('month', {pd}) = date_trunc('month', a.first_forecast)
+                THEN a.first_forecast
+                WHEN {mo} = a.anchor_month AND {cy_year} = {y} - 1
+                THEN make_date({y}, {mo}, LEAST(a.anchor_day, {dim}))
+                ELSE make_date({y}, {mo}, LEAST(a.anchor_day + 1, {dim})) END""")
+
 # OD City&Country: "O (Country) & D (Country)"; concat_ws skips a NULL side, nullif drops the all-NULL case
 _OD = """nullif(concat_ws(' & ', "Origin City&Country", "Destination City&Country"), '')"""
 
@@ -68,7 +113,7 @@ _GROUP_COLS = """"Registration","Period",
 # GROUP BY columns, so the hash of them is one-to-one with the row. It is content-derived, hence STABLE
 # across refreshes (unlike row_number(), which would renumber and break PowerBI relationships). ROW(...)::text
 # canonically encodes NULLs and quoting, so distinct rows never collide into the same hash input.
-_ROUTE_KEY = (f"""{_MK} || '|' || ({_dateint(_PERIOD_DATE)})::text """
+_ROUTE_KEY = (f"""{_MK} || '|' || ({_dateint(_period_daily())})::text """
               """|| '|' || coalesce("IATA Origin",'') || '|' || coalesce("IATA Destination",'') """
               f"""|| '|' || md5(ROW({_GROUP_COLS})::text)""")
 
@@ -104,12 +149,13 @@ cyv AS (
            sum(av.v * av.flights) / nullif(sum(av.flights), 0)  AS awavg
     FROM av
     GROUP BY av.reg, av.cy
-)
+),
+{_ANCHOR_CTE}
 SELECT
     {_MK} AS "MERGED_KEY",
 {routekey}    {_GROUP_COLS},
-    {_PERIOD_DATE} AS "Date",
-    {_dateint(_PERIOD_DATE)} AS "DateInt",
+    {_period_daily()} AS "Date",
+    {_dateint(_period_daily())} AS "DateInt",
 {od}{_AGG},
     max(cyv.inception) AS "Agreed Value on Inception",
     max(cyv.at_end)    AS "Agreed Value at the End of the Contract",
@@ -117,7 +163,8 @@ SELECT
     max(cyv.awavg)     AS "Activity-Weighted Average Agreed Value"
 FROM forecast.acys_summary_by_day s
 LEFT JOIN cyv ON cyv.reg = s."Registration" AND cyv.cy = s."Contract Year"
-GROUP BY {_GROUP_COLS}
+CROSS JOIN anchor a
+GROUP BY {_GROUP_COLS}, a.anchor_day, a.anchor_month, a.last_actual, a.first_forecast
 """
 
 
