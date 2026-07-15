@@ -37,6 +37,17 @@ _PERIOD_DATE = """to_date("Period", 'MM-YYYY')"""
 # OD City&Country: "O (Country) & D (Country)"; concat_ws skips a NULL side, nullif drops the all-NULL case
 _OD = """nullif(concat_ws(' & ', "Origin City&Country", "Destination City&Country"), '')"""
 
+# City Route — an UNDIRECTED "City (Country)" pair for distance analysis: origin & destination
+# "City (Country)" labels sorted, joined with ' - ', so a route and its reverse collapse to ONE value
+# ("Sharjah (United Arab Emirates) - Karachi (Pakistan)" AND the reverse both become
+# "Karachi (Pakistan) - Sharjah (United Arab Emirates)"). Uses City&Country (not bare City) so same-named
+# cities in different countries stay distinct. NULL unless BOTH endpoints are known.
+_CITY_ROUTE = ("""CASE WHEN nullif("Origin City&Country",'') IS NOT NULL
+                    AND nullif("Destination City&Country",'') IS NOT NULL
+               THEN LEAST("Origin City&Country","Destination City&Country") || ' - '
+                    || GREATEST("Origin City&Country","Destination City&Country")
+               ELSE NULL END""")
+
 _GROUP_COLS = """"Registration","Period",
     "IATA Origin","IATA Destination","IATA Destination Actual",
     "ICAO Origin","ICAO Destination","ICAO Destination Actual",
@@ -75,7 +86,8 @@ _WAVG = ("((array_agg(av.v ORDER BY av.mon))[1] + "
 
 def _grouped(route_cols: bool) -> str:
     routekey = f'    {_ROUTE_KEY} AS "ROUTE_KEY",\n' if route_cols else ""
-    od = f'    {_OD} AS "OD City&Country",\n' if route_cols else ""
+    od = (f'    {_OD} AS "OD City&Country",\n'
+          f'    {_CITY_ROUTE} AS "City Route",\n') if route_cols else ""
     return f"""
 CREATE MATERIALIZED VIEW forecast.acys_summary_grouped AS
 WITH av AS (
@@ -176,9 +188,12 @@ WITH b AS (
     FROM forecast.acys_summary_grouped
 ),
 anchor AS (
+    -- The CY anchor DAY is as_of.day. The forecast horizon ends exactly on as_of + FORECAST_HORIZON_YEARS
+    -- and the horizon month is prorated to as_of.day, so the overall max("Date") IS (as_of.month, as_of.day).
+    -- Do NOT use the first forecast date: the forecast now starts at last_fact+1 (which can be EARLIER than
+    -- as_of), so its month/day is not the CY anchor — only the horizon carries as_of.day.
     SELECT coalesce(
-        (SELECT min("Date") FROM forecast.acys_summary_by_day WHERE "Data Type" = 'Forecast'),
-        (SELECT max("Date") + 1 FROM forecast.acys_summary_by_day),
+        (SELECT max("Date") FROM forecast.acys_summary_by_day),
         DATE '2022-07-01'
     ) AS d
 ),
