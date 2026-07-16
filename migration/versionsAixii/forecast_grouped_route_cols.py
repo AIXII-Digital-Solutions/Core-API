@@ -129,12 +129,13 @@ _WAVG = ("((array_agg(av.v ORDER BY av.mon))[1] + "
          "(array_agg(av.v ORDER BY av.mon DESC))[1]) / 2.0")
 
 
-def _age_group() -> str:
+def _age_group(delivery: str = '"Delivery Date"') -> str:
     # "Age Group" — the aircraft's age (years) bucketed into fixed bands. The number prefix ('1. …') is part of
     # the label ON PURPOSE so PowerBI sorts the bands correctly. Age = the min flight "Age" of the bucket, else
     # (a flightless fleet-presence stub) from the delivery date to the bucket's month; NULL delivery -> NULL.
-    age = (f'coalesce(min("Age"), CASE WHEN "Delivery Date" IS NOT NULL '
-           f'THEN GREATEST(0, ({_PERIOD_DATE} - "Delivery Date")::numeric / 365.25) END)')
+    # `delivery` is the delivery-date expression (a group column in the matview/by_reg, an aggregate elsewhere).
+    age = (f'coalesce(min("Age"), CASE WHEN {delivery} IS NOT NULL '
+           f'THEN GREATEST(0, ({_PERIOD_DATE} - {delivery})::numeric / 365.25) END)')
     return f"""CASE
         WHEN ({age}) IS NULL THEN NULL
         WHEN ({age}) < 1  THEN '1. Less than one year'
@@ -238,9 +239,29 @@ SELECT
     max("Agreed Value")       AS "Agreed Value",
     {_lease("Lease Type")},
     {_lease("Lease Dry Wet")},
-    {_lease("Operational Lessor")}
+    {_lease("Operational Lessor")},
+    {_age_group('max("Delivery Date")')} AS "Age Group"
 FROM forecast.acys_summary_grouped_by_reg
 GROUP BY "Registration", "Aircraft Sub Series", "Period"
+"""
+
+# powerbi.z_age_group — a static dimension of the 10 Age-Group bands (a PowerBI slicer / relationship target).
+# The label carries its own number prefix so it both displays and SORTS in order; the column is named exactly
+# "Age Group" to match the fact tables.
+_Z_AGE_GROUP = """
+CREATE VIEW powerbi.z_age_group AS
+SELECT v."Age Group" FROM (VALUES
+    ('1. Less than one year'),
+    ('2. From 1 to 2 years'),
+    ('3. From 2 to 4 years'),
+    ('4. From 4 to 6 years'),
+    ('5. From 6 to 8 years'),
+    ('6. From 8 to 10 years'),
+    ('7. From 10 to 12 years'),
+    ('8. From 12 to 14 years'),
+    ('9. From 14 to 16 years'),
+    ('10. More than 16 years')
+) AS v("Age Group")
 """
 
 _CY = """'CY' || (extract(year from d."Date")::int - CASE
@@ -297,7 +318,7 @@ BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
       EXECUTE format('GRANT SELECT ON forecast.acys_summary_grouped, '
                      'forecast.acys_summary_grouped_by_reg, forecast.aircraft_information, '
-                     'powerbi.z_dates_acys TO %I', r);
+                     'powerbi.z_dates_acys, powerbi.z_age_group TO %I', r);
     END IF;
   END LOOP;
 END $$;
@@ -311,10 +332,12 @@ _INDEXES = [
     'CREATE INDEX ix_acys_grouped_date ON forecast.acys_summary_grouped ("Date")',
     'CREATE INDEX ix_acys_grouped_mkey ON forecast.acys_summary_grouped ("MERGED_KEY")',
     'CREATE INDEX ix_acys_grouped_dateint ON forecast.acys_summary_grouped ("DateInt")',
+    'CREATE INDEX ix_acys_grouped_agegroup ON forecast.acys_summary_grouped ("Age Group")',
 ]
 
 
 def _drop_chain() -> None:
+    op.execute("DROP VIEW IF EXISTS powerbi.z_age_group")
     op.execute("DROP VIEW IF EXISTS powerbi.z_dates_acys")
     op.execute("DROP VIEW IF EXISTS forecast.aircraft_information")
     op.execute("DROP VIEW IF EXISTS forecast.acys_summary_grouped_by_reg")
@@ -329,6 +352,7 @@ def _rebuild(route_cols: bool) -> None:
     op.execute(_BY_REG)
     op.execute(_AIRCRAFT_INFO)
     op.execute(_Z_DATES_ACYS)
+    op.execute(_Z_AGE_GROUP)
     op.execute(_GRANTS)
 
 
