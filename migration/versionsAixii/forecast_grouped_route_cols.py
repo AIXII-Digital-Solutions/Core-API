@@ -129,6 +129,26 @@ _WAVG = ("((array_agg(av.v ORDER BY av.mon))[1] + "
          "(array_agg(av.v ORDER BY av.mon DESC))[1]) / 2.0")
 
 
+def _age_group() -> str:
+    # "Age Group" — the aircraft's age (years) bucketed into fixed bands. The number prefix ('1. …') is part of
+    # the label ON PURPOSE so PowerBI sorts the bands correctly. Age = the min flight "Age" of the bucket, else
+    # (a flightless fleet-presence stub) from the delivery date to the bucket's month; NULL delivery -> NULL.
+    age = (f'coalesce(min("Age"), CASE WHEN "Delivery Date" IS NOT NULL '
+           f'THEN GREATEST(0, ({_PERIOD_DATE} - "Delivery Date")::numeric / 365.25) END)')
+    return f"""CASE
+        WHEN ({age}) IS NULL THEN NULL
+        WHEN ({age}) < 1  THEN '1. Less than one year'
+        WHEN ({age}) < 2  THEN '2. From 1 to 2 years'
+        WHEN ({age}) < 4  THEN '3. From 2 to 4 years'
+        WHEN ({age}) < 6  THEN '4. From 4 to 6 years'
+        WHEN ({age}) < 8  THEN '5. From 6 to 8 years'
+        WHEN ({age}) < 10 THEN '6. From 8 to 10 years'
+        WHEN ({age}) < 12 THEN '7. From 10 to 12 years'
+        WHEN ({age}) < 14 THEN '8. From 12 to 14 years'
+        WHEN ({age}) < 16 THEN '9. From 14 to 16 years'
+        ELSE '10. More than 16 years' END"""
+
+
 def _grouped(route_cols: bool) -> str:
     routekey = f'    {_ROUTE_KEY} AS "ROUTE_KEY",\n' if route_cols else ""
     od = (f'    {_OD} AS "OD City&Country",\n'
@@ -160,7 +180,8 @@ SELECT
     max(cyv.inception) AS "Agreed Value on Inception",
     max(cyv.at_end)    AS "Agreed Value at the End of the Contract",
     max(cyv.wavg)      AS "Weighted Average Agreed Value",
-    max(cyv.awavg)     AS "Activity-Weighted Average Agreed Value"
+    max(cyv.awavg)     AS "Activity-Weighted Average Agreed Value",
+    {_age_group()} AS "Age Group"
 FROM forecast.acys_summary_by_day s
 LEFT JOIN cyv ON cyv.reg = s."Registration" AND cyv.cy = s."Contract Year"
 CROSS JOIN anchor a
@@ -191,7 +212,8 @@ SELECT
     max("Agreed Value on Inception")               AS "Agreed Value on Inception",
     max("Agreed Value at the End of the Contract") AS "Agreed Value at the End of the Contract",
     max("Weighted Average Agreed Value")           AS "Weighted Average Agreed Value",
-    max("Activity-Weighted Average Agreed Value")  AS "Activity-Weighted Average Agreed Value"
+    max("Activity-Weighted Average Agreed Value")  AS "Activity-Weighted Average Agreed Value",
+    {_age_group()}                                 AS "Age Group"
 FROM forecast.acys_summary_grouped
 GROUP BY
 {_BY_REG_KEYS}
