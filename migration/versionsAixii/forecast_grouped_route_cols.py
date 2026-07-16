@@ -1,17 +1,20 @@
-"""acys_summary_grouped gains two columns:
-  * "ROUTE_KEY"        = MERGED_KEY | DateInt | IATA Origin | IATA Destination  (a row-grain composite key:
-                         aircraft-month + calendar-int + the route, on top of MERGED_KEY's aircraft-month).
+"""acys_summary_grouped route/geo columns (this migration is the source-of-truth body for the whole
+forecast view chain; it is edited in place and re-materialised via downgrade+upgrade).
+
+acys_summary_grouped carries, on top of the GROUP-BY columns:
+  * "ROUTE_KEY"        = MERGED_KEY | DateInt | IATA Origin | IATA Destination + md5(row) — a row-grain,
+                         refresh-STABLE unique key.
   * "OD City&Country"  = "Origin City&Country" & "Destination City&Country"  ('Attock (Pakistan) & Doha
                          (Qatar)') — origin and destination geography in one label.
+  * "City Pairs"       = UNDIRECTED "City (Country)" pair (sorted, reverse collapses). (renamed from the
+                         former "City Route".)
+  * "Country Pairs"    = UNDIRECTED origin/destination country pair (sorted; domestic -> single country name).
+  * "Age Group"        = the aircraft's age bucketed into 10 number-prefixed bands (also on by_reg).
+All are computed from columns already in the matview's GROUP BY, so they add no new grain.
 
-Both are computed from columns already in the matview's GROUP BY, so they add no new grain. The matview is
-rebuilt (with the dependency chain z_dates_acys / grouped_by_reg / aircraft_information) — only
-acys_summary_grouped carries the new columns; grouped_by_reg / aircraft_information are per-aircraft and drop
-the route/geo dimensions, so they are recreated unchanged (latest definitions: grouped_by_reg WITH DateInt,
-aircraft_information WITH the 'Not Leased' relabel).
-
-The matview/view bodies are inlined verbatim from the current head (forecast_dateint_join grouped/by_reg +
-forecast_aircraft_not_leased aircraft_information + zdates_cy_indata z_dates_acys) plus the two new columns.
+The matview is rebuilt with its dependency chain (z_age_group / z_dates_acys / aircraft_information /
+grouped_by_reg). aircraft_information additionally carries "Age Group" and "Current Family" — the latter read
+from Cirium's current snapshot per registration (cross-schema join to cirium.ciriumaircrafts).
 
 Revision ID: forecast_grouped_route_cols
 Revises: forecast_aircraft_not_leased
@@ -82,7 +85,7 @@ def _period_daily() -> str:
 # OD City&Country: "O (Country) & D (Country)"; concat_ws skips a NULL side, nullif drops the all-NULL case
 _OD = """nullif(concat_ws(' & ', "Origin City&Country", "Destination City&Country"), '')"""
 
-# City Route — an UNDIRECTED "City (Country)" pair for distance analysis: origin & destination
+# City Pairs — an UNDIRECTED "City (Country)" pair for distance analysis: origin & destination
 # "City (Country)" labels sorted, joined with ' - ', so a route and its reverse collapse to ONE value
 # ("Sharjah (United Arab Emirates) - Karachi (Pakistan)" AND the reverse both become
 # "Karachi (Pakistan) - Sharjah (United Arab Emirates)"). Uses City&Country (not bare City) so same-named
@@ -92,6 +95,16 @@ _CITY_ROUTE = ("""CASE WHEN nullif("Origin City&Country",'') IS NOT NULL
                THEN LEAST("Origin City&Country","Destination City&Country") || ' - '
                     || GREATEST("Origin City&Country","Destination City&Country")
                ELSE NULL END""")
+
+# Country Pairs — the COUNTRY-level analogue of City Pairs: an UNDIRECTED origin/destination country pair,
+# sorted LEAST/GREATEST so a pair and its reverse are ONE value. A DOMESTIC flight (both endpoints in the same
+# country) collapses to the single country name ("United Arab Emirates") rather than "X - X". NULL unless BOTH
+# country endpoints are known.
+_COUNTRY_ROUTE = ("""CASE
+               WHEN nullif("Origin Country",'') IS NULL OR nullif("Destination Country",'') IS NULL THEN NULL
+               WHEN "Origin Country" = "Destination Country" THEN "Origin Country"
+               ELSE LEAST("Origin Country","Destination Country") || ' - '
+                    || GREATEST("Origin Country","Destination Country") END""")
 
 _GROUP_COLS = """"Registration","Period",
     "IATA Origin","IATA Destination","IATA Destination Actual",
@@ -153,7 +166,8 @@ def _age_group(delivery: str = '"Delivery Date"') -> str:
 def _grouped(route_cols: bool) -> str:
     routekey = f'    {_ROUTE_KEY} AS "ROUTE_KEY",\n' if route_cols else ""
     od = (f'    {_OD} AS "OD City&Country",\n'
-          f'    {_CITY_ROUTE} AS "City Route",\n') if route_cols else ""
+          f'    {_CITY_ROUTE} AS "City Pairs",\n'
+          f'    {_COUNTRY_ROUTE} AS "Country Pairs",\n') if route_cols else ""
     return f"""
 CREATE MATERIALIZED VIEW forecast.acys_summary_grouped AS
 WITH av AS (
@@ -225,8 +239,22 @@ def _lease(col: str) -> str:
     return f"coalesce(nullif(max(\"{col}\"),''), 'Not Leased') AS \"{col}\""
 
 
+# aircraft_information also carries "Current Family" — the aircraft's CURRENT family (e.g. 'A320 Family'),
+# read from Cirium's newest snapshot per registration: the latest revision of EACH plan_type (Commercial +
+# Business&Helicopters) and then, per tail, the newest (revision_id, id). Joined on Registration (family is a
+# per-tail current attribute, not per-period). Wet-lease / carry-forward tails absent from the current Cirium
+# roster get NULL — the same tails that already have NULL for the other 'current' Cirium attributes.
 _AIRCRAFT_INFO = f"""
 CREATE VIEW forecast.aircraft_information AS
+WITH latest_rev AS (
+    SELECT DISTINCT ON (plan_type) id FROM cirium.aircraftrevision
+    ORDER BY plan_type, to_date(period,'MM-YYYY') DESC, id DESC
+),
+cur_family AS (
+    SELECT DISTINCT ON (ca."Registration") ca."Registration" AS reg, ca."Current Family" AS cf
+    FROM cirium.ciriumaircrafts ca JOIN latest_rev lr ON lr.id = ca.revision_id
+    ORDER BY ca."Registration", ca.revision_id DESC, ca.id DESC
+)
 SELECT
     {_MK}                     AS "MERGED_KEY",
     "Registration",
@@ -240,8 +268,10 @@ SELECT
     {_lease("Lease Type")},
     {_lease("Lease Dry Wet")},
     {_lease("Operational Lessor")},
+    max(cf.cf)                AS "Current Family",
     {_age_group('max("Delivery Date")')} AS "Age Group"
 FROM forecast.acys_summary_grouped_by_reg
+LEFT JOIN cur_family cf ON cf.reg = "Registration"
 GROUP BY "Registration", "Aircraft Sub Series", "Period"
 """
 
@@ -335,6 +365,13 @@ _INDEXES = [
     'CREATE INDEX ix_acys_grouped_agegroup ON forecast.acys_summary_grouped ("Age Group")',
 ]
 
+# Indexes over the route/geo-only columns — created ONLY when route_cols=True (the upgrade path); the
+# route_cols=False downgrade matview does not carry these columns.
+_ROUTE_INDEXES = [
+    'CREATE INDEX ix_acys_grouped_citypairs ON forecast.acys_summary_grouped ("City Pairs")',
+    'CREATE INDEX ix_acys_grouped_countrypairs ON forecast.acys_summary_grouped ("Country Pairs")',
+]
+
 
 def _drop_chain() -> None:
     op.execute("DROP VIEW IF EXISTS powerbi.z_age_group")
@@ -348,6 +385,9 @@ def _rebuild(route_cols: bool) -> None:
     op.execute(_grouped(route_cols))
     for ix in _INDEXES:
         op.execute(ix)
+    if route_cols:
+        for ix in _ROUTE_INDEXES:
+            op.execute(ix)
     op.execute(_OWNER)
     op.execute(_BY_REG)
     op.execute(_AIRCRAFT_INFO)
