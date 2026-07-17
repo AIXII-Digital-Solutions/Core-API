@@ -350,12 +350,24 @@ cys AS (
     SELECT DISTINCT "Contract Year" cy
     FROM forecast.acys_summary_by_day
     WHERE "Contract Year" IS NOT NULL
+),
+-- The Actuals/Forecast split is a single cut DATE: the forecast starts the day AFTER the last actual, so
+-- actuals and forecast never share a day and `max(Actuals date)` labels the whole daily calendar. A date is
+-- 'Actuals' iff it is on/before that cut, else 'Forecast' — the gap day (last_fact+1, if the monthly-dated
+-- forecast's first row lands later) falls to Forecast, which is right since the forecast horizon opens there.
+-- coalesce keeps an actuals-less table (before the first run) from labelling everything 'Actuals'.
+split AS (
+    SELECT coalesce(max("Date"), DATE '2022-07-01') AS actual_hi
+    FROM forecast.acys_summary_by_day
+    WHERE "Data Type" = 'Actuals' AND "Date" IS NOT NULL
 )
 SELECT d.*, cys.cy AS "Contract Year",
-       {_MONTH_SORT_IN_CY} AS "MonthSortInContractYear"
+       {_MONTH_SORT_IN_CY} AS "MonthSortInContractYear",
+       CASE WHEN d."Date" <= s.actual_hi THEN 'Actuals' ELSE 'Forecast' END AS "Data Type"
 FROM powerbi.z_dates d
 CROSS JOIN b
 CROSS JOIN anchor a
+CROSS JOIN split s
 LEFT JOIN cys ON cys.cy = {_CY}
 WHERE d."Date" >= b.lo
   AND d."Date" <= b.hi
