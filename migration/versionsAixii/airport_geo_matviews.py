@@ -98,14 +98,46 @@ BEGIN
 END $$;
 """
 
+# A REFRESH runs the matview's body as its OWNER, so the owner needs SELECT on every SOURCE — not just the
+# refreshing role. main.airports and flightradar.airports were already readable by grp_aviation_write;
+# main.virtual_airport_list was not (only svc_external_worker had a direct grant), so the first REFRESH from
+# the worker died with "permission denied for table virtual_airport_list" even though the worker itself can
+# read it. Granting the OWNER role is what matters here.
+_SOURCE_GRANTS = """
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'grp_aviation_write')
+     AND EXISTS (SELECT 1 FROM pg_tables WHERE schemaname='main' AND tablename='virtual_airport_list') THEN
+    EXECUTE 'GRANT USAGE ON SCHEMA main TO grp_aviation_write';
+    EXECUTE 'GRANT SELECT ON main.virtual_airport_list TO grp_aviation_write';
+  END IF;
+END $$;
+"""
+
+# REFRESH MATERIALIZED VIEW requires OWNERSHIP — it is not a privilege GRANT can hand out. external-worker
+# refreshes both at the start of its transform step, so they must be owned by a role it is a member of, or it
+# dies with "permission denied for materialized view". Same reason forecast.acys_summary_grouped is handed to
+# grp_aviation_write in forecast_grouped_route_cols. Guarded so a cluster without the role still migrates.
+_OWNER = """
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'grp_aviation_write') THEN
+    EXECUTE 'ALTER MATERIALIZED VIEW flightradar.airport_geo_by_iata OWNER TO grp_aviation_write';
+    EXECUTE 'ALTER MATERIALIZED VIEW flightradar.airport_geo_by_icao OWNER TO grp_aviation_write';
+  END IF;
+END $$;
+"""
+
 
 def upgrade() -> None:
+    op.execute(_SOURCE_GRANTS)   # the owner must be able to read the sources BEFORE it ever refreshes
     op.execute("DROP MATERIALIZED VIEW IF EXISTS flightradar.airport_geo_by_iata")
     op.execute("DROP MATERIALIZED VIEW IF EXISTS flightradar.airport_geo_by_icao")
     op.execute(_BY_IATA)
     op.execute(_BY_ICAO)
     for ix in _INDEXES:
         op.execute(ix)
+    op.execute(_OWNER)
     op.execute(_GRANTS)
 
 

@@ -299,6 +299,15 @@ _CY = """'CY' || (extract(year from d."Date")::int - CASE
                   <= (extract(month from a.d)::int, extract(day from a.d)::int)
              THEN 1 ELSE 0 END)::text"""
 
+# "MonthSortInContractYear" — the month's ORDINAL inside the Contract Year, 1..12, so a report can order the
+# months the way the contract runs instead of Jan..Dec. The CY opens in the anchor month (= as_of's month), so
+# with a September anchor: Sep -> 1, Oct -> 2, Nov -> 3, ... Aug -> 12. Pure month arithmetic modulo 12.
+# NB the CY boundary is DAY-precise, so the anchor month itself appears at BOTH ends of a Contract Year (e.g.
+# CY2025 = 18-Sep-2025 .. 17-Sep-2026) and both halves get ordinal 1 — which is what "September is the first
+# month of the contract year" means. Slice by "Contract Year" as well and the two halves never mix.
+_MONTH_SORT_IN_CY = """((extract(month from d."Date")::int
+                         - extract(month from a.d)::int + 12) % 12) + 1"""
+
 _Z_DATES_ACYS = f"""
 CREATE VIEW powerbi.z_dates_acys AS
 WITH b AS (
@@ -322,7 +331,8 @@ cys AS (
     FROM forecast.acys_summary_by_day
     WHERE "Contract Year" IS NOT NULL
 )
-SELECT d.*, cys.cy AS "Contract Year"
+SELECT d.*, cys.cy AS "Contract Year",
+       {_MONTH_SORT_IN_CY} AS "MonthSortInContractYear"
 FROM powerbi.z_dates d
 CROSS JOIN b
 CROSS JOIN anchor a
