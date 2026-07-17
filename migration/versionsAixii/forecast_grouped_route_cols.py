@@ -367,9 +367,33 @@ _INDEXES = [
 
 # Indexes over the route/geo-only columns — created ONLY when route_cols=True (the upgrade path); the
 # route_cols=False downgrade matview does not carry these columns.
+#
+# THIS LIST IS THE SOURCE OF TRUTH for the matview's geo indexes: DROP MATERIALIZED VIEW takes its indexes
+# with it, so anything not listed here silently disappears the next time the chain is rebuilt. (The one-off
+# migration `forecast_geo_indexes` creates the same set on an ALREADY-BUILT matview so no rebuild was needed
+# to get them live — keep the two in sync.)
+#
+# Only columns worth FILTERING on are indexed. Evidence (pg_stat_user_indexes over 19 days of live use):
+# ix_acys_grouped_citypairs = 34,429 scans, so PowerBI really does filter server-side here. Deliberately NOT
+# indexed: "Operator" / "Manufacturer" / "Primary Usage" (distinct = 1 — an index can never help), and the
+# ICAO trio (on flightradar.flightsummary the ICAO columns score 0 scans against 291,700 for IATA — nothing
+# filters on ICAO).
 _ROUTE_INDEXES = [
     'CREATE INDEX ix_acys_grouped_citypairs ON forecast.acys_summary_grouped ("City Pairs")',
     'CREATE INDEX ix_acys_grouped_countrypairs ON forecast.acys_summary_grouped ("Country Pairs")',
+    # origin & destination geography — the "OD City&Country" label plus each side on its own
+    'CREATE INDEX ix_acys_grouped_od ON forecast.acys_summary_grouped ("OD City&Country")',
+    'CREATE INDEX ix_acys_grouped_o_citycountry ON forecast.acys_summary_grouped ("Origin City&Country")',
+    'CREATE INDEX ix_acys_grouped_d_citycountry ON forecast.acys_summary_grouped ("Destination City&Country")',
+    'CREATE INDEX ix_acys_grouped_o_country ON forecast.acys_summary_grouped ("Origin Country")',
+    'CREATE INDEX ix_acys_grouped_d_country ON forecast.acys_summary_grouped ("Destination Country")',
+    'CREATE INDEX ix_acys_grouped_o_city ON forecast.acys_summary_grouped ("Origin City")',
+    'CREATE INDEX ix_acys_grouped_d_city ON forecast.acys_summary_grouped ("Destination City")',
+    'CREATE INDEX ix_acys_grouped_o_airport ON forecast.acys_summary_grouped ("Origin Airport Name")',
+    'CREATE INDEX ix_acys_grouped_d_airport ON forecast.acys_summary_grouped ("Destination Airport Name")',
+    'CREATE INDEX ix_acys_grouped_iata_o ON forecast.acys_summary_grouped ("IATA Origin")',
+    'CREATE INDEX ix_acys_grouped_iata_d ON forecast.acys_summary_grouped ("IATA Destination")',
+    'CREATE INDEX ix_acys_grouped_iata_da ON forecast.acys_summary_grouped ("IATA Destination Actual")',
 ]
 
 
