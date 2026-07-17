@@ -299,15 +299,18 @@ _CY = """'CY' || (extract(year from d."Date")::int - CASE
                   <= (extract(month from a.d)::int, extract(day from a.d)::int)
              THEN 1 ELSE 0 END)::text"""
 
+# "MonthSortInContractYear" — the month's ORDINAL inside the Contract Year, 1..12, so a report can order the
+# months the way the contract runs instead of Jan..Dec. The CY opens in the anchor month (= as_of's month), so
+# with a September anchor: Sep -> 1, Oct -> 2, Nov -> 3, ... Aug -> 12. Pure month arithmetic modulo 12.
+# NB the CY boundary is DAY-precise, so the anchor month itself appears at BOTH ends of a Contract Year (e.g.
+# CY2025 = 18-Sep-2025 .. 17-Sep-2026) and both halves get ordinal 1 — which is what "September is the first
+# month of the contract year" means. Slice by "Contract Year" as well and the two halves never mix.
+_MONTH_SORT_IN_CY = """((extract(month from d."Date")::int
+                         - extract(month from a.d)::int + 12) % 12) + 1"""
+
 _Z_DATES_ACYS = f"""
 CREATE VIEW powerbi.z_dates_acys AS
-WITH b AS (
-    SELECT date_trunc('month', min("Date"))::date                      AS lo,
-           (date_trunc('month', max("Date")) + INTERVAL '1 month'
-                                             - INTERVAL '1 day')::date AS hi
-    FROM forecast.acys_summary_grouped
-),
-anchor AS (
+WITH anchor AS (
     -- The CY anchor DAY is as_of.day. The forecast horizon ends exactly on as_of + FORECAST_HORIZON_YEARS
     -- and the horizon month is prorated to as_of.day, so the overall max("Date") IS (as_of.month, as_of.day).
     -- Do NOT use the first forecast date: the forecast now starts at last_fact+1 (which can be EARLIER than
@@ -317,18 +320,45 @@ anchor AS (
         DATE '2022-07-01'
     ) AS d
 ),
+-- CONTRACT-YEAR-ALIGNED WINDOW. The dates table must start and end on a CONTRACT-YEAR BOUNDARY, not on the
+-- raw data range. The old lower bound (month-start of the earliest fact = 2022-07-01) sits in the MIDDLE of a
+-- contract year, so the sub-boundary head labels as the PRIOR contract year — a spurious CY2021 with no full
+-- year of data behind it. (It also read acys_summary_grouped, which carries stray 2003-era stub dates.)
+--   lo = the first CY boundary AT/AFTER the history floor (2022-07-01). A CY opens the day AFTER the anchor
+--        day, so with a 17-Sep anchor the window starts 18-Sep of the first data year — dropping the partial
+--        leading year, which is exactly what "no CY2021" means. (Verified: zero DATED facts sit below this
+--        boundary, so only empty calendar dates are trimmed.)
+--   hi = the anchor itself — the horizon end, which IS a CY boundary (as_of.day) — so there is no trailing
+--        partial year (previously the month-end overshoot produced a NULL-CY tail).
+-- Feb-29 anchor is clamped to the 28th (the fixed 2022/2023 target years are non-leap), matching _cy2022_floor.
+p AS (
+    SELECT a.d,
+           extract(month from a.d)::int AS am,
+           CASE WHEN extract(month from a.d)::int = 2 AND extract(day from a.d)::int > 28
+                THEN 28 ELSE extract(day from a.d)::int END AS ad,
+           extract(year from DATE '2022-07-01')::int AS hy
+    FROM anchor a
+),
+b AS (
+    SELECT CASE WHEN make_date(hy, am, ad) + 1 >= DATE '2022-07-01'
+                THEN make_date(hy, am, ad) + 1
+                ELSE make_date(hy + 1, am, ad) + 1 END AS lo,
+           d AS hi
+    FROM p
+),
 cys AS (
     SELECT DISTINCT "Contract Year" cy
     FROM forecast.acys_summary_by_day
     WHERE "Contract Year" IS NOT NULL
 )
-SELECT d.*, cys.cy AS "Contract Year"
+SELECT d.*, cys.cy AS "Contract Year",
+       {_MONTH_SORT_IN_CY} AS "MonthSortInContractYear"
 FROM powerbi.z_dates d
 CROSS JOIN b
 CROSS JOIN anchor a
 LEFT JOIN cys ON cys.cy = {_CY}
-WHERE d."Date" >= coalesce(b.lo, DATE '2022-07-01')
-  AND d."Date" <= coalesce(b.hi, DATE '2029-12-31')
+WHERE d."Date" >= b.lo
+  AND d."Date" <= b.hi
 """
 
 _OWNER = """
