@@ -3,7 +3,7 @@ import sys
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import String, Integer, DateTime, Index, Boolean, Float
+from sqlalchemy import String, Integer, DateTime, Index, Boolean, Float, text
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.dialects.postgresql import JSONB
 
@@ -117,6 +117,42 @@ class ForecastStepTiming(Base):
 
     __table_args__ = (
         Index("ix_forecast_step_timings_step_created", "step", "created_at"),
+    )
+
+
+class ForecastProfile(Base):
+    """A NAMED, portal-editable set of forecast model parameters — the tuning knobs that used to be
+    hardcoded constants in external-worker's ``ForecastAPI/model.py``.
+
+    ``params`` holds OVERRIDES ONLY, not the full set: an absent key means "use the default". That is what
+    lets a new parameter ship without backfilling every existing profile (it simply takes its default, so
+    behaviour is unchanged), and it keeps a profile readable as "what this one does DIFFERENTLY".
+
+    ``model_version`` records which parameter set the row was written against (``forecast_params.MODEL_VERSION``).
+    A future model with different knobs bumps it, and the resolver REFUSES a profile from a version it does
+    not know rather than reinterpreting old values against new semantics.
+
+    The defaults, types, bounds and portal form labels live in ``forecast_params.py`` (dependency-free, copied
+    to core-api and external-worker — see its header). core-api validates on WRITE (the ``/forecast/profiles``
+    router) and serves the spec to the portal; external-worker resolves+validates again on READ, since a row
+    can also be edited straight in the database.
+
+    ``is_default`` marks the profile used when a forecast request names none. A partial unique index enforces
+    at most one default; the ``/forecast/profiles`` router flips it transactionally.
+    """
+    __tablename__ = "forecast_profiles"
+
+    name: Mapped[str] = mapped_column(String(128), unique=True, nullable=False, index=True)
+    description: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    model_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    params: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    updated_by: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+
+    __table_args__ = (
+        Index("ix_forecast_profiles_default", "is_default",
+              unique=True, postgresql_where=text("is_default")),
     )
 
 
