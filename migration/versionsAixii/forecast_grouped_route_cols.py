@@ -213,7 +213,7 @@ _BY_REG_KEYS = """    "Registration", "Period",
     "Date\""""
 
 _BY_REG = f"""
-CREATE VIEW forecast.acys_summary_grouped_by_reg AS
+CREATE MATERIALIZED VIEW forecast.acys_summary_grouped_by_reg AS
 SELECT
     {_MK} AS "MERGED_KEY",
 {_BY_REG_KEYS},
@@ -245,7 +245,7 @@ def _lease(col: str) -> str:
 # per-tail current attribute, not per-period). Wet-lease / carry-forward tails absent from the current Cirium
 # roster get NULL — the same tails that already have NULL for the other 'current' Cirium attributes.
 _AIRCRAFT_INFO = f"""
-CREATE VIEW forecast.aircraft_information AS
+CREATE MATERIALIZED VIEW forecast.aircraft_information AS
 WITH latest_rev AS (
     SELECT DISTINCT ON (plan_type) id FROM cirium.aircraftrevision
     ORDER BY plan_type, to_date(period,'MM-YYYY') DESC, id DESC
@@ -309,7 +309,7 @@ _MONTH_SORT_IN_CY = """((extract(month from d."Date")::int
                          - extract(month from a.d)::int + 12) % 12) + 1"""
 
 _Z_DATES_ACYS = f"""
-CREATE VIEW powerbi.z_dates_acys AS
+CREATE MATERIALIZED VIEW powerbi.z_dates_acys AS
 WITH anchor AS (
     -- The CY anchor DAY is as_of.day. The forecast horizon ends exactly on as_of + FORECAST_HORIZON_YEARS
     -- and the horizon month is prorated to as_of.day, so the overall max("Date") IS (as_of.month, as_of.day).
@@ -373,11 +373,16 @@ WHERE d."Date" >= b.lo
   AND d."Date" <= b.hi
 """
 
+# All four matviews must be OWNED by grp_aviation_write: external-worker REFRESHes every one at the end of a
+# panel run (see panel.py), and only an owner (or a member of the owning role) may REFRESH.
 _OWNER = """
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'grp_aviation_write') THEN
-    EXECUTE 'ALTER MATERIALIZED VIEW forecast.acys_summary_grouped OWNER TO grp_aviation_write';
+    EXECUTE 'ALTER MATERIALIZED VIEW forecast.acys_summary_grouped        OWNER TO grp_aviation_write';
+    EXECUTE 'ALTER MATERIALIZED VIEW forecast.acys_summary_grouped_by_reg OWNER TO grp_aviation_write';
+    EXECUTE 'ALTER MATERIALIZED VIEW forecast.aircraft_information        OWNER TO grp_aviation_write';
+    EXECUTE 'ALTER MATERIALIZED VIEW powerbi.z_dates_acys                 OWNER TO grp_aviation_write';
   END IF;
 END $$;
 """
@@ -439,26 +444,59 @@ _ROUTE_INDEXES = [
 ]
 
 
+# Non-unique indexes on the by_reg / aircraft_information / z_dates_acys matviews — the columns PowerBI joins
+# and slices on. DROP MATERIALIZED VIEW takes its indexes with it, so this list is the source of truth for
+# them (same rule as _ROUTE_INDEXES). Plain (not unique) — REFRESH is non-CONCURRENT (see panel.py), so no
+# unique key is required, and by_reg has no small natural unique key anyway (its grain is the full GROUP BY).
+_BY_REG_INDEXES = [
+    'CREATE INDEX ix_by_reg_mkey     ON forecast.acys_summary_grouped_by_reg ("MERGED_KEY")',
+    'CREATE INDEX ix_by_reg_reg      ON forecast.acys_summary_grouped_by_reg ("Registration")',
+    'CREATE INDEX ix_by_reg_cy       ON forecast.acys_summary_grouped_by_reg ("Contract Year")',
+    'CREATE INDEX ix_by_reg_dtype    ON forecast.acys_summary_grouped_by_reg ("Data Type")',
+    'CREATE INDEX ix_by_reg_dateint  ON forecast.acys_summary_grouped_by_reg ("DateInt")',
+]
+_AIRCRAFT_INFO_INDEXES = [
+    'CREATE INDEX ix_acinfo_mkey     ON forecast.aircraft_information ("MERGED_KEY")',
+    'CREATE INDEX ix_acinfo_reg      ON forecast.aircraft_information ("Registration")',
+    'CREATE INDEX ix_acinfo_agegroup ON forecast.aircraft_information ("Age Group")',
+    'CREATE INDEX ix_acinfo_family   ON forecast.aircraft_information ("Current Family")',
+]
+_Z_DATES_INDEXES = [
+    'CREATE INDEX ix_zdates_date  ON powerbi.z_dates_acys ("Date")',
+    'CREATE INDEX ix_zdates_cy    ON powerbi.z_dates_acys ("Contract Year")',
+    'CREATE INDEX ix_zdates_dtype ON powerbi.z_dates_acys ("Data Type")',
+]
+
+
 def _drop_chain() -> None:
     op.execute("DROP VIEW IF EXISTS powerbi.z_age_group")
-    op.execute("DROP VIEW IF EXISTS powerbi.z_dates_acys")
-    op.execute("DROP VIEW IF EXISTS forecast.aircraft_information")
-    op.execute("DROP VIEW IF EXISTS forecast.acys_summary_grouped_by_reg")
+    op.execute("DROP MATERIALIZED VIEW IF EXISTS powerbi.z_dates_acys")
+    op.execute("DROP MATERIALIZED VIEW IF EXISTS forecast.aircraft_information")
+    op.execute("DROP MATERIALIZED VIEW IF EXISTS forecast.acys_summary_grouped_by_reg")
     op.execute("DROP MATERIALIZED VIEW IF EXISTS forecast.acys_summary_grouped")
 
 
 def _rebuild(route_cols: bool) -> None:
+    # Built in dependency order, each matview WITH DATA reading the one it sits on:
+    # acys_summary_by_day (table) -> grouped -> grouped_by_reg -> aircraft_information; z_dates_acys reads
+    # acys_summary_by_day directly. Every panel run REFRESHes all four in this same order (panel.py).
     op.execute(_grouped(route_cols))
     for ix in _INDEXES:
         op.execute(ix)
     if route_cols:
         for ix in _ROUTE_INDEXES:
             op.execute(ix)
-    op.execute(_OWNER)
     op.execute(_BY_REG)
+    for ix in _BY_REG_INDEXES:
+        op.execute(ix)
     op.execute(_AIRCRAFT_INFO)
+    for ix in _AIRCRAFT_INFO_INDEXES:
+        op.execute(ix)
     op.execute(_Z_DATES_ACYS)
+    for ix in _Z_DATES_INDEXES:
+        op.execute(ix)
     op.execute(_Z_AGE_GROUP)
+    op.execute(_OWNER)
     op.execute(_GRANTS)
 
 
