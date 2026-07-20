@@ -53,10 +53,15 @@ _STATUS_CHANNEL = "status:events"   # must match the workers' status.py / Status
 
 
 class ForecastRequest(BaseModel):
-    operator: Optional[str] = Field(None, description='Cirium "Operator" value, e.g. "Avianca".')
+    operators: Optional[List[str]] = Field(
+        None, description='One or more Cirium "Operator" values, e.g. ["Avianca", "Emirates"]. Each is '
+                          "forecast in turn within a single run; the scope is their union (plus any "
+                          "registrations).")
+    operator: Optional[str] = Field(
+        None, description='Deprecated single-operator form, kept for back-compat; folded into "operators".')
     registrations: Optional[List[str]] = Field(
         None, description="One or more Cirium registrations. May be used alone OR together with "
-                          "operator (the scope is the union).")
+                          "operators (the scope is the union).")
     date: Optional[date_cls] = Field(
         None, description="As-of date YYYY-MM-DD; history window = [2023-07-01, date), default today. "
                           "Also the Contract Year anchor.")
@@ -65,12 +70,20 @@ class ForecastRequest(BaseModel):
                           "profile is used. A named profile that does not exist fails the run rather "
                           "than silently falling back.")
 
+    def norm_operators(self) -> List[str]:
+        """The de-duplicated, stripped operator list — merging the legacy single `operator` in."""
+        raw = list(self.operators or []) + ([self.operator] if self.operator else [])
+        seen, out = set(), []
+        for o in raw:
+            o = (o or "").strip()
+            if o and o not in seen:
+                seen.add(o); out.append(o)
+        return out
+
     @model_validator(mode="after")
     def _at_least_one_mode(self):
-        has_op = bool(self.operator and self.operator.strip())
-        has_regs = bool(self.registrations)
-        if not has_op and not has_regs:
-            raise ValueError("provide operator and/or registrations")
+        if not self.norm_operators() and not self.registrations:
+            raise ValueError("provide operators and/or registrations")
         return self
 
 
@@ -93,8 +106,8 @@ async def _mark_queued(request: Request, job_id: str, label: str) -> None:
 @router.post(
     path="/",
     description="Start the forecast panel build (Cirium × FR24 → forecast.acys_summary_by_day; "
-                "grouped rollup in the forecast.acys_summary_grouped view) for an operator and/or "
-                "a list of registrations.",
+                "grouped rollup in the forecast.acys_summary_grouped view) for one or more operators "
+                "and/or a list of registrations. Multiple operators are each forecast within one run.",
     status_code=status.HTTP_202_ACCEPTED,
     responses=build_responses(include={
         status.HTTP_202_ACCEPTED, status.HTTP_404_NOT_FOUND,
@@ -104,14 +117,14 @@ async def _mark_queued(request: Request, job_id: str, label: str) -> None:
 )
 async def start_forecast(body: ForecastRequest, request: Request, response: Response):
     try:
-        operator = body.operator.strip() if body.operator else None
+        operators = body.norm_operators()
         registrations = [r.strip() for r in body.registrations if r and r.strip()] if body.registrations else None
         registrations = registrations or None
 
-        # validate the COMBINED scope (operator's tails OR the explicit regs) matches something
+        # validate the COMBINED scope (any listed operator's tails OR the explicit regs) matches something
         clauses, params = [], {}
-        if operator:
-            clauses.append('"Operator" = :op'); params["op"] = operator
+        if operators:
+            clauses.append('"Operator" = ANY(:ops)'); params["ops"] = operators
         if registrations:
             clauses.append('"Registration" = ANY(:regs)'); params["regs"] = registrations
         where = "(" + " OR ".join(clauses) + ")"
@@ -120,10 +133,10 @@ async def start_forecast(body: ForecastRequest, request: Request, response: Resp
                 text(f'SELECT 1 FROM cirium.ciriumaircrafts WHERE {where} LIMIT 1'), params)).first()
         if found is None:
             return warning_response(request=request, response=response,
-                                    msg="No Cirium aircraft match the given operator / registrations",
+                                    msg="No Cirium aircraft match the given operators / registrations",
                                     status_code=status.HTTP_404_NOT_FOUND)
 
-        label = " + ".join(([f"operator '{operator}'"] if operator else [])
+        label = " + ".join(([f"{len(operators)} operator(s)"] if operators else [])
                            + ([f"{len(registrations)} registration(s)"] if registrations else []))
         as_of = body.date.isoformat() if body.date else None
 
@@ -136,7 +149,7 @@ async def start_forecast(body: ForecastRequest, request: Request, response: Resp
 
         await request.state.arq.enqueue_job(
             _REF,
-            operator=operator,
+            operators=operators or None,
             registrations=registrations,
             as_of=as_of,
             profile=body.profile,
@@ -146,7 +159,7 @@ async def start_forecast(body: ForecastRequest, request: Request, response: Resp
         )
         return success_response(
             request=request, response=response,
-            data={"job_id": job_id, "operator": operator, "registrations": registrations,
+            data={"job_id": job_id, "operators": operators, "registrations": registrations,
                   "as_of": as_of, "profile": body.profile},
             msg="Forecast panel started", status_code=status.HTTP_202_ACCEPTED,
         )
