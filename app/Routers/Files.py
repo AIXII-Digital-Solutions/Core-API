@@ -23,8 +23,9 @@ from service_auth import verify_service_token
 
 router = Router(prefix="/files", tags=["Files"], dependencies=[Depends(verify_service_token)])
 
-# Must match the file-processor PROCESSORS keys.
-_ALLOWED_KINDS = {"csv", "excel", "cirium"}
+# Must match the file-processor PROCESSORS keys. cirium -> plan_type Commercial,
+# cirium_business -> plan_type Business&Helicopters (same Cirium ingest, different revision tag).
+_ALLOWED_KINDS = {"csv", "excel", "cirium", "cirium_business"}
 
 
 def _save_sync(upload_file, dest: Path) -> None:
