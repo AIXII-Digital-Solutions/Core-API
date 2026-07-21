@@ -32,4 +32,7 @@ httpx==0.28.1
 
 # Power BI Embedded capacity control: ARM token acquisition for the dedicated control SPN.
 # httpx (above) is the HTTP client; do NOT add azure-mgmt-powerbidedicated (heavy, blocking pollers).
+# aiohttp is the async transport azure.identity.aio.ClientSecretCredential uses to fetch the ARM token
+# (the .aio credential requires it; without it the client fails with "aiohttp package is not installed").
 azure-identity==1.19.0
+aiohttp==3.11.11
