@@ -276,11 +276,16 @@ GROUP BY "Registration", "Aircraft Sub Series", "Period"
 """
 
 # powerbi.z_age_group — a static dimension of the 10 Age-Group bands (a PowerBI slicer / relationship target).
-# The label carries its own number prefix so it both displays and SORTS in order; the column is named exactly
-# "Age Group" to match the fact tables.
+# The column is named exactly "Age Group" to match the fact tables. The "N. " label prefix ALONE does NOT sort
+# right in PowerBI — it sorts the labels as TEXT, so "10. …" lands between "1. …" and "2. …". So we expose a
+# numeric "Age Group Sort" (1..10, parsed from the prefix) and PowerBI must be told to Sort "Age Group" BY
+# "Age Group Sort" (same trick as z_dates_acys."MonthSortInContractYear"). The view is also ORDER BY-ed so a
+# plain SQL read returns 1..10, but PowerBI ignores source order — the sort-by-column setting is what matters.
 _Z_AGE_GROUP = """
 CREATE VIEW powerbi.z_age_group AS
-SELECT v."Age Group" FROM (VALUES
+SELECT v."Age Group",
+       split_part(v."Age Group", '.', 1)::int AS "Age Group Sort"
+FROM (VALUES
     ('1. Less than one year'),
     ('2. From 1 to 2 years'),
     ('3. From 2 to 4 years'),
@@ -292,6 +297,7 @@ SELECT v."Age Group" FROM (VALUES
     ('9. From 14 to 16 years'),
     ('10. More than 16 years')
 ) AS v("Age Group")
+ORDER BY 2
 """
 
 _CY = """'CY' || (extract(year from d."Date")::int - CASE
