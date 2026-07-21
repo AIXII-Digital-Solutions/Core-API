@@ -248,10 +248,11 @@ def _lease(col: str) -> str:
     return f"coalesce(nullif(max(\"{col}\"),''), 'Not Leased') AS \"{col}\""
 
 
-# aircraft_information also carries "Current Family" — the aircraft's CURRENT family (e.g. 'A320 Family'),
-# read from Cirium's newest snapshot per registration: the latest revision of EACH plan_type (Commercial +
-# Business&Helicopters) and then, per tail, the newest (revision_id, id). Joined on Registration (family is a
-# per-tail current attribute, not per-period). Wet-lease / carry-forward tails absent from the current Cirium
+# aircraft_information also carries the aircraft's CURRENT per-tail Cirium attributes: "Current Family"
+# (e.g. 'A320 Family'), "Owner", "Manager" and "MSN" (= Cirium "Serial Number"). All are read from Cirium's
+# newest snapshot per registration (the cur_family CTE): the latest revision of EACH plan_type (Commercial +
+# Business&Helicopters) and then, per tail, the newest (revision_id, id). Joined on Registration (these are
+# per-tail current attributes, not per-period). Wet-lease / carry-forward tails absent from the current Cirium
 # roster get NULL — the same tails that already have NULL for the other 'current' Cirium attributes.
 _AIRCRAFT_INFO = f"""
 CREATE MATERIALIZED VIEW forecast.aircraft_information AS
@@ -260,7 +261,11 @@ WITH latest_rev AS (
     ORDER BY plan_type, to_date(period,'MM-YYYY') DESC, id DESC
 ),
 cur_family AS (
-    SELECT DISTINCT ON (ca."Registration") ca."Registration" AS reg, ca."Current Family" AS cf
+    SELECT DISTINCT ON (ca."Registration") ca."Registration" AS reg,
+           ca."Current Family" AS cf,
+           ca."Owner"          AS owner,
+           ca."Manager"        AS manager,
+           ca."Serial Number"  AS msn
     FROM cirium.ciriumaircrafts ca JOIN latest_rev lr ON lr.id = ca.revision_id
     ORDER BY ca."Registration", ca.revision_id DESC, ca.id DESC
 )
@@ -278,6 +283,9 @@ SELECT
     {_lease("Lease Dry Wet")},
     {_lease("Operational Lessor")},
     max(cf.cf)                AS "Current Family",
+    max(cf.owner)             AS "Owner",
+    max(cf.manager)           AS "Manager",
+    max(cf.msn)               AS "MSN",
     {_age_group('max("Delivery Date")')} AS "Age Group",
     {_age_group_sort('max("Delivery Date")')} AS "Age Group Sort"
 FROM forecast.acys_summary_grouped_by_reg
