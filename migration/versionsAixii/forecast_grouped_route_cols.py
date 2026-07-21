@@ -163,6 +163,13 @@ def _age_group(delivery: str = '"Delivery Date"') -> str:
         ELSE '10. More than 16 years' END"""
 
 
+def _age_group_sort(delivery: str = '"Delivery Date"') -> str:
+    # PowerBI's sort-by-column key for "Age Group": the numeric band 1..10 parsed from the "N. " prefix. The
+    # prefix alone does NOT sort right (PowerBI sorts the labels as TEXT, so "10. …" lands between "1." and
+    # "2."). Emitted next to every "Age Group" column. NULL age group -> NULL sort.
+    return f"split_part({_age_group(delivery)}, '.', 1)::int"
+
+
 def _grouped(route_cols: bool) -> str:
     routekey = f'    {_ROUTE_KEY} AS "ROUTE_KEY",\n' if route_cols else ""
     od = (f'    {_OD} AS "OD City&Country",\n'
@@ -196,7 +203,8 @@ SELECT
     max(cyv.at_end)    AS "Agreed Value at the End of the Contract",
     max(cyv.wavg)      AS "Weighted Average Agreed Value",
     max(cyv.awavg)     AS "Activity-Weighted Average Agreed Value",
-    {_age_group()} AS "Age Group"
+    {_age_group()} AS "Age Group",
+    {_age_group_sort()} AS "Age Group Sort"
 FROM forecast.acys_summary_by_day s
 LEFT JOIN cyv ON cyv.reg = s."Registration" AND cyv.cy = s."Contract Year"
 CROSS JOIN anchor a
@@ -228,7 +236,8 @@ SELECT
     max("Agreed Value at the End of the Contract") AS "Agreed Value at the End of the Contract",
     max("Weighted Average Agreed Value")           AS "Weighted Average Agreed Value",
     max("Activity-Weighted Average Agreed Value")  AS "Activity-Weighted Average Agreed Value",
-    {_age_group()}                                 AS "Age Group"
+    {_age_group()}                                 AS "Age Group",
+    {_age_group_sort()}                            AS "Age Group Sort"
 FROM forecast.acys_summary_grouped
 GROUP BY
 {_BY_REG_KEYS}
@@ -269,7 +278,8 @@ SELECT
     {_lease("Lease Dry Wet")},
     {_lease("Operational Lessor")},
     max(cf.cf)                AS "Current Family",
-    {_age_group('max("Delivery Date")')} AS "Age Group"
+    {_age_group('max("Delivery Date")')} AS "Age Group",
+    {_age_group_sort('max("Delivery Date")')} AS "Age Group Sort"
 FROM forecast.acys_summary_grouped_by_reg
 LEFT JOIN cur_family cf ON cf.reg = "Registration"
 GROUP BY "Registration", "Aircraft Sub Series", "Period"
