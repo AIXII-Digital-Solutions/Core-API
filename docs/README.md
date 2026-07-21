@@ -7,5 +7,8 @@ Documentation for the three-service platform (core-api + external-worker + file-
 - **[operations.md](operations.md)** — how to run and configure each service, the env reference,
   migrations, running several replicas on different servers, the control-plane admin APIs
   (scheduler / queues / tokens), and logging.
+- **[capacity-control.md](capacity-control.md)** — portal-facing start/stop of the Power BI Embedded
+  Azure capacity (`/api/v1/capacity/*`, scope `capacity:admin`): contract, `PBIE_*` config, Azure
+  provisioning, the 401/403/409/502/503 codes, and credential rotation.
 
 For agent/Claude-Code guidance see `../CLAUDE.md`. The schema source of truth is `../db-contract/`.
