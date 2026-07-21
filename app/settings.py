@@ -102,6 +102,18 @@ if FILE_PROCESSOR_URL and not FILE_PROCESSOR_URL.startswith(("http://", "https:/
     FILE_PROCESSOR_URL = "http://" + FILE_PROCESSOR_URL
 FILE_PROCESSOR_TOKEN: str = require_env("FILE_PROCESSOR_TOKEN", "")  # must equal file-processor SERVICE_TOKEN
 
+# Power BI Embedded capacity control (Azure ARM). A DEDICATED service principal (NOT the embed SPN)
+# with a narrow custom role (read/suspend/resume only) to start/stop the `a1azure` capacity so a
+# sandbox does not bill around the clock. PBIE_CLIENT_SECRET is a bearer credential for the capacity —
+# set in prod env / secret store only, never commit. All six are required to enable the feature; if any
+# is unset the capacity endpoints return 503 and the rest of the API boots normally.
+PBIE_TENANT_ID: str = require_env("PBIE_TENANT_ID", "")
+PBIE_CLIENT_ID: str = require_env("PBIE_CLIENT_ID", "")
+PBIE_CLIENT_SECRET: str = require_env("PBIE_CLIENT_SECRET", "")
+PBIE_SUBSCRIPTION_ID: str = require_env("PBIE_SUBSCRIPTION_ID", "")
+PBIE_RESOURCE_GROUP: str = require_env("PBIE_RESOURCE_GROUP", "")
+PBIE_CAPACITY_NAME: str = require_env("PBIE_CAPACITY_NAME", "")
+
 
 # DOMAIN CONSTANTS
 
