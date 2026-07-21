@@ -8,6 +8,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from redis.asyncio import Redis
 
+import settings
 from Config import setup_logger, DBSettings
 from Database import DatabaseClient
 from Queue import get_redis_settings
@@ -35,11 +36,37 @@ async def lifespan(app):
     # ARQ pool for enqueuing jobs to the worker segments
     app.state.arq = await create_pool(get_redis_settings())
     logger.info("Redis, DatabaseClient and ARQ pool initialized")
+
+    # Power BI Embedded capacity control (optional). Built ONCE here (azure-identity caches/refreshes
+    # the ARM token). If PBIE_* is unconfigured or azure-identity is not installed, leave it None — the
+    # /capacity endpoints then return 503 and the rest of the API boots normally.
+    app.state.capacity = None
+    _pbie = (settings.PBIE_TENANT_ID, settings.PBIE_CLIENT_ID, settings.PBIE_CLIENT_SECRET,
+             settings.PBIE_SUBSCRIPTION_ID, settings.PBIE_RESOURCE_GROUP, settings.PBIE_CAPACITY_NAME)
+    if all(_pbie):
+        try:
+            from Utils.pbie_capacity import CapacityClient
+            app.state.capacity = CapacityClient(
+                tenant_id=settings.PBIE_TENANT_ID, client_id=settings.PBIE_CLIENT_ID,
+                client_secret=settings.PBIE_CLIENT_SECRET, subscription_id=settings.PBIE_SUBSCRIPTION_ID,
+                resource_group=settings.PBIE_RESOURCE_GROUP, capacity_name=settings.PBIE_CAPACITY_NAME,
+            )
+            logger.info("PBIE CapacityClient initialized (capacity=%s)", settings.PBIE_CAPACITY_NAME)
+        except Exception as ex:
+            logger.warning("PBIE CapacityClient NOT initialized (capacity endpoints will 503): %s", ex)
+    else:
+        logger.info("PBIE_* not fully set — capacity control disabled (endpoints will 503)")
+
     logger.info("Startup completed. Welcome :O")
 
     yield
 
     logger.info("Shutdown initiated...")
+    if getattr(app.state, "capacity", None) is not None:
+        try:
+            await app.state.capacity.aclose()
+        except Exception:
+            pass
     try:
         await app.state.arq.aclose()
     except Exception:

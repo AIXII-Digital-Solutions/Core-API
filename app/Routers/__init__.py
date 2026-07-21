@@ -11,3 +11,4 @@ from .Tokens import router as tokens
 from .Airlines import router as airlines
 from .Forecast import router as forecast
 from .Registrations import router as registrations
+from .Capacity import router as capacity

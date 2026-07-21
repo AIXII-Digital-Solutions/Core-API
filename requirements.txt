@@ -29,3 +29,7 @@ alembic==1.18.4
 
 # server-to-server forward to file-processor
 httpx==0.28.1
+
+# Power BI Embedded capacity control: ARM token acquisition for the dedicated control SPN.
+# httpx (above) is the HTTP client; do NOT add azure-mgmt-powerbidedicated (heavy, blocking pollers).
+azure-identity==1.19.0
