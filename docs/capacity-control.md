@@ -78,7 +78,8 @@ the capacity: inject via your secret manager, never commit it.
 | `PBIE_RESOURCE_GROUP` | `RG-UAE-PROD-PBE` |
 | `PBIE_CAPACITY_NAME` | `a1azure` |
 
-Dependency: `azure-identity` (in `requirements.txt`; picked up on image rebuild). Do **not** add
+Dependencies: `azure-identity` **and `aiohttp`** (in `requirements.txt`; picked up on image rebuild —
+the async `azure.identity.aio` credential uses aiohttp as its token transport). Do **not** add
 `azure-mgmt-powerbidedicated` — heavy, with blocking pollers.
 
 ## Enabling it on an environment
