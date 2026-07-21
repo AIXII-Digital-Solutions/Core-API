@@ -139,7 +139,7 @@ update `PBIE_CLIENT_SECRET` → redeploy. (Or switch to `CertificateCredential` 
 
 | | Value |
 |---|---|
-| Control SPN | `svc-pbie-capacity-control` (appId: _fill in_) |
-| Secret owner | **_fill in — a named person_** |
-| Secret created | _fill in_ |
-| **Secret expires** | **_fill in — set a calendar reminder ~1 month before_** |
+| Control SPN | `svc-pbie-capacity-control` (appId: `99537afe-cd9e-4ea5-bb1b-fdf95451b02f`) |
+| Secret owner | **alex.grinin@aixii.com** |
+| Secret created | 2026-07-21 |
+| **Secret expires** | **2027-07-21** — set a calendar reminder ~2027-06-21 (one month before) |
