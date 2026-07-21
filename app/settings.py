@@ -95,7 +95,11 @@ SERVICE_TOKEN: str = require_env("SERVICE_TOKEN", "")
 API_TOKEN_PEPPER: str = require_env("API_TOKEN_PEPPER", "")
 
 # file-processor service: core-api saves an upload then forwards it here (HTTP).
+# Tolerate a scheme-less value (e.g. "100.64.0.1:8000" / "file-processor:8000"): httpx needs an explicit
+# http(s):// scheme or POST fails with "Request URL is missing an 'http://' or 'https://' protocol".
 FILE_PROCESSOR_URL: str = require_env("FILE_PROCESSOR_URL", "http://localhost:8001")
+if FILE_PROCESSOR_URL and not FILE_PROCESSOR_URL.startswith(("http://", "https://")):
+    FILE_PROCESSOR_URL = "http://" + FILE_PROCESSOR_URL
 FILE_PROCESSOR_TOKEN: str = require_env("FILE_PROCESSOR_TOKEN", "")  # must equal file-processor SERVICE_TOKEN
 
 
