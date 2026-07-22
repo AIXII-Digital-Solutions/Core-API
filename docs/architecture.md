@@ -70,6 +70,7 @@ every service, so the services stay independently deployable. Do not rename the 
 |----------|------|-------|
 | `core:external` | ARQ queue: core-api → external-worker (enqueue by worker function `__name__`) | `Queue.py` (both) |
 | `core:files` | ARQ queue, **reserved/unused** — file flow is HTTP, not ARQ | `Queue.py` |
+| `core:robot` | ARQ queue: external-worker scheduler → the standalone **Cirium scraper robot** (`scrape_cirium`, robot's own repo) | `Queue.py` `ROBOT_QUEUE` |
 | HTTP `POST /process` | core-api → file-processor file forward; header `X-Service-Token`; form fields `kind`, `job_id`, `group` | `Files.py` → `server.py` |
 | `job_statuses` table | durable per-job status in the `service` DB; writers UPSERT on `job_id` | `db-contract/Database/ServiceModels.py` |
 | `status:events` | Redis pub/sub channel; compact JSON `{job_id,kind,ref,state,progress,message}` | workers' `status.py` → core-api `/status/stream` |
@@ -110,7 +111,7 @@ truth is `db-contract/`; `app/Database/` and each worker's `worker/Database/` ar
 > was kept.
 
 ## Redis keyspace (shared — avoid collisions)
-- ARQ: `core:external`, `core:files` queues; `arq:job:*`, `arq:result:*`, `arq:in-progress:*`,
+- ARQ: `core:external`, `core:files`, `core:robot` (scraper robot) queues; `arq:job:*`, `arq:result:*`, `arq:in-progress:*`,
   `arq:retry:*`, health-check keys.
 - Status: pub/sub channel `status:events`.
 - file-processor queue: `fp:ready` (doorbell stream + group `fp-workers`), `fp:u:{group}` (per-group
