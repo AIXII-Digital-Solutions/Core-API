@@ -133,13 +133,20 @@ async def patch_schedule(name: str, body: SchedulePatch, request: Request, respo
                 row.kwargs = body.kwargs
             if body.description is not None:
                 row.description = body.description
-            # interval XOR cron — setting one clears the other
+            # interval XOR cron — setting one clears the other. Changing the schedule
+            # expression also RESETS next_run_at so the new cadence takes effect on the
+            # correct upcoming cycle: otherwise next_run_at still points at the OLD fire
+            # time, and the reschedule would only apply AFTER one more run at the old time.
+            # The dispatcher re-initialises a cron row whose next_run_at is None to the next
+            # cron fire without firing immediately (interval rows start on the next tick).
             if body.interval_seconds is not None:
                 row.interval_seconds = body.interval_seconds
                 row.cron_expr = None
+                row.next_run_at = None
             elif body.cron_expr is not None:
                 row.cron_expr = body.cron_expr
                 row.interval_seconds = None
+                row.next_run_at = None
             # session commits on exit
             data = _serialize(row)
         return success_response(request=request, response=response, data=data, msg="Schedule updated")
@@ -178,4 +185,32 @@ async def run_schedule_now(name: str, request: Request, response: Response):
         )
     except Exception as ex:
         logger.error(f"run_schedule_now failed: {ex}")
+        return error_response(request=request, response=response, exc=ex)
+
+
+@router.delete(
+    "/{name}",
+    responses=build_responses(include={status.HTTP_200_OK, status.HTTP_404_NOT_FOUND, status.HTTP_500_INTERNAL_SERVER_ERROR}),
+    dependencies=[Depends(authorize(SCOPE_SCHEDULER_WRITE))],
+)
+async def delete_schedule(name: str, request: Request, response: Response):
+    """Remove a schedule row (decommission a job).
+
+    Use for jobs no longer in any worker's SCHEDULE_DEFAULTS: seeding is insert-if-absent,
+    so a stale row is never garbage-collected on its own and would keep dispatching. Note a
+    worker that STILL seeds this name will re-create the row on its next startup — delete the
+    default from the worker first, or the row comes back.
+    """
+    try:
+        async with request.app.state.db_client.session("service") as session:
+            row = (await session.execute(select(ScheduleEntry).where(ScheduleEntry.name == name))).scalar_one_or_none()
+            if row is None:
+                return warning_response(request=request, response=response,
+                                        msg=f"No schedule named '{name}'", status_code=status.HTTP_404_NOT_FOUND)
+            await session.delete(row)
+            # session commits on exit
+        return success_response(request=request, response=response,
+                                data={"name": name}, msg="Schedule deleted")
+    except Exception as ex:
+        logger.error(f"delete_schedule failed: {ex}")
         return error_response(request=request, response=response, exc=ex)

@@ -2,6 +2,9 @@
 
 Documentation for the three-service platform (core-api + external-worker + file-processor).
 
+- **[platform-overview.md](platform-overview.md)** — **start here.** The orientation map across all four
+  repos (core-api / external-worker / file-processor / db-contract): what exists, where it lives, what each
+  part is for, and why. Read this before diving into any one service.
 - **[architecture.md](architecture.md)** — how each service works, how they communicate, the
   shared contracts (job status, queues, scheduler registry, API tokens), the Redis keyspace.
 - **[operations.md](operations.md)** — how to run and configure each service, the env reference,

@@ -126,9 +126,39 @@ GET    /scheduler                 list all schedules + state
 GET    /scheduler/{name}          one schedule
 PATCH  /scheduler/{name}          {enabled?, paused?, interval_seconds?, cron_expr?, kwargs?}
 POST   /scheduler/{name}/run      force an immediate run (observe via /status/{job_id})
+DELETE /scheduler/{name}          remove a schedule row (decommission a job)
 ```
-A schedule is interval-driven (`interval_seconds`) XOR cron-driven (`cron_expr`, e.g. `"0 9 * * 1"`
-= Mondays 09:00). Changes take effect within one dispatcher tick (~1 min).
+A schedule is interval-driven (`interval_seconds`) XOR cron-driven (`cron_expr`). Changes take effect
+within one dispatcher tick (~1 min).
+
+**Mechanics you must know before editing schedules:**
+- **`cron_expr` is evaluated in UTC** (the worker advances `next_run_at` from `datetime.now(timezone.utc)`).
+  The ops target is Asia/Dubai (UTC+4, no DST): a Dubai hour `T` → cron hour `T − 4`. E.g. Mon 07:00 Dubai
+  = `"0 3 * * 1"`.
+- **Seeding is insert-if-absent.** Workers seed a default row per schedulable job on startup with
+  `on_conflict_do_nothing`, so **editing a worker's `SCHEDULE_DEFAULTS` never changes an existing row** —
+  only the very first seed, or a fresh DB. To change a live schedule use **PATCH** (or DELETE + re-seed).
+- **PATCH resets `next_run_at`** when it changes `cron_expr`/`interval_seconds`, so the new cadence takes
+  effect on the correct upcoming cycle (a cron row re-initialises to its next fire without firing now).
+- **DELETE is the only way to drop a decommissioned job:** a stale row whose name is no longer in any
+  worker's `SCHEDULE_DEFAULTS` is never GC'd and keeps dispatching. Remove the default from the worker
+  first (else it re-seeds on the next worker restart), then DELETE the row.
+
+**Current Cirium Monday-morning chain** (all UTC; Dubai = +4). The scraper robot drops fresh Cirium files,
+then the refresh jobs process them:
+
+| Job (`func_name`) | cron (UTC) | Dubai | Queue |
+|---|---|---|---|
+| `cron_scrape_cirium` (scraper robot) | `0 1 * * 1` | Mon 05:00 | `core:robot` |
+| `cron_collapse_revisions` | `0 2 * * *` | daily 06:00 | `core:external` |
+| `cron_asg_regs` | `0 3 * * 1` | Mon 07:00 | `core:external` |
+| `cron_refresh_delta` | `30 3 * * 1` | Mon 07:30 | `core:external` |
+| `cron_refresh_plantype_matviews` | `0 4 * * 1` | Mon 08:00 | `core:external` |
+
+`cron_scrape_cirium` is dispatched onto the dedicated **`core:robot`** queue, consumed by a **separate
+scraper-robot service** (its own repo — see `.misc/CIRIUM_ROBOT_AGENT_PROMPT.md`). External-worker seeds
+this row **paused**; unpause it (`PATCH … {"paused": false}`) once the robot is deployed and consuming
+`core:robot`, else the weekly job piles up with no consumer.
 
 ### Queues — `/queues`  (scope: `queues:admin`)
 ```
