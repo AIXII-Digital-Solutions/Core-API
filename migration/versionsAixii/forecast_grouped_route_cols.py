@@ -468,10 +468,19 @@ _ROUTE_INDEXES = [
 ]
 
 
-# Non-unique indexes on the by_reg / aircraft_information / z_dates_acys matviews — the columns PowerBI joins
-# and slices on. DROP MATERIALIZED VIEW takes its indexes with it, so this list is the source of truth for
-# them (same rule as _ROUTE_INDEXES). Plain (not unique) — REFRESH is non-CONCURRENT (see panel.py), so no
-# unique key is required, and by_reg has no small natural unique key anyway (its grain is the full GROUP BY).
+# Indexes on the by_reg / aircraft_information / z_dates_acys matviews — the columns PowerBI joins and slices
+# on. DROP MATERIALIZED VIEW takes its indexes with it, so this list is the source of truth for them (same
+# rule as _ROUTE_INDEXES).
+#   * by_reg: plain (not unique) — its grain is the full GROUP BY, so MERGED_KEY is NOT a key here (it repeats
+#     across the placeholder forecast registration, e.g. "UK", which stands for several future tails).
+#   * aircraft_information: MERGED_KEY IS the natural key — the matview's grain is exactly
+#     (Registration, "Aircraft Sub Series", Period), i.e. the three parts of MERGED_KEY — so ix_acinfo_mkey is
+#     UNIQUE. Power BI relates its aircraft dimension on this column, and a UNIQUE index both documents the key
+#     and lets the row survive a CONCURRENT refresh later. (REFRESH is non-CONCURRENT today, see panel.py.)
+#     CAVEAT: the ONLY way MERGED_KEY could collide is a NULL vs '' "Aircraft Sub Series" for the same
+#     Registration+Period (GROUP BY keeps them apart; MERGED_KEY's COALESCE(...,'') folds them together) — then
+#     REFRESH would fail LOUDLY. Not possible on current data (0 empty-string sub series); if it ever occurs,
+#     COALESCE the sub series in the matview's GROUP BY to make the key provably collision-proof.
 _BY_REG_INDEXES = [
     'CREATE INDEX ix_by_reg_mkey     ON forecast.acys_summary_grouped_by_reg ("MERGED_KEY")',
     'CREATE INDEX ix_by_reg_reg      ON forecast.acys_summary_grouped_by_reg ("Registration")',
@@ -480,7 +489,7 @@ _BY_REG_INDEXES = [
     'CREATE INDEX ix_by_reg_dateint  ON forecast.acys_summary_grouped_by_reg ("DateInt")',
 ]
 _AIRCRAFT_INFO_INDEXES = [
-    'CREATE INDEX ix_acinfo_mkey     ON forecast.aircraft_information ("MERGED_KEY")',
+    'CREATE UNIQUE INDEX ix_acinfo_mkey ON forecast.aircraft_information ("MERGED_KEY")',
     'CREATE INDEX ix_acinfo_reg      ON forecast.aircraft_information ("Registration")',
     'CREATE INDEX ix_acinfo_agegroup ON forecast.aircraft_information ("Age Group")',
     'CREATE INDEX ix_acinfo_family   ON forecast.aircraft_information ("Current Family")',

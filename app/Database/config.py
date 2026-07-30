@@ -82,6 +82,11 @@ class IcaoBase(AsyncAttrs, BaseMixin, DeclarativeBase):
     metadata = MetaData(schema="icao")
 
 
+# Base class for FlightAware models -> schema `flightaware` (AeroAPI v4 data, e.g. /history/flights).
+class FlightAwareBase(AsyncAttrs, BaseMixin, DeclarativeBase):
+    metadata = MetaData(schema="flightaware")
+
+
 # Base for cirium MATERIALIZED VIEWS (read-only): cirium.asg / cirium.delta. Its MetaData is
 # deliberately NOT added to the Alembic aixii target (migration/env.py), so autogenerate never
 # tries to manage these as tables — the views are created/dropped by hand-written op.execute
