@@ -13,4 +13,5 @@ from .Forecast import router as forecast
 from .Registrations import router as registrations
 from .Capacity import router as capacity
 from .Claims import router as insurance_claims   # before .Insurance: literal /insurance/claims wins
+from .InsuranceRefs import router as insurance_refs   # same reason: /insurance/refs/*
 from .Insurance import router as insurance
