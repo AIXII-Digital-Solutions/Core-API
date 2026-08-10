@@ -177,8 +177,9 @@ PATCH  /tokens/{prefix}   {enabled?, scopes?, name?, expires_at?}  (send expires
 DELETE /tokens/{prefix}   revoke
 ```
 Domain scopes: `flights:read`, `status:read`, `files:write`, `scheduler:read`, `scheduler:write`,
-`queues:admin`, `tokens:admin`, and `admin` (superscope). A non-`admin` token holder cannot grant
-scopes it does not itself hold.
+`queues:admin`, `tokens:admin`, `predictive:read`, `predictive:write`, `capacity:admin`,
+`insurance:read`, `insurance:write`, and `admin` (superscope). A non-`admin` token holder cannot
+grant scopes it does not itself hold.
 
 Issue a key, hand it to the caller, who then sends it as `X-Api-Key: ak_….<secret>`. To protect a
 data endpoint with it, add one dependency, e.g.:
