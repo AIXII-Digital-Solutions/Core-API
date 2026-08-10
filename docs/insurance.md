@@ -160,12 +160,14 @@ the master `X-Service-Token` satisfies both.
 ```
 POST   /insurance                        add a record (the flat schedule row)
 PATCH  /insurance/{record_id}            endorsement / correction, audited
+DELETE /insurance/{record_id}            remove a mistaken row, audited
 GET    /insurance/aircraft/{registration}  everything known about one aircraft (incl. its claims)
 GET    /insurance/{record_id}/history    audit trail of one record, with `changes`
 GET    /insurance                        grid: {records, total} (q, airline, status, on_date, sort)
 
 POST   /insurance/claims                 register a loss event (the flat claims row)
 PATCH  /insurance/claims/{claim_id}      reserve movement / settlement / correction, audited
+DELETE /insurance/claims/{claim_id}      remove a claim raised in error, audited
 GET    /insurance/claims/{claim_id}      one claim in full
 GET    /insurance/claims/{claim_id}/history   the info-button payload — see above
 GET    /insurance/claims                 grid: {claims, totals} (q, airline, type_of_damage,
@@ -199,6 +201,21 @@ the source columns — so a grid with technical columns needs no per-row follow-
 SWAP HISTORY (rows with `installed_to` set) is withheld; that lives in
 `GET /insurance/aircraft/{registration}`. The relationships are all `lazy="selectin"`, so this costs
 a fixed handful of queries per page, not one per row.
+
+**DELETE is for mistakes, not for endings.** A record whose policy simply expired keeps its period
+and stays — that is the business history. A settled claim keeps its `paid_date`; a claim the insurer
+withdrew is a correction. `DELETE` exists for the row that should never have been written.
+
+Deletion is a hard delete that is nonetheless recoverable: the audit triggers fire on DELETE too, so
+the full pre-image lands in the history table, and `record_id` / `claim_id` carry no foreign key
+precisely so those rows outlive their subject. `GET …/history` keeps working after the delete and
+its newest entry is the removal, with the actor. The endpoint also returns the deleted object fully
+serialised, so a client can offer an undo by re-POSTing it.
+
+What deletion does NOT touch: the aircraft, its specs and its engines (they belong to the airframe,
+not to the record) and the policy (`ON DELETE RESTRICT` from claims, and nothing cascades from a
+record). A policy left with no records is not garbage — find-or-create reuses it the next time a row
+arrives with the same airline and period, so it behaves as a cache rather than an orphan.
 
 **Reference lookups exist because the write path takes names, not ids.** `/insurance/refs/*` returns
 what already exists so the portal offers `AerCap` rather than letting someone type `AerCap ` and rely

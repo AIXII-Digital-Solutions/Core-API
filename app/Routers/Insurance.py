@@ -549,6 +549,55 @@ async def update_insurance(
         return error_response(request=request, response=response, exc=ex)
 
 
+@router.delete(
+    "/{record_id}",
+    description=(
+        "Delete one insurance record — for a row entered by mistake. This is NOT how a policy ends: "
+        "a record that simply expired keeps its period and stays. The deletion is audited like any "
+        "other change, so the full pre-image survives in api.insurance_record_history and "
+        "GET /insurance/{record_id}/history keeps working afterwards — the returned `deleted` object "
+        "is also complete enough to re-POST. The aircraft, its technical data and its policy are NOT "
+        "touched: they outlive the record, and a policy left with no records is reused by the next "
+        "row with the same airline and period rather than being orphaned."
+    ),
+    responses=build_responses(include={
+        status.HTTP_200_OK, status.HTTP_404_NOT_FOUND, status.HTTP_409_CONFLICT,
+        status.HTTP_500_INTERNAL_SERVER_ERROR,
+    }),
+)
+async def delete_insurance(
+    record_id: int,
+    request: Request,
+    response: Response,
+    token: Optional[ApiToken] = Depends(authorize(SCOPE_INSURANCE_WRITE)),
+):
+    try:
+        async with request.app.state.db_client.session(_DB) as session:
+            await set_actor(session, token)     # the DELETE audit row records who did it
+
+            record = (await session.execute(
+                select(InsuranceRecords).where(InsuranceRecords.id == record_id)
+            )).scalar_one_or_none()
+            if record is None:
+                return warning_response(request=request, response=response,
+                                        msg=f"No insurance record with id {record_id}",
+                                        status_code=status.HTTP_404_NOT_FOUND)
+            # serialise BEFORE the delete: afterwards the relationships are gone
+            deleted = {**_record(record),
+                       "aircraft": {"id": record.aircraft.id,
+                                    "registration": record.aircraft.registration,
+                                    "msn": record.aircraft.msn}}
+            await session.delete(record)
+            await session.flush()
+        return success_response(request=request, response=response, data={"deleted": deleted},
+                                msg="Insurance record deleted")
+    except IntegrityError as ex:
+        return _integrity_response(request, response, ex, f"record {record_id}")
+    except Exception as ex:
+        logger.error(f"delete_insurance failed: {ex}")
+        return error_response(request=request, response=response, exc=ex)
+
+
 @router.get(
     "/aircraft/{registration}",
     description=(

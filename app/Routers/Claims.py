@@ -451,6 +451,50 @@ async def update_claim(
         return error_response(request=request, response=response, exc=ex)
 
 
+@router.delete(
+    "/{claim_id}",
+    description=(
+        "Delete one claim — for a claim raised in error. A claim that was settled is NOT deleted, it "
+        "keeps its `paid_date`; a claim that was withdrawn by the insurer is a correction, not a "
+        "deletion. The removal is audited like any other change, so the pre-image survives in "
+        "api.insurance_claim_history and GET /insurance/claims/{claim_id}/history keeps working "
+        "afterwards — the returned `deleted` object is also complete enough to re-POST. The "
+        "aircraft and the policy are NOT touched."
+    ),
+    responses=build_responses(include={
+        status.HTTP_200_OK, status.HTTP_404_NOT_FOUND, status.HTTP_409_CONFLICT,
+        status.HTTP_500_INTERNAL_SERVER_ERROR,
+    }),
+)
+async def delete_claim(
+    claim_id: int,
+    request: Request,
+    response: Response,
+    token: Optional[ApiToken] = Depends(authorize(SCOPE_INSURANCE_WRITE)),
+):
+    try:
+        async with request.app.state.db_client.session(_DB) as session:
+            await set_actor(session, token)     # the DELETE audit row records who did it
+
+            claim = (await session.execute(
+                select(InsuranceClaims).where(InsuranceClaims.id == claim_id)
+            )).scalar_one_or_none()
+            if claim is None:
+                return warning_response(request=request, response=response,
+                                        msg=f"No claim with id {claim_id}",
+                                        status_code=status.HTTP_404_NOT_FOUND)
+            deleted = claim_json(claim)     # serialise BEFORE the delete
+            await session.delete(claim)
+            await session.flush()
+        return success_response(request=request, response=response, data={"deleted": deleted},
+                                msg="Claim deleted")
+    except IntegrityError as ex:
+        return _integrity_response(request, response, ex)
+    except Exception as ex:
+        logger.error(f"delete_claim failed: {ex}")
+        return error_response(request=request, response=response, exc=ex)
+
+
 @router.get(
     "/{claim_id}/history",
     description=(
