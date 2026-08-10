@@ -20,6 +20,12 @@ services:
     restart: unless-stopped
     volumes:
       - ./api_data:/app/api_data
+      # Bitwarden CLI state (login state + encrypted vault cache) for SECRETS_BACKEND=vaultwarden.
+      # A NAMED volume, not a bind mount: it holds the refresh token, so it should not sit in the
+      # repo tree. Persisted so a restart skips the login round-trip; wipe it after bumping the
+      # pinned CLI version (`docker compose down -v bw_state`) — an older CLI cannot read a newer
+      # one's data.json. One volume per container: two processes sharing a bw state dir corrupt it.
+      - bw_state:/var/lib/aixii/bw
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health/"]
       interval: 30s
@@ -29,6 +35,9 @@ services:
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "5" }
+
+volumes:
+  bw_state:
 
 networks:
   aixii_net_local:

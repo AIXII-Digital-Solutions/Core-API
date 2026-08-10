@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 from redis.asyncio import Redis
 
 import settings
-from Config import setup_logger, DBSettings
+from Config import setup_logger, DBSettings, secrets
 from Database import DatabaseClient
 from Queue import get_redis_settings
 from Schemas import DefaultResponse, DetailField
@@ -75,6 +75,12 @@ async def lifespan(app):
     await app.state.redis.aclose()
     logger.info("Closing database connection...")
     await app.state.db_client.dispose()
+    # Lock the vault. No-op under SECRETS_BACKEND=env; under `vaultwarden` it drops the cached
+    # values and the session key so a lingering process cannot be used to read the vault.
+    try:
+        await asyncio.to_thread(secrets.close_provider)
+    except Exception:
+        pass
     logger.info("Shutdown completed. Bye!")
 
 

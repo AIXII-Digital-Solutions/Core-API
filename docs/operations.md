@@ -50,7 +50,9 @@ PYTHONPATH=worker python worker/main.py
 ### core-api
 | Var | Meaning |
 |-----|---------|
-| `SERVICE_TOKEN` | master shared secret (trusted internal callers; full access). Empty ⇒ token-protected routes deny all |
+| `SECRETS_BACKEND` | `env` (default) or `vaultwarden` — where the 9 managed credentials come from. See [secrets.md](secrets.md) |
+| `BW_SERVER`,`BW_CLIENTID`,`BW_CLIENTSECRET`,`BW_PASSWORD`,`BW_CLI_PATH`,`BW_APPDATA_BASE`,`BW_SCOPE` | Vaultwarden backend only. The three bootstrap secrets must be injected some other way |
+| `SERVICE_TOKEN` | master shared secret (trusted internal callers; full access). Empty ⇒ token-protected routes deny all. **Required** under the vaultwarden backend |
 | `API_TOKEN_PEPPER` | server-side pepper mixed into every API-key hash. Set a long random value; rotating it invalidates ALL issued keys |
 | `FILE_PROCESSOR_URL`,`FILE_PROCESSOR_TOKEN` | where to forward uploads (must equal file-processor `SERVICE_TOKEN`) |
 | `MS_WEBHOOK_SECRET` | Microsoft Graph webhook validation (must equal external-worker) |
@@ -84,6 +86,21 @@ python tools/migrate.py revision service "msg"  # autogenerate (then hand-edit D
 Recent service-DB migrations to apply: the cleanup + `schedule_registry` (`b7e1c2d3a4f5`) and
 `api_tokens` (`c3d4e5f6a7b8`). Valid DB keys: `main service cirium airlabs flightradar (fr)
 aviationedge (ae)` (PowerPlatform was removed).
+
+## Secrets
+
+Nine credentials (`DB_USER`/`DB_PASSWORD`, `REDIS_USER`/`REDIS_USER_PASSWORD`, `SERVICE_TOKEN`,
+`FILE_PROCESSOR_TOKEN`, `AEROAPI_KEY`, `AVIATION_EDGE_API_KEY`, `AVIATION_EDGE_EXTRA_API_KEY`) are
+resolved through a pluggable provider. `SECRETS_BACKEND=env` (the default) keeps today's behaviour;
+`vaultwarden` fetches them at runtime from a self-hosted Vaultwarden via the Bitwarden CLI.
+
+```bash
+python tools/check_secrets.py       # KEY -> OK (length N) | FAIL <classified reason>; never a value
+```
+
+Run that first on any new host — it separates "vault unreachable" from "item missing" from "wrong
+password" without reading a stack trace, and its exit code is the number of failures. Full guide,
+including the `bw`-version pinning hazard: **[secrets.md](secrets.md)**.
 
 ## Running several replicas on different servers
 
