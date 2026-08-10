@@ -3,8 +3,9 @@
 Owner: core-api. Schema: `api` (in the `aixii` database). Migrations: `ad60f0b27298` (policies and
 records), `fa38ae0ab542` (claims).
 Models: `db-contract/Database/ApiModels.py` (runtime copy `app/Database/ApiModels.py`).
-Routers: `app/Routers/Insurance.py` (policies/records), `app/Routers/Claims.py` (claims), with the
-shared plumbing in `app/Utils/InsuranceCommon.py`. Scopes: `insurance:read`, `insurance:write`.
+Routers: `app/Routers/Insurance.py` (policies/records), `app/Routers/Claims.py` (claims),
+`app/Routers/InsuranceRefs.py` (autocomplete lookups), with the shared plumbing in
+`app/Utils/InsuranceCommon.py`. Scopes: `insurance:read`, `insurance:write`.
 
 The source data is two flat schedules — one row per aircraft per policy (25 columns), and one row
 per loss event (19 columns). This document records how those rows are normalised, and the decisions
@@ -159,20 +160,68 @@ the master `X-Service-Token` satisfies both.
 ```
 POST   /insurance                        add a record (the flat schedule row)
 PATCH  /insurance/{record_id}            endorsement / correction, audited
+DELETE /insurance/{record_id}            remove a mistaken row, audited
 GET    /insurance/aircraft/{registration}  everything known about one aircraft (incl. its claims)
 GET    /insurance/{record_id}/history    audit trail of one record, with `changes`
-GET    /insurance                        list with filters (q, airline, status, on_date)
+GET    /insurance                        grid: {records, total} (q, airline, status, on_date, sort)
 
 POST   /insurance/claims                 register a loss event (the flat claims row)
 PATCH  /insurance/claims/{claim_id}      reserve movement / settlement / correction, audited
+DELETE /insurance/claims/{claim_id}      remove a claim raised in error, audited
 GET    /insurance/claims/{claim_id}      one claim in full
 GET    /insurance/claims/{claim_id}/history   the info-button payload — see above
-GET    /insurance/claims                 list + `totals` (q, airline, type_of_damage,
-                                         date_from, date_to, settled)
+GET    /insurance/claims                 grid: {claims, totals} (q, airline, type_of_damage,
+                                         date_from, date_to, settled, sort)
+
+GET    /insurance/refs/parties           autocomplete: lessee / lessor / surveyor / leader
+GET    /insurance/refs/aircraft-types    autocomplete (+ the default_* prefill values)
+GET    /insurance/refs/engine-types      autocomplete
+GET    /insurance/refs/airlines          autocomplete over api.airlines
 ```
 
-`Claims.py` is registered BEFORE `Insurance.py` in `Routers/__init__.py` so the literal
-`/insurance/claims` is matched before any `/insurance/{record_id}` pattern. Keep that order.
+`Claims.py` and `InsuranceRefs.py` are registered BEFORE `Insurance.py` in `Routers/__init__.py` so
+the literal `/insurance/claims` and `/insurance/refs/*` are matched before the `/insurance/{record_id}`
+pattern. Keep that order — `record_id` is an int path param, so a literal reaching it does not fall
+through to the next route, it 422s.
+
+**Both grids return an object, not a bare array**, so the client can page: `/insurance` gives
+`{records, total}`, `/insurance/claims` gives `{claims, totals}` where `totals` also sums reserve /
+paid / outstanding over the whole filtered set.
+
+**Sorting is whitelist-driven.** `sort=<field>&order=asc|desc`; the field name is looked up in
+`_RECORD_SORTS` / `_CLAIM_SORTS` and an unknown one returns 400 listing what is allowed — no user
+string ever reaches ORDER BY. NULLs always sort last in both directions (a grid sorted by "paid,
+biggest first" should not open on a screen of blanks), and a stable tiebreaker keeps paging
+consistent when the sort column ties. Claims can sort by `outstanding`, which is computed in SQL
+rather than stored.
+
+**The insurance grid carries the technical block.** Each row includes the full `aircraft` object —
+type, `specs`, the currently fitted engines and a flat `engines_type` / `engine_msn_1..4` mirror of
+the source columns — so a grid with technical columns needs no per-row follow-up. Only the engine
+SWAP HISTORY (rows with `installed_to` set) is withheld; that lives in
+`GET /insurance/aircraft/{registration}`. The relationships are all `lazy="selectin"`, so this costs
+a fixed handful of queries per page, not one per row.
+
+**DELETE is for mistakes, not for endings.** A record whose policy simply expired keeps its period
+and stays — that is the business history. A settled claim keeps its `paid_date`; a claim the insurer
+withdrew is a correction. `DELETE` exists for the row that should never have been written.
+
+Deletion is a hard delete that is nonetheless recoverable: the audit triggers fire on DELETE too, so
+the full pre-image lands in the history table, and `record_id` / `claim_id` carry no foreign key
+precisely so those rows outlive their subject. `GET …/history` keeps working after the delete and
+its newest entry is the removal, with the actor. The endpoint also returns the deleted object fully
+serialised, so a client can offer an undo by re-POSTing it.
+
+What deletion does NOT touch: the aircraft, its specs and its engines (they belong to the airframe,
+not to the record) and the policy (`ON DELETE RESTRICT` from claims, and nothing cascades from a
+record). A policy left with no records is not garbage — find-or-create reuses it the next time a row
+arrives with the same airline and period, so it behaves as a cache rather than an orphan.
+
+**Reference lookups exist because the write path takes names, not ids.** `/insurance/refs/*` returns
+what already exists so the portal offers `AerCap` rather than letting someone type `AerCap ` and rely
+on normalisation. `/insurance/refs/airlines` searches **`api.airlines`** — deliberately NOT the
+top-level `/airlines` typeahead, which searches the much larger `cirium.airlines` matview. Matching
+against the same table the write path matches is what prevents near-duplicate airline rows.
 
 `POST` takes the source row verbatim — no surrogate ids. Reference rows (airline, aircraft type,
 engine type, lessee, lessor) and the policy itself are found-or-created; reference lookups match on

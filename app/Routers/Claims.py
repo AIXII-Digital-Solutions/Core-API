@@ -42,6 +42,7 @@ from Utils.ResponsesFunc import build_responses
 from Utils.InsuranceCommon import (
     norm_reg, num, party_json, policy_json, enum_value, set_actor, find_aircraft,
     get_or_create_airline, get_or_create_party, resolve_fk_labels, audit_entry,
+    apply_sort, SortError,
 )
 
 logger = setup_logger("insurance_claims_api")
@@ -55,6 +56,34 @@ _AMOUNT_FIELDS = (
     "indemnity_reserve", "paid_amount",
     "hd_reserve", "hd_paid", "hw_reserve", "hw_paid", "hsl_reserve", "hsl_paid",
 )
+
+# what `outstanding` means in SQL, so the grid can sort by a column that is computed, not stored
+_OUTSTANDING = (func.coalesce(InsuranceClaims.indemnity_reserve, 0)
+                - func.coalesce(InsuranceClaims.paid_amount, 0))
+
+# Whitelist of grid-sortable fields: public name -> SQL expression. Anything not in here is
+# rejected with a 400 rather than interpolated into ORDER BY.
+_CLAIM_SORTS = {
+    "registration": Aircrafts.registration,
+    "msn": Aircrafts.msn,
+    "airline": Airlines.airline_name,
+    "claim_reference": InsuranceClaims.claim_reference,
+    "type_of_damage": InsuranceClaims.type_of_damage,
+    "date_of_loss": InsuranceClaims.date_of_loss,
+    "location_of_loss": InsuranceClaims.location_of_loss,
+    "paid_date": InsuranceClaims.paid_date,
+    "indemnity_reserve": InsuranceClaims.indemnity_reserve,
+    "paid_amount": InsuranceClaims.paid_amount,
+    "outstanding": _OUTSTANDING,
+    "hd_reserve": InsuranceClaims.hd_reserve,
+    "hd_paid": InsuranceClaims.hd_paid,
+    "hw_reserve": InsuranceClaims.hw_reserve,
+    "hw_paid": InsuranceClaims.hw_paid,
+    "hsl_reserve": InsuranceClaims.hsl_reserve,
+    "hsl_paid": InsuranceClaims.hsl_paid,
+    "created_at": InsuranceClaims.created_at,
+    "updated_at": InsuranceClaims.updated_at,
+}
 
 
 # ==============================================================================================
@@ -422,6 +451,50 @@ async def update_claim(
         return error_response(request=request, response=response, exc=ex)
 
 
+@router.delete(
+    "/{claim_id}",
+    description=(
+        "Delete one claim — for a claim raised in error. A claim that was settled is NOT deleted, it "
+        "keeps its `paid_date`; a claim that was withdrawn by the insurer is a correction, not a "
+        "deletion. The removal is audited like any other change, so the pre-image survives in "
+        "api.insurance_claim_history and GET /insurance/claims/{claim_id}/history keeps working "
+        "afterwards — the returned `deleted` object is also complete enough to re-POST. The "
+        "aircraft and the policy are NOT touched."
+    ),
+    responses=build_responses(include={
+        status.HTTP_200_OK, status.HTTP_404_NOT_FOUND, status.HTTP_409_CONFLICT,
+        status.HTTP_500_INTERNAL_SERVER_ERROR,
+    }),
+)
+async def delete_claim(
+    claim_id: int,
+    request: Request,
+    response: Response,
+    token: Optional[ApiToken] = Depends(authorize(SCOPE_INSURANCE_WRITE)),
+):
+    try:
+        async with request.app.state.db_client.session(_DB) as session:
+            await set_actor(session, token)     # the DELETE audit row records who did it
+
+            claim = (await session.execute(
+                select(InsuranceClaims).where(InsuranceClaims.id == claim_id)
+            )).scalar_one_or_none()
+            if claim is None:
+                return warning_response(request=request, response=response,
+                                        msg=f"No claim with id {claim_id}",
+                                        status_code=status.HTTP_404_NOT_FOUND)
+            deleted = claim_json(claim)     # serialise BEFORE the delete
+            await session.delete(claim)
+            await session.flush()
+        return success_response(request=request, response=response, data={"deleted": deleted},
+                                msg="Claim deleted")
+    except IntegrityError as ex:
+        return _integrity_response(request, response, ex)
+    except Exception as ex:
+        logger.error(f"delete_claim failed: {ex}")
+        return error_response(request=request, response=response, exc=ex)
+
+
 @router.get(
     "/{claim_id}/history",
     description=(
@@ -493,10 +566,12 @@ async def get_claim(claim_id: int, request: Request, response: Response):
         "List claims, newest loss first. `q` matches registration (separator-insensitive), MSN or "
         "claim reference; `settled` splits paid claims from open ones. `data` is "
         "`{claims, totals}` — the totals (count, reserve, paid, outstanding) are summed over the "
-        "WHOLE filtered set, not just the returned page, so paging never distorts the exposure."
+        "WHOLE filtered set, not just the returned page, so paging never distorts the exposure. "
+        "Sort with `sort=<field>&order=asc|desc`; an unknown field returns 400 listing the allowed "
+        "ones. `outstanding` is sortable even though it is computed, not stored."
     ),
     responses=build_responses(include={
-        status.HTTP_200_OK, status.HTTP_500_INTERNAL_SERVER_ERROR,
+        status.HTTP_200_OK, status.HTTP_400_BAD_REQUEST, status.HTTP_500_INTERNAL_SERVER_ERROR,
     }),
     dependencies=[Depends(authorize(SCOPE_INSURANCE_READ))],
 )
@@ -509,6 +584,8 @@ async def list_claims(
     date_from: Optional[date] = Query(None, description="Earliest date_of_loss to include."),
     date_to: Optional[date] = Query(None, description="Latest date_of_loss to include."),
     settled: Optional[bool] = Query(None, description="true = paid_date set, false = still open."),
+    sort: Optional[str] = Query(None, description=f"One of: {', '.join(sorted(_CLAIM_SORTS))}."),
+    order: Optional[str] = Query("asc", description="asc | desc. NULLs always sort last."),
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
 ):
@@ -538,11 +615,13 @@ async def list_claims(
             .outerjoin(Airlines, Airlines.id == InsuranceClaims.airline_id)
             .where(*conds)
         )
+        stmt = apply_sort(
+            base, sort=sort, order=order, sortmap=_CLAIM_SORTS,
+            tiebreak=(InsuranceClaims.date_of_loss.desc(), InsuranceClaims.id.desc()),
+        ).limit(limit).offset(offset)
+
         async with request.app.state.db_client.session(_DB) as session:
-            rows = (await session.execute(
-                base.order_by(InsuranceClaims.date_of_loss.desc(), InsuranceClaims.id.desc())
-                    .limit(limit).offset(offset)
-            )).scalars().all()
+            rows = (await session.execute(stmt)).scalars().all()
             # totals over the whole filtered set — a page of claims tells you nothing about exposure
             totals = (await session.execute(
                 base.with_only_columns(
@@ -563,6 +642,9 @@ async def list_claims(
             },
         }
         return success_response(request=request, response=response, data=data)
+    except SortError as ex:
+        return warning_response(request=request, response=response, msg=str(ex),
+                                status_code=status.HTTP_400_BAD_REQUEST)
     except Exception as ex:
         logger.error(f"list_claims failed: {ex}")
         return error_response(request=request, response=response, exc=ex)
