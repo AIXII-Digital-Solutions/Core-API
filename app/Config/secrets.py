@@ -27,6 +27,7 @@ Operational notes that are load-bearing — see docs/secrets.md before changing 
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
@@ -37,8 +38,28 @@ import threading
 from pathlib import Path
 from typing import Optional
 
-# NOTE: deliberately no imports from Config — this module is loaded BEFORE the rest of the
-# configuration exists (DBSettings asks it for the database credentials).
+# NOTE: no imports from Config at MODULE level — Config/config.py imports this module (DBSettings
+# asks it for the database credentials) and Config/Logger.py imports config, so a module-level
+# `from .Logger import setup_logger` here would be a genuine import cycle. The logger is fetched
+# lazily instead: by the time any of these functions runs, Config is fully loaded.
+
+_logger: Optional[logging.Logger] = None
+
+
+def _log() -> logging.Logger:
+    """The project logger, resolved on first use — see the import-cycle note above.
+
+    Everything logged here is a LIFECYCLE event (unlocking, syncing, recovering from an expired
+    session) or a key NAME. Values never reach it, and CLI output is scrubbed before it does.
+    """
+    global _logger
+    if _logger is None:
+        try:
+            from .Logger import setup_logger
+            _logger = setup_logger("secrets")
+        except Exception:                     # noqa: BLE001 - logging must never break resolution
+            _logger = logging.getLogger("secrets")
+    return _logger
 
 _BOOTSTRAP_VARS = ("BW_CLIENTID", "BW_CLIENTSECRET", "BW_PASSWORD", "BW_SESSION")
 
@@ -430,6 +451,8 @@ class VaultwardenSecretsProvider(SecretsProvider):
             except SecretsError:
                 self._session = None                          # roll back: never half-unlocked
                 raise
+            _log().info("vault unlocked and synced (server=%s, state=%s)",
+                        self._server, self._appdata)
             return self._session
 
     # --- the interface callers actually use -----------------------------------------------------
@@ -447,6 +470,8 @@ class VaultwardenSecretsProvider(SecretsProvider):
         except SecretsLocked:
             # sessions expire and a long-lived process must recover without a restart.
             # Retry EXACTLY once, so a genuinely broken vault cannot spin.
+            _log().warning("session expired while resolving %s — re-unlocking and retrying once",
+                           key)
             with self._lock:
                 self._session = None
             value = self._get(key, item, field)
@@ -454,6 +479,8 @@ class VaultwardenSecretsProvider(SecretsProvider):
         with self._lock:
             self._cache[key] = value
         self._scrub.watch(value)
+        # key NAME and length only: the same rule the check-secrets report follows
+        _log().debug("resolved %s from item '%s' (length %d)", key, item, len(value))
         return value
 
     def _get(self, key: str, item: str, field: str) -> str:
@@ -484,8 +511,9 @@ class VaultwardenSecretsProvider(SecretsProvider):
             self._session = None
         try:
             self._run(["lock"], stage="lock")
-        except SecretsError:
-            pass                                              # shutdown must not fail on this
+            _log().info("vault locked")
+        except SecretsError as ex:
+            _log().warning("could not lock the vault on shutdown: %s", ex)  # already scrubbed
 
 
 # ==============================================================================================
