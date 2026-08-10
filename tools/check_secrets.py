@@ -57,7 +57,9 @@ def main(argv: list[str]) -> int:
         except Exception:
             pass
 
-    print(f"\n{'all keys resolved' if not failures else f'{failures} key(s) FAILED'}")
+    # The report — including the summary line — is printed by check_secrets() itself. Nothing
+    # derived from it is interpolated here: the count is only ever used as the exit status, which
+    # keeps this tool free of any data flow from the secrets module into a print.
     return failures
 
 
