@@ -545,6 +545,13 @@ def check_secrets(keys: Optional[list[str]] = None, stream=sys.stdout) -> int:
 
     This turns "the deploy is broken" into a ten-second answer and is the first thing to run on a
     new host. Returns the number of failures.
+
+    Exactly three things are ever emitted, and none of them is a secret value: the key NAME, the
+    LENGTH of the resolved value, and the classified failure reason. The length is deliberate — it
+    is what catches a truncated or mangled credential (a password containing `$` passed through
+    Docker Compose interpolation, say) without disclosing the value. This function owns the whole
+    report, including the summary line, so that callers never have to interpolate anything derived
+    from a secret in order to print a result.
     """
     provider = get_provider()
     failures = 0
@@ -554,9 +561,11 @@ def check_secrets(keys: Optional[list[str]] = None, stream=sys.stdout) -> int:
             value = provider.require(key)
         except SecretsError as ex:
             failures += 1
+            # the message is already scrubbed at raise time; it names the item, never the value
             print(f"  {key} -> FAIL ({type(ex).__name__}) {ex}", file=stream)
         else:
             print(f"  {key} -> OK (length {len(value)})", file=stream)
+    print(f"\n{'all keys resolved' if not failures else f'{failures} key(s) FAILED'}", file=stream)
     return failures
 
 
