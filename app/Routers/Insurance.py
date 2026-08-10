@@ -25,14 +25,15 @@ from typing import Optional, Any
 
 from fastapi import Request, Response, Depends, Query, status
 from pydantic import BaseModel, Field, model_validator
-from sqlalchemy import select, or_, and_
+from sqlalchemy import select, or_, and_, func
+from sqlalchemy.orm import aliased
 from sqlalchemy.exc import IntegrityError
 
 from Config import setup_logger
 from settings import Router
 from Database import ApiToken
 from Database.ApiModels import (
-    Airlines, Aircrafts, AircraftSpecs, AircraftEngines,
+    Airlines, Aircrafts, AircraftTypes, AircraftSpecs, AircraftEngines,
     InsurancePolicies, InsuranceRecords, InsuranceRecordHistory, InsuranceClaims,
     InsuranceStatus, InsuranceSource,
 )
@@ -41,7 +42,7 @@ from Utils import success_response, warning_response, error_response
 from Utils.ResponsesFunc import build_responses
 from Utils.InsuranceCommon import (
     norm_reg, num, party_json, policy_json, enum_value, set_actor, find_aircraft,
-    resolve_fk_labels, audit_entry,
+    resolve_fk_labels, audit_entry, apply_sort, SortError,
     get_or_create_airline, get_or_create_party, get_or_create_aircraft_type,
     get_or_create_engine_type,
 )
@@ -53,6 +54,41 @@ router = Router(prefix="/insurance", tags=["Insurance"])
 
 _DB = "aixii"
 _MAX_ENGINES = 4  # the source schedule carries engine_msn_1..4
+
+# Two different airlines can be attached to one record: the airline INSURED by the policy, and the
+# aircraft's current operator. They agree for an insured record and only the operator exists for a
+# `not_insured` one, so the grid reads the coalesce of the two — hence two aliases of one table.
+_PolicyAirline = aliased(Airlines, name="policy_airline")
+_OperatorAirline = aliased(Airlines, name="operator_airline")
+_AIRLINE = func.coalesce(_PolicyAirline.airline_name, _OperatorAirline.airline_name)
+
+# Whitelist of grid-sortable fields: public name -> SQL expression. Anything not in here is
+# rejected with a 400 rather than interpolated into ORDER BY.
+_RECORD_SORTS = {
+    "registration": Aircrafts.registration,
+    "msn": Aircrafts.msn,
+    "airline": _AIRLINE,
+    "aircraft_type": AircraftTypes.name,
+    "mtow": AircraftSpecs.mtow_kg,
+    "number_of_engines": AircraftSpecs.number_of_engines,
+    "status": InsuranceRecords.status,
+    "source": InsuranceRecords.source,
+    "effective_from": InsuranceRecords.effective_from,
+    "effective_to": InsuranceRecords.effective_to,
+    "policy_from": InsurancePolicies.policy_from,
+    "policy_to": InsurancePolicies.policy_to,
+    "policy_number": InsurancePolicies.policy_number,
+    "hull_deductible": InsuranceRecords.hull_deductible,
+    "hull_spares_deductible": InsuranceRecords.hull_spares_deductible,
+    "combined_single_limit": func.coalesce(InsuranceRecords.combined_single_limit,
+                                           InsurancePolicies.combined_single_limit),
+    "agreed_value_inception": InsuranceRecords.agreed_value_inception,
+    "agreed_value": InsuranceRecords.agreed_value,
+    "depreciation_date": InsuranceRecords.depreciation_date,
+    "depreciation_rate": InsuranceRecords.depreciation_rate,
+    "created_at": InsuranceRecords.created_at,
+    "updated_at": InsuranceRecords.updated_at,
+}
 
 
 # ==============================================================================================
@@ -288,6 +324,11 @@ def _record(r: InsuranceRecords) -> dict:
             policy["combined_single_limit"] if policy else None
         ),
         "currency": policy["currency"] if policy else None,
+        # one field for the grid's Airline column: the policy's insured airline, falling back to the
+        # aircraft's operator (a `not_insured` record has no policy at all)
+        "airline": (policy["airline"] if policy and policy["airline"] else
+                    (r.aircraft.airline.airline_name
+                     if r.aircraft is not None and r.aircraft.airline else None)),
         "lessee": party_json(r.lessee),
         "lessor": party_json(r.lessor),
         "hull_deductible": num(r.hull_deductible),
@@ -302,8 +343,13 @@ def _record(r: InsuranceRecords) -> dict:
     }
 
 
-def _aircraft(a: Aircrafts) -> dict:
+def _aircraft(a: Aircrafts, *, all_engines: bool = True) -> dict:
+    """`all_engines=False` keeps only the currently fitted set — the grid wants the aircraft's
+    present state, the aircraft card wants the swap history too."""
     specs = a.specs
+    engines = a.engines if all_engines else [e for e in a.engines if e.installed_to is None]
+    fitted = {e.position: e for e in a.engines if e.installed_to is None}
+    types = {e.engine_type.name for e in fitted.values() if e.engine_type}
     return {
         "id": a.id,
         "registration": a.registration,
@@ -315,6 +361,14 @@ def _aircraft(a: Aircrafts) -> dict:
             "number_of_engines": specs.number_of_engines,
             "source": enum_value(specs.source),
         },
+        # flat mirror of the source schedule's engine columns, so a grid needs no reshaping.
+        # `engines_type` is null when the fitted engines are not all the same model — read
+        # `engines[]` in that case.
+        "engines_type": types.pop() if len(types) == 1 else None,
+        **{
+            f"engine_msn_{pos}": fitted[pos].engine_msn if pos in fitted else None
+            for pos in range(1, _MAX_ENGINES + 1)
+        },
         "engines": [
             {
                 "position": e.position,
@@ -324,7 +378,7 @@ def _aircraft(a: Aircrafts) -> dict:
                 "installed_to": e.installed_to.isoformat() if e.installed_to else None,
                 "current": e.installed_to is None,
             }
-            for e in a.engines
+            for e in engines
         ],
     }
 
@@ -495,6 +549,55 @@ async def update_insurance(
         return error_response(request=request, response=response, exc=ex)
 
 
+@router.delete(
+    "/{record_id}",
+    description=(
+        "Delete one insurance record — for a row entered by mistake. This is NOT how a policy ends: "
+        "a record that simply expired keeps its period and stays. The deletion is audited like any "
+        "other change, so the full pre-image survives in api.insurance_record_history and "
+        "GET /insurance/{record_id}/history keeps working afterwards — the returned `deleted` object "
+        "is also complete enough to re-POST. The aircraft, its technical data and its policy are NOT "
+        "touched: they outlive the record, and a policy left with no records is reused by the next "
+        "row with the same airline and period rather than being orphaned."
+    ),
+    responses=build_responses(include={
+        status.HTTP_200_OK, status.HTTP_404_NOT_FOUND, status.HTTP_409_CONFLICT,
+        status.HTTP_500_INTERNAL_SERVER_ERROR,
+    }),
+)
+async def delete_insurance(
+    record_id: int,
+    request: Request,
+    response: Response,
+    token: Optional[ApiToken] = Depends(authorize(SCOPE_INSURANCE_WRITE)),
+):
+    try:
+        async with request.app.state.db_client.session(_DB) as session:
+            await set_actor(session, token)     # the DELETE audit row records who did it
+
+            record = (await session.execute(
+                select(InsuranceRecords).where(InsuranceRecords.id == record_id)
+            )).scalar_one_or_none()
+            if record is None:
+                return warning_response(request=request, response=response,
+                                        msg=f"No insurance record with id {record_id}",
+                                        status_code=status.HTTP_404_NOT_FOUND)
+            # serialise BEFORE the delete: afterwards the relationships are gone
+            deleted = {**_record(record),
+                       "aircraft": {"id": record.aircraft.id,
+                                    "registration": record.aircraft.registration,
+                                    "msn": record.aircraft.msn}}
+            await session.delete(record)
+            await session.flush()
+        return success_response(request=request, response=response, data={"deleted": deleted},
+                                msg="Insurance record deleted")
+    except IntegrityError as ex:
+        return _integrity_response(request, response, ex, f"record {record_id}")
+    except Exception as ex:
+        logger.error(f"delete_insurance failed: {ex}")
+        return error_response(request=request, response=response, exc=ex)
+
+
 @router.get(
     "/aircraft/{registration}",
     description=(
@@ -597,11 +700,16 @@ async def get_record_audit(
 @router.get(
     "",
     description=(
-        "List insurance records with filters. `on_date` keeps only records in force on that date "
-        "(default: no date filter). `q` matches registration (separator-insensitive) or MSN."
+        "List insurance records for the grid. `data` is `{records, total}` — `total` counts the "
+        "WHOLE filtered set so the client can page. Every row carries the full `aircraft` block "
+        "(type, specs, currently fitted engines and the flat engine_msn_1..4 mirror), so a grid "
+        "showing technical columns needs no follow-up request per row; the engine SWAP HISTORY is "
+        "only in GET /insurance/aircraft/{registration}. `on_date` keeps only records in force on "
+        "that date; `q` matches registration (separator-insensitive) or MSN. Sort with "
+        "`sort=<field>&order=asc|desc` — an unknown field returns 400 listing the allowed ones."
     ),
     responses=build_responses(include={
-        status.HTTP_200_OK, status.HTTP_500_INTERNAL_SERVER_ERROR,
+        status.HTTP_200_OK, status.HTTP_400_BAD_REQUEST, status.HTTP_500_INTERNAL_SERVER_ERROR,
     }),
     dependencies=[Depends(authorize(SCOPE_INSURANCE_READ))],
 )
@@ -612,6 +720,8 @@ async def list_insurance(
     airline: Optional[str] = Query(None, description="Airline name substring."),
     record_status: Optional[InsuranceStatus] = Query(None, alias="status"),
     on_date: Optional[date] = Query(None, description="Keep only records in force on this date."),
+    sort: Optional[str] = Query(None, description=f"One of: {', '.join(sorted(_RECORD_SORTS))}."),
+    order: Optional[str] = Query("asc", description="asc | desc. NULLs always sort last."),
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
 ):
@@ -631,25 +741,39 @@ async def list_insurance(
                 Aircrafts.msn.ilike(f"%{q.strip()}%"),
             ))
         if airline:
-            conds.append(Airlines.airline_name.ilike(f"%{airline.strip()}%"))
+            conds.append(_AIRLINE.ilike(f"%{airline.strip()}%"))
 
-        stmt = (
+        # every join is 1:1 or many-to-one, so none of them multiplies rows
+        base = (
             select(InsuranceRecords)
             .join(Aircrafts, Aircrafts.id == InsuranceRecords.aircraft_id)
-            .outerjoin(Airlines, Airlines.id == Aircrafts.airline_id)
+            .outerjoin(InsurancePolicies, InsurancePolicies.id == InsuranceRecords.policy_id)
+            .outerjoin(_PolicyAirline, _PolicyAirline.id == InsurancePolicies.airline_id)
+            .outerjoin(_OperatorAirline, _OperatorAirline.id == Aircrafts.airline_id)
+            .outerjoin(AircraftTypes, AircraftTypes.id == Aircrafts.aircraft_type_id)
+            .outerjoin(AircraftSpecs, AircraftSpecs.aircraft_id == Aircrafts.id)
             .where(*conds)
-            .order_by(InsuranceRecords.effective_from.desc(), InsuranceRecords.id.desc())
-            .limit(limit).offset(offset)
         )
+        stmt = apply_sort(
+            base, sort=sort, order=order, sortmap=_RECORD_SORTS,
+            tiebreak=(InsuranceRecords.effective_from.desc(), InsuranceRecords.id.desc()),
+        ).limit(limit).offset(offset)
+
         async with request.app.state.db_client.session(_DB) as session:
             rows = (await session.execute(stmt)).scalars().all()
-            data = [
-                {**_record(r),
-                 "aircraft": {"id": r.aircraft.id, "registration": r.aircraft.registration,
-                              "msn": r.aircraft.msn}}
+            total = (await session.execute(
+                base.with_only_columns(func.count(InsuranceRecords.id)).order_by(None)
+            )).scalar_one()
+            records = [
+                # the grid gets the aircraft's PRESENT state; removed engines stay in the card
+                {**_record(r), "aircraft": _aircraft(r.aircraft, all_engines=False)}
                 for r in rows
             ]
-        return success_response(request=request, response=response, data=data)
+        return success_response(request=request, response=response,
+                                data={"records": records, "total": total})
+    except SortError as ex:
+        return warning_response(request=request, response=response, msg=str(ex),
+                                status_code=status.HTTP_400_BAD_REQUEST)
     except Exception as ex:
         logger.error(f"list_insurance failed: {ex}")
         return error_response(request=request, response=response, exc=ex)
