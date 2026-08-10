@@ -7,7 +7,7 @@ who the actor is, and turning an audit row pair into the field-level diff the UI
 from decimal import Decimal
 from typing import Optional, Any, Iterable
 
-from sqlalchemy import select, text
+from sqlalchemy import select, text, or_, desc
 
 from Database import ApiToken
 from Database.ApiModels import (
@@ -130,6 +130,42 @@ async def set_actor(session, token: Optional[ApiToken]) -> None:
     it cannot leak into another request sharing the pooled connection."""
     actor = token.name if token is not None else "service-token"
     await session.execute(text("SELECT set_config('app.actor', :actor, true)"), {"actor": actor})
+
+
+# ==============================================================================================
+# grid sorting
+# ==============================================================================================
+
+class SortError(ValueError):
+    """Unknown/invalid sort request. Carries the message the router hands back as a 400 — the
+    allowed keys are listed so a caller does not have to guess them from the docs."""
+
+
+def apply_sort(stmt, *, sort: Optional[str], order: Optional[str], sortmap: dict, tiebreak):
+    """Order `stmt` by a WHITELISTED column. `sortmap` maps the public field name the portal sends
+    to the SQL expression, so no user string ever reaches the ORDER BY clause.
+
+    NULLs always sink to the bottom regardless of direction — a grid sorted by "paid amount, biggest
+    first" should not open on a screen of blanks. `tiebreak` keeps paging stable when the sort column
+    ties (dates and enums tie constantly).
+    """
+    if not sort:
+        return stmt.order_by(*tiebreak)
+    key = sort.strip().lower()
+    if key not in sortmap:
+        raise SortError(f"Unknown sort field '{sort}'. Allowed: {', '.join(sorted(sortmap))}")
+    direction = (order or "asc").strip().lower()
+    if direction not in ("asc", "desc"):
+        raise SortError("`order` must be 'asc' or 'desc'")
+    column = sortmap[key]
+    expression = column.desc() if direction == "desc" else column.asc()
+    return stmt.order_by(expression.nulls_last(), *tiebreak)
+
+
+def typeahead_order(column, q: str):
+    """Rank a reference lookup: prefix matches first, then anything else that contains the text,
+    then alphabetically. Returns the ORDER BY list."""
+    return [desc(column.ilike(f"{q}%")), column]
 
 
 # ==============================================================================================
