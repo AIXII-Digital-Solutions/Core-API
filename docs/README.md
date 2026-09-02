@@ -10,6 +10,10 @@ Documentation for the three-service platform (core-api + external-worker + file-
 - **[operations.md](operations.md)** — how to run and configure each service, the env reference,
   migrations, running several replicas on different servers, the control-plane admin APIs
   (scheduler / queues / tokens), and logging.
+- **[secrets.md](secrets.md)** — how the nine managed credentials are resolved at runtime:
+  `SECRETS_BACKEND=env` (default) or a self-hosted Vaultwarden driven through the Bitwarden CLI.
+  The item mapping, `tools/check_secrets.py`, the security invariants, and the version-pinning
+  hazard that will put a service into a restart loop if you ignore it.
 - **[capacity-control.md](capacity-control.md)** — portal-facing start/stop of the Power BI Embedded
   Azure capacity (`/api/v1/capacity/*`, scope `capacity:admin`): contract, `PBIE_*` config, Azure
   provisioning, the 401/403/409/502/503 codes, and credential rotation.
