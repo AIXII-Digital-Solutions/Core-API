@@ -7,6 +7,8 @@ from dotenv import load_dotenv, find_dotenv
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from . import secrets
+
 # This module holds ONLY the configuration shared by every segment
 # (api_server, file_processor, external_worker):
 #   - environment loading (DEV_MODE / .env discovery)
@@ -59,15 +61,50 @@ def require_env(name: str, additional=_ENV_MISSING) -> Optional[bool | str | int
     raise RuntimeError(f"{name} is required")
 
 
+def require_secret(name: str, additional=_ENV_MISSING) -> str:
+    """`require_env` for a value that may live in the vault.
+
+    With SECRETS_BACKEND=env this behaves exactly like require_env. With `vaultwarden` the value
+    comes from the vault and a missing one is a hard, classified failure — there is deliberately no
+    fall back to the environment or to `additional`, because silently booting with a default
+    credential is the failure mode this whole mechanism exists to prevent.
+    """
+    if secrets.backend_name() == "env":
+        return require_env(name, additional)
+    if additional is _ENV_MISSING:
+        return secrets.require_secret(name)
+    return secrets.optional_secret(name, additional)
+
+
 ENABLE_PERFORMANCE_LOGGER: bool = require_env("ENABLE_PERFORMANCE_LOGGER", False)
 
 
 # DATABASE
 
+#: Credentials this class takes from the secrets provider rather than straight from the
+#: environment. Under SECRETS_BACKEND=env that is the same thing; under `vaultwarden` it is the
+#: difference between a .env file and a vault.
+_SECRET_FIELDS = ("DB_USER", "DB_PASSWORD", "REDIS_USER", "REDIS_USER_PASSWORD")
+
+
 class DBSettings(BaseSettings):
     """
     ENVIRONMENT AUTO, NO PARAMS NEED
     """
+
+    def __init__(self, **data):
+        # Resolve credentials through the provider BEFORE pydantic reads the environment, and pass
+        # them in explicitly rather than writing them into os.environ — anything in os.environ is
+        # inherited by every subprocess this service ever spawns, which is exactly what the vault
+        # exists to avoid. Values are cached in the provider, so the several DBSettings() call
+        # sites cost one resolution between them, not one each.
+        if secrets.backend_name() != "env":
+            provider = secrets.get_provider()
+            for field in _SECRET_FIELDS:
+                if field not in data:
+                    data[field] = provider.require(field)
+        super().__init__(**data)
+
     DB_USER: str = Field(default="")
     DB_PASSWORD: str = Field(default="")
     DB_HOST: str = Field(default="localhost")
@@ -115,6 +152,8 @@ __all__ = [
     "DEV_MODE",
     "get_project_root",
     "require_env",
+    "require_secret",
+    "secrets",
     "ENV_PATH",
     "PATH",
     "ROOT",
