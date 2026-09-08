@@ -8,16 +8,36 @@ NOT to be confused with /insurance/claims (api.insurance_claims), which register
 specific aircraft and policy, with a full change history. This router is the summary table that feeds
 reporting; that one is the operational record.
 
-The grain — and the natural key a re-import upserts on — is
+The grain is
     airline x calendar_year x currency x policy_type x claims_status
-so Settled and Ongoing are separate rows for the same year, as are two currencies. Amounts are never
-summed across currencies: nothing here converts them.
+so Settled and Ongoing are separate rows for the same year, as are two currencies. `claim_amount`
+itself is never summed across currencies; `claim_amounts_usd` is the column that may be.
+
+DUPLICATES ARE KEPT. The grain is not unique: the same combination may appear as many times as it is
+sent, and nothing here merges, replaces or rejects it. A sheet may state a combination twice for its
+own reasons, and this loader is not the place to decide which one is real. The consequence to know
+before re-running a load: sending the same sheet twice stores it twice — there is no upsert, because
+without a unique key there is nothing for one to target.
+
+TWO THINGS HAPPEN ON THE WAY IN, and both are why a load can be rejected:
+
+1. THE AIRLINE NAME IS RESOLVED against cirium.airlines — the same reference /airlines searches —
+   with fuzzy matching, so "Corendon Airlnes Europe" is stored as "Corendon Airlines Europe". Hand-
+   made sheets spell the same carrier several ways, and storing them verbatim splits one airline
+   across rows that no per-airline total will ever bring back together. A name that cannot be
+   resolved CONFIDENTLY is reported with its near misses rather than guessed at — see
+   Utils/AirlineResolver.py for why a threshold alone is not enough.
+
+2. THE AMOUNT IS CONVERTED TO USD. The currency -> USD rate is fetched (cached per publication day)
+   and stored in `currency_rate`, with claim_amount x rate in `claim_amounts_usd`. USD rows get a
+   rate of exactly 1 and the amount unchanged, so every row has the same shape. If no FX source
+   answers, the write is refused rather than stored unconverted.
 
     GET    /forecast/claims           list, filtered (airline, year range, currency, type, status)
     GET    /forecast/claims/{id}      one row
     POST   /forecast/claims           add one row
-    POST   /forecast/claims/bulk      load many rows; `upsert=true` overwrites rows of the same grain
-    PATCH  /forecast/claims/{id}      correct a row
+    POST   /forecast/claims/bulk      load many rows in one transaction (all of them, duplicates included)
+    PATCH  /forecast/claims/{id}      correct a row (re-resolves and re-converts what it touches)
     DELETE /forecast/claims/{id}      remove a row
 
 PowerBI reads the table (or a service-side filtered slice of it) directly as `bi_reader`; this router
@@ -40,15 +60,14 @@ from Database.ForecastModels import (
 from api_auth import authorize, SCOPE_PREDICTIVE_READ, SCOPE_PREDICTIVE_WRITE
 from Utils import success_response, warning_response, error_response
 from Utils.ResponsesFunc import build_responses
+from Utils.AirlineResolver import resolve_airline, resolve_airlines
+from Utils.CurrencyRates import RateUnavailable, get_usd_rate, get_usd_rates, to_usd
 
 logger = setup_logger("acys_claims_api")
 
 router = Router(prefix="/forecast/claims", tags=["Forecast"])
 
 _DB = "aixii"
-
-# the columns that make a row unique — the upsert target and what a duplicate POST collides on
-_GRAIN = ("airline", "calendar_year", "currency", "policy_type", "claims_status")
 
 _SORTABLE = {
     "airline": AcysClaims.airline,
@@ -79,9 +98,9 @@ class ClaimRow(BaseModel):
 
 
 class ClaimPatch(BaseModel):
-    """A correction. Only the fields present in the body change. The grain columns may be edited too
-    (a year or a currency typed wrong is exactly what needs fixing), which is why a PATCH can collide
-    with an existing row — that comes back as 409, not a silent merge."""
+    """A correction. Only the fields present in the body change, and the grain columns may be edited
+    too (a year or a currency typed wrong is exactly what needs fixing). Landing on a grain another
+    row already holds is fine — duplicates are kept."""
     model_config = ConfigDict(use_enum_values=False)
 
     airline: Optional[str] = Field(None, min_length=1, max_length=200)
@@ -94,13 +113,10 @@ class ClaimPatch(BaseModel):
 
 
 class ClaimBulk(BaseModel):
+    """A batch to load. Every row is inserted, including rows that repeat a grain already in the
+    table or repeated within this batch — duplicates are kept as sent."""
     rows: List[ClaimRow] = Field(..., min_length=1, max_length=5000,
-                                 description="Rows to load, max 5000 per call.")
-    upsert: bool = Field(True,
-                         description="True (default): a row whose grain already exists is OVERWRITTEN "
-                                     "with the new count and amount — this is what makes re-loading a "
-                                     "corrected sheet safe. False: the whole call fails on the first "
-                                     "collision and nothing is written.")
+                                 description="Rows to load, max 5000 per call. Duplicates are kept.")
 
 
 def _json(row: AcysClaims) -> dict:
@@ -111,6 +127,9 @@ def _json(row: AcysClaims) -> dict:
         "number_of_claims": row.number_of_claims,
         # NUMERIC in the column (exact cents), a plain number on the wire
         "claim_amount": float(row.claim_amount) if row.claim_amount is not None else None,
+        "currency_rate": float(row.currency_rate) if row.currency_rate is not None else None,
+        "claim_amounts_usd": (float(row.claim_amounts_usd)
+                              if row.claim_amounts_usd is not None else None),
         "currency": row.currency.value if row.currency else None,
         "policy_type": row.policy_type.value if row.policy_type else None,
         "claims_status": row.claims_status.value if row.claims_status else None,
@@ -123,15 +142,25 @@ def _conflict_msg(ex: IntegrityError) -> Optional[str]:
     """Turn a constraint violation into something the caller can act on, or None if it is not one of
     ours (in which case it is a 500, not a 409)."""
     text = str(getattr(ex, "orig", ex))
-    if "uq_acys_claims_grain" in text:
-        return ("A row already exists for this airline / year / currency / policy type / status. "
-                "PATCH it, or load with upsert=true.")
     for ck, what in (("ck_acys_claims_count_non_negative", "number_of_claims cannot be negative"),
                      ("ck_acys_claims_amount_non_negative", "claim_amount cannot be negative"),
-                     ("ck_acys_claims_year_sane", "calendar_year is outside 1950-2200")):
+                     ("ck_acys_claims_year_sane", "calendar_year is outside 1950-2200"),
+                     ("ck_acys_claims_usd_pair_complete",
+                      "currency_rate and claim_amounts_usd must be set together"),
+                     ("ck_acys_claims_rate_positive", "currency_rate must be positive"),
+                     ("ck_acys_claims_usd_non_negative", "claim_amounts_usd cannot be negative")):
         if ck in text:
             return what
     return None
+
+
+def _unresolved_msg(match, row_index: Optional[int] = None) -> str:
+    """Explain a rejected airline name and show what it nearly matched, so the caller can correct the
+    sheet instead of guessing at what the reference calls the carrier."""
+    where = f"row {row_index}: " if row_index is not None else ""
+    near = f" Nearest reference names: {', '.join(match.candidates[:3])}." if match.candidates else ""
+    return (f"{where}airline '{match.typed}' could not be resolved against the reference data "
+            f"({match.reason}).{near}")
 
 
 @router.get(
@@ -245,28 +274,53 @@ async def get_claim(
 @router.post(
     "",
     description=(
-        "Add one claims row. Fails with 409 if a row already exists on the same grain "
-        "(airline / year / currency / policy type / status) — to replace it, PATCH it or load "
-        "through /bulk with upsert=true."
+        "Add one claims row. The airline name is resolved against the reference data first (a "
+        "one-character misspelling still lands on the right carrier; the stored name is the "
+        "reference spelling, and the response reports the correction), and the amount is converted "
+        "to USD at the current rate. A row repeating one already in the table is stored as another "
+        "row — duplicates are kept, not merged. Fails with 400 if the airline cannot be resolved "
+        "confidently and 502 if no FX source answers."
     ),
     responses=build_responses(include={
-        status.HTTP_201_CREATED, status.HTTP_400_BAD_REQUEST, status.HTTP_409_CONFLICT,
-        status.HTTP_500_INTERNAL_SERVER_ERROR,
+        status.HTTP_201_CREATED, status.HTTP_400_BAD_REQUEST,
+        status.HTTP_502_BAD_GATEWAY, status.HTTP_500_INTERNAL_SERVER_ERROR,
     }),
     dependencies=[Depends(authorize(SCOPE_PREDICTIVE_WRITE))],
 )
 async def create_claim(request: Request, response: Response, body: ClaimRow):
     try:
-        row = AcysClaims(
-            airline=body.airline.strip(),
-            calendar_year=body.calendar_year,
-            number_of_claims=body.number_of_claims,
-            claim_amount=body.claim_amount,
-            currency=body.currency,
-            policy_type=body.policy_type,
-            claims_status=body.claims_status,
-        )
         async with request.app.state.db_client.session(_DB) as session:
+            match = await resolve_airline(session, body.airline)
+            if match.resolved is None:
+                return warning_response(
+                    request=request, response=response,
+                    msg=_unresolved_msg(match),
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                )
+
+            try:
+                rate = await get_usd_rate(getattr(request.state, "redis", None),
+                                          body.currency.value)
+            except RateUnavailable as ex:
+                logger.error(f"create_claim: FX unavailable: {ex}")
+                return warning_response(
+                    request=request, response=response,
+                    msg=f"Could not obtain a {body.currency.value}->USD rate, so the row was not "
+                        f"written: {ex}",
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                )
+
+            row = AcysClaims(
+                airline=match.resolved,
+                calendar_year=body.calendar_year,
+                number_of_claims=body.number_of_claims,
+                claim_amount=body.claim_amount,
+                currency=body.currency,
+                policy_type=body.policy_type,
+                claims_status=body.claims_status,
+                currency_rate=rate,
+                claim_amounts_usd=to_usd(body.claim_amount, rate),
+            )
             session.add(row)
             try:
                 await session.flush()
@@ -278,8 +332,13 @@ async def create_claim(request: Request, response: Response, body: ClaimRow):
                 return warning_response(request=request, response=response, msg=msg,
                                         status_code=status.HTTP_409_CONFLICT)
             data = _json(row)
-        return success_response(request=request, response=response, data=data,
-                                status_code=status.HTTP_201_CREATED)
+            if match.changed:
+                # surfaced, not silent: the caller sees that the name they sent was corrected
+                data["airline_resolved_from"] = match.typed
+        return success_response(
+            request=request, response=response, data=data,
+            msg=(f"Airline resolved to '{match.resolved}'" if match.changed else "Success"),
+            status_code=status.HTTP_201_CREATED)
     except Exception as ex:
         logger.error(f"create_claim failed: {ex}")
         return error_response(request=request, response=response, exc=ex)
@@ -289,57 +348,69 @@ async def create_claim(request: Request, response: Response, body: ClaimRow):
     "/bulk",
     description=(
         "Load many rows in ONE transaction — either all of them land or none do, so a rejected sheet "
-        "never leaves a half-imported year behind. With `upsert=true` (default) a row whose grain "
-        "already exists is overwritten with the new count and amount, which makes re-loading a "
-        "corrected sheet safe and repeatable. Duplicate grains WITHIN one call are rejected outright "
-        "rather than silently letting the last one win."
+        "never leaves a half-imported year behind. Every airline name is resolved against the "
+        "reference data and every amount converted to USD before anything is written; one "
+        "unresolvable name or one unavailable rate rejects the whole batch. EVERY row is then "
+        "inserted, including rows repeating a grain already in the table or repeated within the "
+        "batch — duplicates are kept as sent, nothing is merged or overwritten. Re-sending the same "
+        "sheet therefore stores it a second time."
     ),
     responses=build_responses(include={
-        status.HTTP_200_OK, status.HTTP_400_BAD_REQUEST, status.HTTP_409_CONFLICT,
-        status.HTTP_500_INTERNAL_SERVER_ERROR,
+        status.HTTP_200_OK, status.HTTP_400_BAD_REQUEST,
+        status.HTTP_502_BAD_GATEWAY, status.HTTP_500_INTERNAL_SERVER_ERROR,
     }),
     dependencies=[Depends(authorize(SCOPE_PREDICTIVE_WRITE))],
 )
 async def bulk_load_claims(request: Request, response: Response, body: ClaimBulk):
     try:
-        values = []
-        seen = {}
-        for i, r in enumerate(body.rows):
-            key = (r.airline.strip().lower(), r.calendar_year, r.currency,
-                   r.policy_type, r.claims_status)
-            if key in seen:
+        async with request.app.state.db_client.session(_DB) as session:
+            # One lookup per DISTINCT spelling and per DISTINCT currency, not per row: a sheet is
+            # hundreds of rows over a handful of carriers and two or three currencies.
+            matches = await resolve_airlines(session, [r.airline for r in body.rows])
+            unresolved = [
+                _unresolved_msg(matches[r.airline], i)
+                for i, r in enumerate(body.rows) if matches[r.airline].resolved is None
+            ]
+            if unresolved:
                 return warning_response(
                     request=request, response=response,
-                    msg=(f"Rows {seen[key]} and {i} are the same airline / year / currency / policy "
-                         f"type / status. Combine them before loading."),
+                    # cap the message: a sheet with 300 bad names should not return 300 paragraphs
+                    msg=" | ".join(unresolved[:5]) + (
+                        f" | ...and {len(unresolved) - 5} more" if len(unresolved) > 5 else ""),
                     status_code=status.HTTP_400_BAD_REQUEST,
                 )
-            seen[key] = i
-            values.append({
-                "airline": r.airline.strip(),
-                "calendar_year": r.calendar_year,
-                "number_of_claims": r.number_of_claims,
-                "claim_amount": r.claim_amount,
-                "currency": r.currency,
-                "policy_type": r.policy_type,
-                "claims_status": r.claims_status,
-            })
 
-        stmt = pg_insert(AcysClaims).values(values)
-        if body.upsert:
-            stmt = stmt.on_conflict_do_update(
-                constraint="uq_acys_claims_grain",
-                set_={
-                    "number_of_claims": stmt.excluded.number_of_claims,
-                    "claim_amount": stmt.excluded.claim_amount,
-                    "updated_at": func.now(),
-                },
-            )
-        # RETURNING tells inserts from updates: a row whose id is also in the pre-existing set was
-        # overwritten, so the caller learns what the load actually did instead of guessing.
-        stmt = stmt.returning(AcysClaims.id, AcysClaims.created_at, AcysClaims.updated_at)
+            try:
+                rates = await get_usd_rates(getattr(request.state, "redis", None),
+                                            {r.currency.value for r in body.rows})
+            except RateUnavailable as ex:
+                logger.error(f"bulk_load_claims: FX unavailable: {ex}")
+                return warning_response(
+                    request=request, response=response,
+                    msg=f"Could not obtain an FX rate, so nothing was written: {ex}",
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                )
 
-        async with request.app.state.db_client.session(_DB) as session:
+            # Every row is inserted, in the order it was sent. Rows repeating a grain — already in
+            # the table, or twice within this batch — are NOT merged or rejected: duplicates are
+            # kept, so the stored set is exactly what was sent.
+            values = []
+            for r in body.rows:
+                rate = rates[r.currency.value]
+                values.append({
+                    "airline": matches[r.airline].resolved,
+                    "calendar_year": r.calendar_year,
+                    "number_of_claims": r.number_of_claims,
+                    "claim_amount": r.claim_amount,
+                    "currency": r.currency,
+                    "policy_type": r.policy_type,
+                    "claims_status": r.claims_status,
+                    "currency_rate": rate,
+                    "claim_amounts_usd": to_usd(r.claim_amount, rate),
+                })
+
+            stmt = pg_insert(AcysClaims).values(values).returning(AcysClaims.id)
+
             try:
                 result = (await session.execute(stmt)).all()
             except IntegrityError as ex:
@@ -349,14 +420,20 @@ async def bulk_load_claims(request: Request, response: Response, body: ClaimBulk
                 await session.rollback()
                 return warning_response(request=request, response=response, msg=msg,
                                         status_code=status.HTTP_409_CONFLICT)
-            updated = sum(1 for _id, created, upd in result if upd and created and upd > created)
             ids = [r[0] for r in result]
 
+        # Report the corrections rather than applying them silently: a caller comparing their sheet
+        # against what was stored needs to know which names the reference data changed.
+        corrections = [{"typed": m.typed, "resolved": m.resolved}
+                       for m in matches.values() if m.changed]
         return success_response(
             request=request, response=response,
-            data={"received": len(values), "written": len(ids),
-                  "inserted": len(ids) - updated, "updated": updated, "ids": ids},
-            msg=f"Loaded {len(ids)} claims rows",
+            data={"received": len(values), "inserted": len(ids), "ids": ids,
+                  "airlines_resolved": corrections,
+                  "rates_used": {cur: float(rate) for cur, rate in rates.items()}},
+            msg=(f"Loaded {len(ids)} claims rows"
+                 + (f"; {len(corrections)} airline name(s) resolved to the reference spelling"
+                    if corrections else "")),
         )
     except Exception as ex:
         logger.error(f"bulk_load_claims failed: {ex}")
@@ -366,13 +443,15 @@ async def bulk_load_claims(request: Request, response: Response, body: ClaimBulk
 @router.patch(
     "/{claim_id}",
     description=(
-        "Correct one row. Only the fields present in the body change. Moving a row onto a grain that "
-        "another row already occupies is refused with 409 — merge them yourself rather than having "
-        "one silently absorb the other."
+        "Correct one row. Only the fields present in the body change. A new airline name goes "
+        "through the same resolution as a load, and changing the amount or the currency RE-CONVERTS "
+        "the row at the current rate — otherwise the stored USD figure would keep converting a "
+        "number that is no longer there. Moving a row onto a grain another row already occupies is "
+        "allowed: duplicates are kept."
     ),
     responses=build_responses(include={
         status.HTTP_200_OK, status.HTTP_400_BAD_REQUEST, status.HTTP_404_NOT_FOUND,
-        status.HTTP_409_CONFLICT, status.HTTP_500_INTERNAL_SERVER_ERROR,
+        status.HTTP_502_BAD_GATEWAY, status.HTTP_500_INTERNAL_SERVER_ERROR,
     }),
     dependencies=[Depends(authorize(SCOPE_PREDICTIVE_WRITE))],
 )
@@ -390,9 +469,6 @@ async def update_claim(
                 msg="Empty body: nothing to update",
                 status_code=status.HTTP_400_BAD_REQUEST,
             )
-        if "airline" in changes and changes["airline"]:
-            changes["airline"] = changes["airline"].strip()
-
         async with request.app.state.db_client.session(_DB) as session:
             row = await session.get(AcysClaims, claim_id)
             if row is None:
@@ -401,6 +477,40 @@ async def update_claim(
                     msg=f"Claims row {claim_id} not found",
                     status_code=status.HTTP_404_NOT_FOUND,
                 )
+
+            resolved_note = None
+            if changes.get("airline"):
+                match = await resolve_airline(session, changes["airline"])
+                if match.resolved is None:
+                    return warning_response(
+                        request=request, response=response,
+                        msg=_unresolved_msg(match),
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                    )
+                changes["airline"] = match.resolved
+                if match.changed:
+                    resolved_note = match
+
+            # The conversion is a function of (amount, currency). Touch either and the stored pair
+            # is stale, so it is recomputed — at today's rate, which is also what a fresh load would
+            # have used.
+            if "claim_amount" in changes or "currency" in changes:
+                new_currency = changes.get("currency", row.currency)
+                new_amount = changes.get("claim_amount", row.claim_amount)
+                try:
+                    rate = await get_usd_rate(getattr(request.state, "redis", None),
+                                              new_currency.value)
+                except RateUnavailable as ex:
+                    logger.error(f"update_claim: FX unavailable: {ex}")
+                    return warning_response(
+                        request=request, response=response,
+                        msg=f"Could not obtain a {new_currency.value}->USD rate, so the row was not "
+                            f"changed: {ex}",
+                        status_code=status.HTTP_502_BAD_GATEWAY,
+                    )
+                changes["currency_rate"] = rate
+                changes["claim_amounts_usd"] = to_usd(new_amount, rate)
+
             for field, value in changes.items():
                 setattr(row, field, value)
             try:
@@ -417,7 +527,12 @@ async def update_claim(
             # Routers/Claims.py does after its own update.
             await session.refresh(row)
             data = _json(row)
-        return success_response(request=request, response=response, data=data)
+            if resolved_note is not None:
+                data["airline_resolved_from"] = resolved_note.typed
+        return success_response(
+            request=request, response=response, data=data,
+            msg=(f"Airline resolved to '{resolved_note.resolved}'"
+                 if resolved_note is not None else "Success"))
     except Exception as ex:
         logger.error(f"update_claim failed: {ex}")
         return error_response(request=request, response=response, exc=ex)

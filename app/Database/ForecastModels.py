@@ -11,7 +11,7 @@ from decimal import Decimal
 from enum import Enum as PyEnum
 
 from sqlalchemy import (
-    String, Integer, Numeric, Enum, CheckConstraint, UniqueConstraint, Index,
+    String, Integer, Numeric, Enum, CheckConstraint, Index,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -77,9 +77,14 @@ class AcysClaims(Base):
     specific aircraft and policy. This table is the summary a broker's claims-experience sheet
     states directly, loaded as given; it is a reporting input, not a derived rollup of that table.
 
-    Grain (and the natural key): airline × calendar_year × currency × policy_type × claims_status.
-    Settled and Ongoing are separate rows for the same year, as are two currencies — which is why
-    the amount is never summed across the currency column.
+    Grain: airline × calendar_year × currency × policy_type × claims_status. Settled and Ongoing are
+    separate rows for the same year, as are two currencies — which is why `claim_amount` is never
+    summed across the currency column (`claim_amounts_usd` is the one that may be).
+
+    The grain is NOT unique: duplicates are kept exactly as sent. A sheet may legitimately state the
+    same combination more than once, and the loader is not the place to decide which one is real. The
+    consequence to know: loading the same sheet twice stores it twice — there is no upsert to fall
+    back on, because there is no unique key for one to target.
     """
     __tablename__ = "acys_claims"
 
@@ -93,16 +98,39 @@ class AcysClaims(Base):
     policy_type: Mapped[ClaimPolicyType] = mapped_column(_POLICY_TYPE_ENUM, nullable=False)
     claims_status: Mapped[ClaimsStatus] = mapped_column(_CLAIMS_STATUS_ENUM, nullable=False)
 
+    # The currency -> USD rate applied when the row was loaded, and claim_amount converted with it.
+    # `claim_amounts_usd` is the ONLY amount that may be totalled across currencies; claim_amount
+    # stays in its own currency and summing that column across rows is meaningless.
+    #
+    # The rate is kept alongside the product, not thrown away: a converted figure that looks wrong
+    # later can be traced back to the exact rate it was booked at, and a row loaded a year ago stays
+    # explicable. USD rows carry rate = 1 rather than NULL, so "converted" and "not converted" are
+    # the same shape.
+    #
+    # Nullable as a pair (enforced by ck_acys_claims_usd_pair_complete): a row written when no FX
+    # source was reachable has neither, instead of a silently wrong amount.
+    currency_rate: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=True, default=None)
+    claim_amounts_usd: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=True, default=None)
+
     __table_args__ = (
-        # One row per grain — this is what lets a re-import UPSERT instead of duplicating a year.
-        UniqueConstraint("airline", "calendar_year", "currency", "policy_type", "claims_status",
-                         name="uq_acys_claims_grain"),
+        # The grain is how the table is READ — "everything this airline had in this year, by cover
+        # section and state" — but it is deliberately NOT unique: duplicates are kept as sent. That
+        # is why there is no upsert; loading the same sheet twice stores it twice.
+        Index("ix_acys_claims_grain",
+              "airline", "calendar_year", "currency", "policy_type", "claims_status"),
         # The service filters by airline before handing PowerBI its slice; year-within-airline is
         # the ordering the report reads in.
         Index("ix_acys_claims_airline_year", "airline", "calendar_year"),
         CheckConstraint("number_of_claims >= 0", name="ck_acys_claims_count_non_negative"),
         CheckConstraint("claim_amount >= 0", name="ck_acys_claims_amount_non_negative"),
         CheckConstraint("calendar_year BETWEEN 1950 AND 2200", name="ck_acys_claims_year_sane"),
+        # The converted amount and the rate it came from are one fact: half of it is not auditable.
+        CheckConstraint("(currency_rate IS NULL) = (claim_amounts_usd IS NULL)",
+                        name="ck_acys_claims_usd_pair_complete"),
+        CheckConstraint("currency_rate IS NULL OR currency_rate > 0",
+                        name="ck_acys_claims_rate_positive"),
+        CheckConstraint("claim_amounts_usd IS NULL OR claim_amounts_usd >= 0",
+                        name="ck_acys_claims_usd_non_negative"),
     )
 
 

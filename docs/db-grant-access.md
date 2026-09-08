@@ -32,7 +32,7 @@ as the `postgres` superuser.
 |---|---|---|
 | `grp_aixii_read` | `USAGE` + `SELECT` | **all** `aixii` schemas (sources + `api` + any read-exposed schema like `forecast`) |
 | `grp_aviation_write` | `USAGE` + DML (`SELECT/INSERT/UPDATE/DELETE`) + sequence usage | the source schemas: `flightradar`, `aviationedge`, `cirium`, `airlabs`, `icao` |
-| `grp_api_write` | `USAGE` + DML + sequence usage | `api` only |
+| `grp_api_write` | `USAGE` + DML + sequence usage | `api`, plus the single table `forecast.acys_claims` (see note below) |
 | `grp_service_write` | `USAGE` + DML + sequence usage | `public` schema of the **`service`** DB |
 
 ### Login users (what actually connects) + their group membership
@@ -42,8 +42,21 @@ as the `postgres` superuser.
 | `bi_reader` | PowerBI / BI read-only | `grp_aixii_read` | SELECT on all read-exposed `aixii` schemas. **No** CONNECT to `service`. |
 | `svc_external_worker` | external-worker service | `grp_aviation_write`, `grp_service_write` | DML on sources + `service`; SELECT on `api` (granted directly, see setup script). |
 | `svc_file_worker` | file-processor service | `grp_aviation_write`, `grp_service_write` | DML on sources + `service`. |
-| `svc_api` | Core-API runtime | `grp_aixii_read`, `grp_api_write`, `grp_service_write` | SELECT everywhere in `aixii` + DML on `api` + DML on `service`. |
+| `svc_api` | Core-API runtime | `grp_aixii_read`, `grp_api_write`, `grp_service_write` | SELECT everywhere in `aixii` + DML on `api` + DML on `service` + DML on `forecast.acys_claims`. |
 | `developer` | owner / migrator (SUPERUSER) | — (owns everything) | Everything. Alembic runs as this role. |
+
+> **The one exception to "`grp_api_write` = schema `api`":** `forecast.acys_claims` is written by
+> Core-API (`POST /forecast/claims`) while everything else in `forecast` is produced by
+> external-worker's ACYS panel. So that ONE table is granted to `grp_api_write` explicitly — table
+> DML plus its sequence plus `USAGE` on the schema — and **no default privileges were added for
+> `grp_api_write` in `forecast`**, on purpose: the panel's own tables (`acys_actuals`,
+> `acys_summary_by_day`, …) must stay unwritable by the API. A second API-written table there repeats
+> the same three grants; that friction is the point. See migration `b7c1f4a92de3`.
+>
+> **Testing note:** Alembic and psql sessions run as `developer`, which OWNS every table and therefore
+> never consults a grant — a missing privilege is invisible there and only surfaces in the service.
+> To check a new table the way the runtime sees it, `SET LOCAL ROLE svc_api` inside a transaction,
+> attempt the write, and roll back.
 
 **Guiding principle:** migrations run as `developer`; runtime services get **DML only**, BI gets
 **SELECT only**. `ALTER DEFAULT PRIVILEGES FOR ROLE developer …` then auto-grants every *future* table
