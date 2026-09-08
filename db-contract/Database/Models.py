@@ -13,6 +13,7 @@ from .AviationEdgeModels import *
 from .ApiModels import *
 from .IcaoModels import *
 from .FlightAwareModels import *
+from .ForecastModels import *
 
 
 
