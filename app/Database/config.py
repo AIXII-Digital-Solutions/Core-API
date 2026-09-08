@@ -87,6 +87,16 @@ class FlightAwareBase(AsyncAttrs, BaseMixin, DeclarativeBase):
     metadata = MetaData(schema="flightaware")
 
 
+# Base class for Forecast models -> schema `forecast` (in the aixii database).
+# NOTE: the schema predates this Base — the ACYS panel's tables and matviews (acys_actuals,
+# acys_summary_by_day, acys_summary_grouped, …) are created by hand-written migrations and have no
+# ORM model. That is deliberate and stays that way: `migration/env.py`'s include_object only manages
+# tables that appear in the metadata, so the unmodelled objects are invisible to autogenerate and
+# are never dropped. Only tables declared HERE are Alembic-managed.
+class ForecastBase(AsyncAttrs, BaseMixin, DeclarativeBase):
+    metadata = MetaData(schema="forecast")
+
+
 # Base for cirium MATERIALIZED VIEWS (read-only): cirium.asg / cirium.delta. Its MetaData is
 # deliberately NOT added to the Alembic aixii target (migration/env.py), so autogenerate never
 # tries to manage these as tables — the views are created/dropped by hand-written op.execute
