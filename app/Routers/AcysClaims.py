@@ -28,10 +28,13 @@ TWO THINGS HAPPEN ON THE WAY IN, and both are why a load can be rejected:
    resolved CONFIDENTLY is reported with its near misses rather than guessed at — see
    Utils/AirlineResolver.py for why a threshold alone is not enough.
 
-2. THE AMOUNT IS CONVERTED TO USD. The currency -> USD rate is fetched (cached per publication day)
-   and stored in `currency_rate`, with claim_amount x rate in `claim_amounts_usd`. USD rows get a
-   rate of exactly 1 and the amount unchanged, so every row has the same shape. If no FX source
-   answers, the write is refused rather than stored unconverted.
+2. THE AMOUNT IS CONVERTED TO USD, AT ITS OWN YEAR'S RATE. A 2019 row is converted at the 2019
+   close-of-year rate, not today's — converting old claims at a current rate restates history by
+   tens of percent. Only a row in the current year uses the latest published rate, since its
+   31 December has not happened yet. The rate goes in `currency_rate` and claim_amount x rate in
+   `claim_amounts_usd`; USD rows get a rate of exactly 1 and the amount unchanged, so every row has
+   the same shape. A year with no published series (before 1999) and an unreachable FX source both
+   refuse the write rather than storing it unconverted.
 
     GET    /forecast/claims           list, filtered (airline, year range, currency, type, status)
     GET    /forecast/claims/{id}      one row
@@ -277,7 +280,8 @@ async def get_claim(
         "Add one claims row. The airline name is resolved against the reference data first (a "
         "one-character misspelling still lands on the right carrier; the stored name is the "
         "reference spelling, and the response reports the correction), and the amount is converted "
-        "to USD at the current rate. A row repeating one already in the table is stored as another "
+        "to USD at the rate of the row's OWN calendar year (the latest rate only for a row in the "
+        "current year). A row repeating one already in the table is stored as another "
         "row — duplicates are kept, not merged. Fails with 400 if the airline cannot be resolved "
         "confidently and 502 if no FX source answers."
     ),
@@ -300,13 +304,13 @@ async def create_claim(request: Request, response: Response, body: ClaimRow):
 
             try:
                 rate = await get_usd_rate(getattr(request.state, "redis", None),
-                                          body.currency.value)
+                                          body.currency.value, body.calendar_year)
             except RateUnavailable as ex:
                 logger.error(f"create_claim: FX unavailable: {ex}")
                 return warning_response(
                     request=request, response=response,
-                    msg=f"Could not obtain a {body.currency.value}->USD rate, so the row was not "
-                        f"written: {ex}",
+                    msg=f"Could not obtain a {body.currency.value}->USD rate for "
+                        f"{body.calendar_year}, so the row was not written: {ex}",
                     status_code=status.HTTP_502_BAD_GATEWAY,
                 )
 
@@ -349,8 +353,9 @@ async def create_claim(request: Request, response: Response, body: ClaimRow):
     description=(
         "Load many rows in ONE transaction — either all of them land or none do, so a rejected sheet "
         "never leaves a half-imported year behind. Every airline name is resolved against the "
-        "reference data and every amount converted to USD before anything is written; one "
-        "unresolvable name or one unavailable rate rejects the whole batch. EVERY row is then "
+        "reference data and every amount converted to USD — each row at its own calendar year's "
+        "rate — before anything is written; one unresolvable name or one unavailable rate rejects "
+        "the whole batch. EVERY row is then "
         "inserted, including rows repeating a grain already in the table or repeated within the "
         "batch — duplicates are kept as sent, nothing is merged or overwritten. Re-sending the same "
         "sheet therefore stores it a second time."
@@ -381,8 +386,10 @@ async def bulk_load_claims(request: Request, response: Response, body: ClaimBulk
                 )
 
             try:
-                rates = await get_usd_rates(getattr(request.state, "redis", None),
-                                            {r.currency.value for r in body.rows})
+                # one lookup per (currency, year) the batch actually contains
+                rates = await get_usd_rates(
+                    getattr(request.state, "redis", None),
+                    {(r.currency.value, r.calendar_year) for r in body.rows})
             except RateUnavailable as ex:
                 logger.error(f"bulk_load_claims: FX unavailable: {ex}")
                 return warning_response(
@@ -396,7 +403,7 @@ async def bulk_load_claims(request: Request, response: Response, body: ClaimBulk
             # kept, so the stored set is exactly what was sent.
             values = []
             for r in body.rows:
-                rate = rates[r.currency.value]
+                rate = rates[(r.currency.value, r.calendar_year)]
                 values.append({
                     "airline": matches[r.airline].resolved,
                     "calendar_year": r.calendar_year,
@@ -430,7 +437,8 @@ async def bulk_load_claims(request: Request, response: Response, body: ClaimBulk
             request=request, response=response,
             data={"received": len(values), "inserted": len(ids), "ids": ids,
                   "airlines_resolved": corrections,
-                  "rates_used": {cur: float(rate) for cur, rate in rates.items()}},
+                  "rates_used": [{"currency": cur, "calendar_year": yr, "rate": float(rate)}
+                                 for (cur, yr), rate in sorted(rates.items())]},
             msg=(f"Loaded {len(ids)} claims rows"
                  + (f"; {len(corrections)} airline name(s) resolved to the reference spelling"
                     if corrections else "")),
@@ -444,9 +452,9 @@ async def bulk_load_claims(request: Request, response: Response, body: ClaimBulk
     "/{claim_id}",
     description=(
         "Correct one row. Only the fields present in the body change. A new airline name goes "
-        "through the same resolution as a load, and changing the amount or the currency RE-CONVERTS "
-        "the row at the current rate — otherwise the stored USD figure would keep converting a "
-        "number that is no longer there. Moving a row onto a grain another row already occupies is "
+        "through the same resolution as a load, and changing the amount, the currency OR the "
+        "calendar year RE-CONVERTS the row at that year's rate — otherwise the stored USD figure "
+        "would keep converting a number, or a year, that is no longer there. Moving a row onto a grain another row already occupies is "
         "allowed: duplicates are kept."
     ),
     responses=build_responses(include={
@@ -491,21 +499,22 @@ async def update_claim(
                 if match.changed:
                     resolved_note = match
 
-            # The conversion is a function of (amount, currency). Touch either and the stored pair
-            # is stale, so it is recomputed — at today's rate, which is also what a fresh load would
-            # have used.
-            if "claim_amount" in changes or "currency" in changes:
+            # The conversion is a function of (amount, currency, year) — the year included,
+            # because the rate is that year's. Touch any of the three and the stored pair is stale,
+            # so it is recomputed exactly as a fresh load would have computed it.
+            if {"claim_amount", "currency", "calendar_year"} & set(changes):
                 new_currency = changes.get("currency", row.currency)
                 new_amount = changes.get("claim_amount", row.claim_amount)
+                new_year = changes.get("calendar_year", row.calendar_year)
                 try:
                     rate = await get_usd_rate(getattr(request.state, "redis", None),
-                                              new_currency.value)
+                                              new_currency.value, new_year)
                 except RateUnavailable as ex:
                     logger.error(f"update_claim: FX unavailable: {ex}")
                     return warning_response(
                         request=request, response=response,
-                        msg=f"Could not obtain a {new_currency.value}->USD rate, so the row was not "
-                            f"changed: {ex}",
+                        msg=f"Could not obtain a {new_currency.value}->USD rate for {new_year}, so "
+                            f"the row was not changed: {ex}",
                         status_code=status.HTTP_502_BAD_GATEWAY,
                     )
                 changes["currency_rate"] = rate
