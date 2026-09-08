@@ -27,6 +27,15 @@ class CiriumAircrafts(Base):
         Index("ix_cirium_revision_serial", "revision_id", "Registration", "Serial Number"),
         # cross-revision self-join key used by the asg / delta materialized views + reg+sn search
         Index("ix_cirium_reg_serial", "Registration", "Serial Number"),
+        # The party/status search indexes. They were added straight to the database by the
+        # plan_type migration and never declared here, so autogenerate kept proposing to DROP
+        # them — declaring them with their EXISTING names is what settles that, and the names
+        # are the ones already in the database (not SQLAlchemy's schema-qualified default), so
+        # this is a metadata-only reconciliation with nothing to rebuild.
+        Index("ix_ciriumaircrafts_operator", "Operator"),
+        Index("ix_ciriumaircrafts_owner", "Owner"),
+        Index("ix_ciriumaircrafts_manager", "Manager"),
+        Index("ix_ciriumaircrafts_status", "Status"),
     )
     revision_id: Mapped[int] = mapped_column(
         ForeignKey(AircraftRevision.id, ondelete="CASCADE"),
