@@ -46,8 +46,10 @@ END $$;
 
 
 def _rebuild(musd: bool) -> None:
+    # type_cols=False on both sides: the Manufacturer / Master Series / Current Family columns belong to
+    # forecast_detail_type_cols, a later revision, not to this one.
     op.execute(f"DROP VIEW IF EXISTS {_VIEW}")
-    op.execute(_detailed_ac_info(musd=musd))
+    op.execute(_detailed_ac_info(musd=musd, type_cols=False))
     op.execute(_GRANTS)
 
 
