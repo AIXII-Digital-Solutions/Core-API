@@ -36,6 +36,12 @@ def _dateint(col: str) -> str:
 
 
 _MK = """"Registration" || '|' || coalesce("Aircraft Sub Series",'') || '|' || "Period\""""
+
+# The Agreed Value a WET-lease month carries. Not a price: external-worker's panel writes it instead of 0
+# (a plain zero reads as a real "$0 airframe" and collapses BI ratios), and the four CY-shaped columns below
+# reuse it for a wet row, which otherwise shows four empty cells — the four are computed from DRY months
+# only, and a wet row has none. Must stay equal to the panel's own constant.
+_WET_SENTINEL = "0.00001"
 _PERIOD_DATE = """to_date("Period", 'MM-YYYY')"""
 
 # The "Date" column is day-precise and aligned to the Contract-Year boundary. A Contract Year runs
@@ -171,7 +177,16 @@ def _age_group_sort(delivery: str = '"Delivery Date"', period_date: str = _PERIO
     return f"split_part({_age_group(delivery, period_date)}, '.', 1)::int"
 
 
-def _grouped(route_cols: bool) -> str:
+# `wet_sentinel` — what the four CY-shaped Agreed-Value columns show on a WET row. The model computes them
+# from dry months alone, so a wet row inherited whatever its contract year's dry months said, or NULL when
+# the tail was wet all year. True (today) puts the wet marker there instead, so a wet row reads the same
+# 0.00001 in every Agreed-Value column it has — including "Agreed Value" itself, which already carries it
+# from acys_summary_by_day. acys_summary_grouped_by_reg follows automatically: it MAXes these columns within
+# a row that is wet by definition. False is the shape before forecast_wet_sentinel_grouped.
+def _grouped(route_cols: bool, wet_sentinel: bool = True) -> str:
+    def cy(expr: str) -> str:
+        return (f"""CASE WHEN "Lease Dry Wet" = 'Wet' THEN {_WET_SENTINEL} ELSE {expr} END"""
+                if wet_sentinel else expr)
     routekey = f'    {_ROUTE_KEY} AS "ROUTE_KEY",\n' if route_cols else ""
     od = (f'    {_OD} AS "OD City&Country",\n'
           f'    {_CITY_ROUTE} AS "City Pairs",\n'
@@ -200,10 +215,10 @@ SELECT
     {_period_daily()} AS "Date",
     {_dateint(_period_daily())} AS "DateInt",
 {od}{_AGG},
-    max(cyv.inception) AS "Agreed Value on Inception",
-    max(cyv.at_end)    AS "Agreed Value at the End of the Contract",
-    max(cyv.wavg)      AS "Weighted Average Agreed Value",
-    max(cyv.awavg)     AS "Activity-Weighted Average Agreed Value",
+    {cy("max(cyv.inception)")} AS "Agreed Value on Inception",
+    {cy("max(cyv.at_end)")}    AS "Agreed Value at the End of the Contract",
+    {cy("max(cyv.wavg)")}      AS "Weighted Average Agreed Value",
+    {cy("max(cyv.awavg)")}     AS "Activity-Weighted Average Agreed Value",
     {_age_group()} AS "Age Group",
     {_age_group_sort()} AS "Age Group Sort"
 FROM forecast.acys_summary_by_day s
@@ -702,12 +717,12 @@ def _drop_chain() -> None:
     op.execute("DROP MATERIALIZED VIEW IF EXISTS forecast.acys_summary_grouped")
 
 
-def _rebuild(route_cols: bool) -> None:
+def _rebuild(route_cols: bool, wet_sentinel: bool = True) -> None:
     # Built in dependency order, each matview WITH DATA reading the one it sits on:
     # acys_summary_by_day (table) -> grouped -> grouped_by_reg -> {by_reg_and_year, aircraft_information};
     # z_dates_acys reads acys_summary_by_day directly. Every panel run REFRESHes them in this same order
     # (panel.py).
-    op.execute(_grouped(route_cols))
+    op.execute(_grouped(route_cols, wet_sentinel))
     for ix in _INDEXES:
         op.execute(ix)
     if route_cols:
@@ -733,9 +748,11 @@ def _rebuild(route_cols: bool) -> None:
 
 def upgrade() -> None:
     _drop_chain()
-    _rebuild(route_cols=True)
+    # wet_sentinel=False: the marker in the four CY columns belongs to forecast_wet_sentinel_grouped, a
+    # later revision. This one builds the shape it introduced.
+    _rebuild(route_cols=True, wet_sentinel=False)
 
 
 def downgrade() -> None:
     _drop_chain()
-    _rebuild(route_cols=False)
+    _rebuild(route_cols=False, wet_sentinel=False)
