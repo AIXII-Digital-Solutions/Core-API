@@ -217,7 +217,7 @@ def upgrade() -> None:
     op.bulk_insert(mapping, [{"Current Family": f, "Body Type": b} for f, b in _BODY_TYPES])
     # musd=False: the shape THIS revision introduced — raw dollars and an integer YOM. The later
     # forecast_detailed_ac_info_musd rebuilds it in millions with a text YOM.
-    op.execute(_detailed_ac_info(musd=False))
+    op.execute(_detailed_ac_info(musd=False, type_cols=False))
     op.execute(_GRANTS)
 
 
