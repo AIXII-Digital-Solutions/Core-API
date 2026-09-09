@@ -333,6 +333,77 @@ GROUP BY "Registration", "Contract Year", "Data Type"
 """
 
 
+# forecast.detailed_aircraft_information — the per-tail fleet sheet the report renders: one row per
+# aircraft-YEAR (Registration x Contract Year x Data Type, i.e. by_reg_and_year's grain), carrying the four
+# Agreed-Value columns of that year next to the tail's identity and lease attributes.
+#
+# A plain VIEW, not a matview: everything it reads is already materialised, so it costs a join over a few
+# thousand rows and — unlike a snapshot — it can never be stale relative to its parents, which means no extra
+# REFRESH in the panel job.
+#
+# The tail attributes (MSN / Owner / Manager / Lessor / Lease) are read as of the LAST month of THAT
+# aircraft-year (the `ylast` CTE, since by_reg_and_year itself no longer carries a Period), so a tail that
+# changed lessor or went Wet mid-horizon shows each year's own end state rather than today's.
+#
+# "CSL / mUSD" is the insurance combined single limit implied by the airframe's size: 1000 for a Wide Body,
+# 650 for anything else — including a family the mapping does not know and a tail with no Cirium family at
+# all. The Current Family -> Body Type mapping is the static powerbi.body_type_mapping table (loaded from
+# .misc/Body Type Mapping.xlsx by the forecast_detailed_aircraft_info migration).
+_DETAILED_AC_INFO = """
+CREATE VIEW forecast.detailed_aircraft_information AS
+WITH ylast AS (
+    SELECT "Registration" reg, "Contract Year" cy, "Data Type" dt,
+           (array_agg("Period" ORDER BY to_date("Period", 'MM-YYYY') DESC))[1] AS period
+    FROM forecast.acys_summary_grouped_by_reg
+    GROUP BY 1, 2, 3
+)
+SELECT
+    ai."Aircraft Sub Series"                    AS "Aircraft Type",
+    y."Registration",
+    y."Contract Year",
+    y."Data Type",
+    ai."MSN",
+    extract(year from y."Delivery Date")::int   AS "YOM",
+    y."Total Seats"                             AS "Seats",
+    y."Agreed Value on Inception"               AS "Agreed Value / INC / mUSD",
+    y."Weighted Average Agreed Value"           AS "Agreed Value / AVE / mUSD",
+    y."Activity-Weighted Average Agreed Value"  AS "Agreed Value / AW AVE / mUSD",
+    y."Agreed Value at the End of the Contract" AS "Agreed Value / EXP / mUSD",
+    CASE WHEN bt."Body Type" = 'Wide Body' THEN 1000 ELSE 650 END AS "CSL / mUSD",
+    ai."Operational Lessor"                     AS "Lessor",
+    ai."Manager",
+    ai."Owner",
+    ai."Lease Type"                             AS "Lease",
+    ai."Lease Dry Wet"                          AS "Lease Type"
+FROM forecast.acys_summary_grouped_by_reg_and_year y
+LEFT JOIN ylast l ON l.reg = y."Registration" AND l.cy = y."Contract Year" AND l.dt = y."Data Type"
+LEFT JOIN forecast.aircraft_information ai
+       ON ai."Registration" = y."Registration"
+      AND ai."Period" = l.period
+      AND ai."Aircraft Sub Series" IS NOT DISTINCT FROM y."Aircraft Sub Series"
+LEFT JOIN powerbi.body_type_mapping bt ON bt."Current Family" = ai."Current Family"
+"""
+
+# The view is rebuilt with the chain, but ONLY once its static mapping table exists: on a fresh database the
+# chain is built at THIS revision, while powerbi.body_type_mapping arrives later with
+# forecast_detailed_aircraft_info (which creates the view itself anyway). On a live database the table is
+# there, so a downgrade+upgrade of the chain restores the view.
+_DETAILED_AC_INFO_GUARDED = f"""
+DO $$
+BEGIN
+  IF to_regclass('powerbi.body_type_mapping') IS NOT NULL THEN
+    EXECUTE $ddl${_DETAILED_AC_INFO}$ddl$;
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'grp_aixii_read') THEN
+      EXECUTE 'GRANT SELECT ON forecast.detailed_aircraft_information TO grp_aixii_read';
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'grp_aviation_write') THEN
+      EXECUTE 'GRANT SELECT ON forecast.detailed_aircraft_information TO grp_aviation_write';
+    END IF;
+  END IF;
+END $$;
+"""
+
+
 def _lease(col: str) -> str:
     return f"coalesce(nullif(max(\"{col}\"),''), 'Not Leased') AS \"{col}\""
 
@@ -602,6 +673,7 @@ _Z_DATES_INDEXES = [
 
 def _drop_chain() -> None:
     op.execute("DROP VIEW IF EXISTS powerbi.z_age_group")
+    op.execute("DROP VIEW IF EXISTS forecast.detailed_aircraft_information")
     op.execute("DROP MATERIALIZED VIEW IF EXISTS powerbi.z_dates_acys")
     op.execute("DROP MATERIALIZED VIEW IF EXISTS forecast.aircraft_information")
     op.execute("DROP MATERIALIZED VIEW IF EXISTS forecast.acys_summary_grouped_by_reg_and_year")
@@ -635,6 +707,7 @@ def _rebuild(route_cols: bool) -> None:
     op.execute(_Z_AGE_GROUP)
     op.execute(_OWNER)
     op.execute(_GRANTS)
+    op.execute(_DETAILED_AC_INFO_GUARDED)
 
 
 def upgrade() -> None:
