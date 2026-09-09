@@ -19,14 +19,16 @@ own reasons, and this loader is not the place to decide which one is real. The c
 before re-running a load: sending the same sheet twice stores it twice — there is no upsert, because
 without a unique key there is nothing for one to target.
 
-TWO THINGS HAPPEN ON THE WAY IN, and both are why a load can be rejected:
+TWO THINGS HAPPEN ON THE WAY IN, and the second is why a load can be rejected:
 
 1. THE AIRLINE NAME IS RESOLVED against cirium.airlines — the same reference /airlines searches —
    with fuzzy matching, so "Corendon Airlnes Europe" is stored as "Corendon Airlines Europe". Hand-
    made sheets spell the same carrier several ways, and storing them verbatim splits one airline
    across rows that no per-airline total will ever bring back together. A name that cannot be
-   resolved CONFIDENTLY is reported with its near misses rather than guessed at — see
-   Utils/AirlineResolver.py for why a threshold alone is not enough.
+   resolved CONFIDENTLY is never guessed at — it is stored EXACTLY AS SENT and reported back with
+   its near misses, so an unknown carrier (or one the reference spells three ways at once) costs a
+   flag in the response, not a rejected sheet. See Utils/AirlineResolver.py for why a threshold
+   alone is not enough.
 
 2. THE AMOUNT IS CONVERTED TO USD, AT ITS OWN YEAR'S RATE. A 2019 row is converted at the 2019
    close-of-year rate, not today's — converting old claims at a current rate restates history by
@@ -46,6 +48,7 @@ TWO THINGS HAPPEN ON THE WAY IN, and both are why a load can be rejected:
 PowerBI reads the table (or a service-side filtered slice of it) directly as `bi_reader`; this router
 is the write path and the ad-hoc read path.
 """
+from collections import Counter
 from decimal import Decimal
 from typing import Optional, List
 
@@ -157,13 +160,13 @@ def _conflict_msg(ex: IntegrityError) -> Optional[str]:
     return None
 
 
-def _unresolved_msg(match, row_index: Optional[int] = None) -> str:
-    """Explain a rejected airline name and show what it nearly matched, so the caller can correct the
-    sheet instead of guessing at what the reference calls the carrier."""
-    where = f"row {row_index}: " if row_index is not None else ""
+def _unresolved_msg(match) -> str:
+    """Explain a name the reference could not settle and show what it nearly matched. The row is
+    written anyway, under the name as sent — this is the flag that says so, so a caller comparing
+    their sheet against the reference can fix the spelling later instead of losing the load now."""
     near = f" Nearest reference names: {', '.join(match.candidates[:3])}." if match.candidates else ""
-    return (f"{where}airline '{match.typed}' could not be resolved against the reference data "
-            f"({match.reason}).{near}")
+    return (f"airline '{match.typed}' is not in the reference data ({match.reason}) — "
+            f"stored as sent.{near}")
 
 
 @router.get(
@@ -282,11 +285,11 @@ async def get_claim(
         "reference spelling, and the response reports the correction), and the amount is converted "
         "to USD at the rate of the row's OWN calendar year (the latest rate only for a row in the "
         "current year). A row repeating one already in the table is stored as another "
-        "row — duplicates are kept, not merged. Fails with 400 if the airline cannot be resolved "
-        "confidently and 502 if no FX source answers."
+        "row — duplicates are kept, not merged. An airline the reference cannot settle is stored "
+        "exactly as sent and flagged in the response; only a missing FX rate refuses the write (502)."
     ),
     responses=build_responses(include={
-        status.HTTP_201_CREATED, status.HTTP_400_BAD_REQUEST,
+        status.HTTP_201_CREATED, status.HTTP_409_CONFLICT,
         status.HTTP_502_BAD_GATEWAY, status.HTTP_500_INTERNAL_SERVER_ERROR,
     }),
     dependencies=[Depends(authorize(SCOPE_PREDICTIVE_WRITE))],
@@ -294,13 +297,9 @@ async def get_claim(
 async def create_claim(request: Request, response: Response, body: ClaimRow):
     try:
         async with request.app.state.db_client.session(_DB) as session:
+            # An unresolved name is stored as sent (match.stored), never refused: see
+            # Utils/AirlineResolver.AirlineMatch.stored. It comes back flagged in the response.
             match = await resolve_airline(session, body.airline)
-            if match.resolved is None:
-                return warning_response(
-                    request=request, response=response,
-                    msg=_unresolved_msg(match),
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                )
 
             try:
                 rate = await get_usd_rate(getattr(request.state, "redis", None),
@@ -315,7 +314,7 @@ async def create_claim(request: Request, response: Response, body: ClaimRow):
                 )
 
             row = AcysClaims(
-                airline=match.resolved,
+                airline=match.stored,
                 calendar_year=body.calendar_year,
                 number_of_claims=body.number_of_claims,
                 claim_amount=body.claim_amount,
@@ -339,9 +338,12 @@ async def create_claim(request: Request, response: Response, body: ClaimRow):
             if match.changed:
                 # surfaced, not silent: the caller sees that the name they sent was corrected
                 data["airline_resolved_from"] = match.typed
+            elif match.resolved is None:
+                data["airline_unresolved"] = _unresolved_msg(match)
         return success_response(
             request=request, response=response, data=data,
-            msg=(f"Airline resolved to '{match.resolved}'" if match.changed else "Success"),
+            msg=(f"Airline resolved to '{match.resolved}'" if match.changed
+                 else _unresolved_msg(match) if match.resolved is None else "Success"),
             status_code=status.HTTP_201_CREATED)
     except Exception as ex:
         logger.error(f"create_claim failed: {ex}")
@@ -354,14 +356,15 @@ async def create_claim(request: Request, response: Response, body: ClaimRow):
         "Load many rows in ONE transaction — either all of them land or none do, so a rejected sheet "
         "never leaves a half-imported year behind. Every airline name is resolved against the "
         "reference data and every amount converted to USD — each row at its own calendar year's "
-        "rate — before anything is written; one unresolvable name or one unavailable rate rejects "
-        "the whole batch. EVERY row is then "
+        "rate — before anything is written; only an unavailable rate rejects the whole batch, while "
+        "a name the reference cannot settle is stored exactly as sent and listed back under "
+        "`airlines_unresolved`. EVERY row is then "
         "inserted, including rows repeating a grain already in the table or repeated within the "
         "batch — duplicates are kept as sent, nothing is merged or overwritten. Re-sending the same "
         "sheet therefore stores it a second time."
     ),
     responses=build_responses(include={
-        status.HTTP_200_OK, status.HTTP_400_BAD_REQUEST,
+        status.HTTP_200_OK, status.HTTP_409_CONFLICT,
         status.HTTP_502_BAD_GATEWAY, status.HTTP_500_INTERNAL_SERVER_ERROR,
     }),
     dependencies=[Depends(authorize(SCOPE_PREDICTIVE_WRITE))],
@@ -372,18 +375,6 @@ async def bulk_load_claims(request: Request, response: Response, body: ClaimBulk
             # One lookup per DISTINCT spelling and per DISTINCT currency, not per row: a sheet is
             # hundreds of rows over a handful of carriers and two or three currencies.
             matches = await resolve_airlines(session, [r.airline for r in body.rows])
-            unresolved = [
-                _unresolved_msg(matches[r.airline], i)
-                for i, r in enumerate(body.rows) if matches[r.airline].resolved is None
-            ]
-            if unresolved:
-                return warning_response(
-                    request=request, response=response,
-                    # cap the message: a sheet with 300 bad names should not return 300 paragraphs
-                    msg=" | ".join(unresolved[:5]) + (
-                        f" | ...and {len(unresolved) - 5} more" if len(unresolved) > 5 else ""),
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                )
 
             try:
                 # one lookup per (currency, year) the batch actually contains
@@ -405,7 +396,7 @@ async def bulk_load_claims(request: Request, response: Response, body: ClaimBulk
             for r in body.rows:
                 rate = rates[(r.currency.value, r.calendar_year)]
                 values.append({
-                    "airline": matches[r.airline].resolved,
+                    "airline": matches[r.airline].stored,
                     "calendar_year": r.calendar_year,
                     "number_of_claims": r.number_of_claims,
                     "claim_amount": r.claim_amount,
@@ -433,15 +424,25 @@ async def bulk_load_claims(request: Request, response: Response, body: ClaimBulk
         # against what was stored needs to know which names the reference data changed.
         corrections = [{"typed": m.typed, "resolved": m.resolved}
                        for m in matches.values() if m.changed]
+        # ...and the names the reference could not settle, which went in as sent. Reported per
+        # DISTINCT spelling, not per row: a sheet repeats the same carrier hundreds of times and a
+        # per-row list would be hundreds of identical paragraphs.
+        rows_per_name = Counter(r.airline for r in body.rows)
+        unresolved = [{"typed": m.typed, "reason": m.reason, "rows": rows_per_name[m.typed],
+                       "candidates": m.candidates[:3], "note": _unresolved_msg(m)}
+                      for m in matches.values() if m.resolved is None]
         return success_response(
             request=request, response=response,
             data={"received": len(values), "inserted": len(ids), "ids": ids,
                   "airlines_resolved": corrections,
+                  "airlines_unresolved": unresolved,
                   "rates_used": [{"currency": cur, "calendar_year": yr, "rate": float(rate)}
                                  for (cur, yr), rate in sorted(rates.items())]},
             msg=(f"Loaded {len(ids)} claims rows"
                  + (f"; {len(corrections)} airline name(s) resolved to the reference spelling"
-                    if corrections else "")),
+                    if corrections else "")
+                 + (f"; {len(unresolved)} airline name(s) not in the reference data, stored as sent"
+                    if unresolved else "")),
         )
     except Exception as ex:
         logger.error(f"bulk_load_claims failed: {ex}")
@@ -452,7 +453,8 @@ async def bulk_load_claims(request: Request, response: Response, body: ClaimBulk
     "/{claim_id}",
     description=(
         "Correct one row. Only the fields present in the body change. A new airline name goes "
-        "through the same resolution as a load, and changing the amount, the currency OR the "
+        "through the same resolution as a load — one the reference cannot settle is stored as "
+        "sent and flagged — and changing the amount, the currency OR the "
         "calendar year RE-CONVERTS the row at that year's rate — otherwise the stored USD figure "
         "would keep converting a number, or a year, that is no longer there. Moving a row onto a grain another row already occupies is "
         "allowed: duplicates are kept."
@@ -486,18 +488,14 @@ async def update_claim(
                     status_code=status.HTTP_404_NOT_FOUND,
                 )
 
-            resolved_note = None
+            resolved_note = unresolved_note = None
             if changes.get("airline"):
                 match = await resolve_airline(session, changes["airline"])
-                if match.resolved is None:
-                    return warning_response(
-                        request=request, response=response,
-                        msg=_unresolved_msg(match),
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                    )
-                changes["airline"] = match.resolved
+                changes["airline"] = match.stored   # as sent when the reference cannot settle it
                 if match.changed:
                     resolved_note = match
+                elif match.resolved is None:
+                    unresolved_note = _unresolved_msg(match)
 
             # The conversion is a function of (amount, currency, year) — the year included,
             # because the rate is that year's. Touch any of the three and the stored pair is stale,
@@ -538,10 +536,12 @@ async def update_claim(
             data = _json(row)
             if resolved_note is not None:
                 data["airline_resolved_from"] = resolved_note.typed
+            elif unresolved_note is not None:
+                data["airline_unresolved"] = unresolved_note
         return success_response(
             request=request, response=response, data=data,
-            msg=(f"Airline resolved to '{resolved_note.resolved}'"
-                 if resolved_note is not None else "Success"))
+            msg=(f"Airline resolved to '{resolved_note.resolved}'" if resolved_note is not None
+                 else unresolved_note if unresolved_note is not None else "Success"))
     except Exception as ex:
         logger.error(f"update_claim failed: {ex}")
         return error_response(request=request, response=response, exc=ex)
