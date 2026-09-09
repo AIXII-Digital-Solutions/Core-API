@@ -122,7 +122,9 @@ The **ACYS forecast** projects operator fleet utilisation. This is the most cros
   change bumps `MODEL_VERSION`.
 - **Report matviews:** `forecast.grouped_by_reg` (aircraft-month) / `grouped_by_reg_and_year`
   (aircraft x Contract Year) / `aircraft_information` / `z_dates_acys` (+ others), refreshed at the end of
-  the panel job by dependency order.
+  the panel job by dependency order. On top of them sits the plain view
+  `forecast.detailed_aircraft_information` — the per-tail fleet sheet (identity + lease + that year's four
+  Agreed-Value columns + a CSL from the static `powerbi.body_type_mapping`); being a view it needs no refresh.
 
 ## 7. The Cirium pipeline (ingest → collapse → matviews → forecast)
 
