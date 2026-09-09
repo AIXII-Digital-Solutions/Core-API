@@ -349,7 +349,16 @@ GROUP BY "Registration", "Contract Year", "Data Type"
 # 650 for anything else — including a family the mapping does not know and a tail with no Cirium family at
 # all. The Current Family -> Body Type mapping is the static powerbi.body_type_mapping table (loaded from
 # .misc/Body Type Mapping.xlsx by the forecast_detailed_aircraft_info migration).
-_DETAILED_AC_INFO = """
+#
+# `musd` is what the four Agreed-Value columns are counted in, and it is a flag only because the migrations
+# need both shapes: True (today) divides the stored dollars by a million and rounds to cents, so a column
+# named "/ mUSD" actually holds 57.50 rather than 57500000, and "YOM" comes out as text; False is the
+# original shape that forecast_detailed_aircraft_info created, which the later revision converts.
+def _detailed_ac_info(musd: bool = True) -> str:
+    def av(col: str) -> str:
+        return f'round((y."{col}" / 1000000.0)::numeric, 2)' if musd else f'y."{col}"'
+    yom = 'extract(year from y."Delivery Date")::int'
+    return f"""
 CREATE VIEW forecast.detailed_aircraft_information AS
 WITH ylast AS (
     SELECT "Registration" reg, "Contract Year" cy, "Data Type" dt,
@@ -363,12 +372,12 @@ SELECT
     y."Contract Year",
     y."Data Type",
     ai."MSN",
-    extract(year from y."Delivery Date")::int   AS "YOM",
+    {yom + '::text' if musd else yom}           AS "YOM",
     y."Total Seats"                             AS "Seats",
-    y."Agreed Value on Inception"               AS "Agreed Value / INC / mUSD",
-    y."Weighted Average Agreed Value"           AS "Agreed Value / AVE / mUSD",
-    y."Activity-Weighted Average Agreed Value"  AS "Agreed Value / AW AVE / mUSD",
-    y."Agreed Value at the End of the Contract" AS "Agreed Value / EXP / mUSD",
+    {av("Agreed Value on Inception")}                   AS "Agreed Value / INC / mUSD",
+    {av("Weighted Average Agreed Value")}               AS "Agreed Value / AVE / mUSD",
+    {av("Activity-Weighted Average Agreed Value")}      AS "Agreed Value / AW AVE / mUSD",
+    {av("Agreed Value at the End of the Contract")}     AS "Agreed Value / EXP / mUSD",
     CASE WHEN bt."Body Type" = 'Wide Body' THEN 1000 ELSE 650 END AS "CSL / mUSD",
     ai."Operational Lessor"                     AS "Lessor",
     ai."Manager",
@@ -384,15 +393,17 @@ LEFT JOIN forecast.aircraft_information ai
 LEFT JOIN powerbi.body_type_mapping bt ON bt."Current Family" = ai."Current Family"
 """
 
+
 # The view is rebuilt with the chain, but ONLY once its static mapping table exists: on a fresh database the
 # chain is built at THIS revision, while powerbi.body_type_mapping arrives later with
 # forecast_detailed_aircraft_info (which creates the view itself anyway). On a live database the table is
 # there, so a downgrade+upgrade of the chain restores the view.
-_DETAILED_AC_INFO_GUARDED = f"""
+def _detailed_ac_info_guarded(musd: bool = True) -> str:
+    return f"""
 DO $$
 BEGIN
   IF to_regclass('powerbi.body_type_mapping') IS NOT NULL THEN
-    EXECUTE $ddl${_DETAILED_AC_INFO}$ddl$;
+    EXECUTE $ddl${_detailed_ac_info(musd)}$ddl$;
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'grp_aixii_read') THEN
       EXECUTE 'GRANT SELECT ON forecast.detailed_aircraft_information TO grp_aixii_read';
     END IF;
@@ -707,7 +718,7 @@ def _rebuild(route_cols: bool) -> None:
     op.execute(_Z_AGE_GROUP)
     op.execute(_OWNER)
     op.execute(_GRANTS)
-    op.execute(_DETAILED_AC_INFO_GUARDED)
+    op.execute(_detailed_ac_info_guarded())
 
 
 def upgrade() -> None:
