@@ -120,8 +120,9 @@ The **ACYS forecast** projects operator fleet utilisation. This is the most cros
   `External-Worker/worker/API/ForecastAPI/params.py` (resolve on read). Adding a knob = add to `SPEC` with a
   default equal to today's behaviour, copy, read `p.<name>` — no migration, no portal release. Incompatible
   change bumps `MODEL_VERSION`.
-- **Report matviews:** `forecast.grouped_by_reg` / `aircraft_information` / `z_dates_acys` (+ others),
-  refreshed at the end of the panel job by dependency order.
+- **Report matviews:** `forecast.grouped_by_reg` (aircraft-month) / `grouped_by_reg_and_year`
+  (aircraft x Contract Year) / `aircraft_information` / `z_dates_acys` (+ others), refreshed at the end of
+  the panel job by dependency order.
 
 ## 7. The Cirium pipeline (ingest → collapse → matviews → forecast)
 
