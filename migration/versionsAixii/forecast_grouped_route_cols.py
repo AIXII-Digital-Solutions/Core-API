@@ -350,14 +350,24 @@ GROUP BY "Registration", "Contract Year", "Data Type"
 # all. The Current Family -> Body Type mapping is the static powerbi.body_type_mapping table (loaded from
 # .misc/Body Type Mapping.xlsx by the forecast_detailed_aircraft_info migration).
 #
-# `musd` is what the four Agreed-Value columns are counted in, and it is a flag only because the migrations
-# need both shapes: True (today) divides the stored dollars by a million and rounds to cents, so a column
-# named "/ mUSD" actually holds 57.50 rather than 57500000, and "YOM" comes out as text; False is the
-# original shape that forecast_detailed_aircraft_info created, which the later revision converts.
-def _detailed_ac_info(musd: bool = True) -> str:
+# Both flags exist only because each migration has to be able to build the shape of ITS OWN revision; the
+# current shape is the default on both.
+#   `musd`      — what the four Agreed-Value columns are counted in. True divides the stored dollars by a
+#                 million and rounds to cents, so a column named "/ mUSD" holds 57.50 rather than 57500000,
+#                 and "YOM" comes out as text. False is the original shape forecast_detailed_aircraft_info
+#                 created, which forecast_detailed_ac_info_musd converts.
+#   `type_cols` — the airframe's type ladder next to "Aircraft Type": Manufacturer -> Master Series ->
+#                 Current Family, all three straight from aircraft_information, so the sheet can be grouped
+#                 by any level of it without joining the dimension again. Added by
+#                 forecast_detail_type_cols; False is the shape before it.
+def _detailed_ac_info(musd: bool = True, type_cols: bool = True) -> str:
     def av(col: str) -> str:
         return f'round((y."{col}" / 1000000.0)::numeric, 2)' if musd else f'y."{col}"'
     yom = 'extract(year from y."Delivery Date")::int'
+    types = ('''    ai."Manufacturer",
+    ai."Master Series",
+    ai."Current Family",
+''') if type_cols else ''
     return f"""
 CREATE VIEW forecast.detailed_aircraft_information AS
 WITH ylast AS (
@@ -368,7 +378,7 @@ WITH ylast AS (
 )
 SELECT
     ai."Aircraft Sub Series"                    AS "Aircraft Type",
-    y."Registration",
+{types}    y."Registration",
     y."Contract Year",
     y."Data Type",
     ai."MSN",
@@ -398,12 +408,12 @@ LEFT JOIN powerbi.body_type_mapping bt ON bt."Current Family" = ai."Current Fami
 # chain is built at THIS revision, while powerbi.body_type_mapping arrives later with
 # forecast_detailed_aircraft_info (which creates the view itself anyway). On a live database the table is
 # there, so a downgrade+upgrade of the chain restores the view.
-def _detailed_ac_info_guarded(musd: bool = True) -> str:
+def _detailed_ac_info_guarded(musd: bool = True, type_cols: bool = True) -> str:
     return f"""
 DO $$
 BEGIN
   IF to_regclass('powerbi.body_type_mapping') IS NOT NULL THEN
-    EXECUTE $ddl${_detailed_ac_info(musd)}$ddl$;
+    EXECUTE $ddl${_detailed_ac_info(musd, type_cols)}$ddl$;
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'grp_aixii_read') THEN
       EXECUTE 'GRANT SELECT ON forecast.detailed_aircraft_information TO grp_aixii_read';
     END IF;
