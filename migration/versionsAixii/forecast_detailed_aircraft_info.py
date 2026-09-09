@@ -15,8 +15,8 @@ everything else — Narrow Body, 'Not Applicable', a family the table does not l
 current family for. The table is migration-owned reference data with no ORM model; env.py's include_object
 only compares tables present in the metadata, so autogenerate leaves it alone.
 
-The view's body is IMPORTED from the source of truth forecast_grouped_route_cols._DETAILED_AC_INFO (updated in
-lockstep with the chain's _drop_chain / _rebuild), so this migration duplicates no SQL. The chain rebuilds the
+The view's body is IMPORTED from the source of truth forecast_grouped_route_cols._detailed_ac_info (updated
+in lockstep with the chain's _drop_chain / _rebuild), so this migration duplicates no SQL. The chain rebuilds the
 view only once this table exists — on a fresh database the chain revision runs first and skips it, and this
 migration then creates both.
 
@@ -31,7 +31,7 @@ import sqlalchemy as sa
 from alembic import op
 
 sys.path.insert(0, os.path.dirname(__file__))
-from forecast_grouped_route_cols import _DETAILED_AC_INFO  # noqa: E402
+from forecast_grouped_route_cols import _detailed_ac_info  # noqa: E402
 
 revision = "forecast_detailed_aircraft_info"
 down_revision = "forecast_by_reg_and_year"
@@ -215,7 +215,9 @@ def upgrade() -> None:
         schema="powerbi",
     )
     op.bulk_insert(mapping, [{"Current Family": f, "Body Type": b} for f, b in _BODY_TYPES])
-    op.execute(_DETAILED_AC_INFO)
+    # musd=False: the shape THIS revision introduced — raw dollars and an integer YOM. The later
+    # forecast_detailed_ac_info_musd rebuilds it in millions with a text YOM.
+    op.execute(_detailed_ac_info(musd=False))
     op.execute(_GRANTS)
 
 
