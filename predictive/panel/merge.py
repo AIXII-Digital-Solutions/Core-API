@@ -4,7 +4,7 @@ Prefer POST /forecast.
 
 acys_summary_by_day is per-request (TRUNCATEd + rebuilt) and holds ONE ROW PER FLIGHT: adds Age /
 origin+destination geography (Country/City/Airport Name + lat/lon) / Data Type, and applies the Wet
-rule (Agreed Value = 0). NO grouping — the grouped rollup (# Of Flights + summed metrics, without
+rule (Agreed Value = 0.00001). NO grouping — the grouped rollup (# Of Flights + summed metrics, without
 Date/Time) is the DB VIEW forecast.acys_summary_grouped over this table.
 """
 from __future__ import annotations
@@ -55,7 +55,7 @@ SELECT
     p."ICAO Origin", p."ICAO Destination", p."ICAO Destination Actual",
     p."Operator", p."Master Series", p."Manufacturer", p."Aircraft Sub Series", p."Primary Usage",
     p."Contract Year", p."Circle Distance", p."Flight Time",
-    CASE WHEN p."Lease Dry Wet" = 'Wet' THEN 0 ELSE p."Agreed Value" END,
+    CASE WHEN p."Lease Dry Wet" = 'Wet' THEN 0.00001 ELSE p."Agreed Value" END,
     p."Total Seats", p."Total PAX", p."Actual Distance FR", p."Flight Time FR",
     p."Delivery Date", p."Lease Type", p."Lease Dry Wet", p."Operational Lessor",
     round((p."Date" - p."Delivery Date")::numeric / 365.25, 2),

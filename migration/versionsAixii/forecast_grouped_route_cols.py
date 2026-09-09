@@ -13,8 +13,9 @@ acys_summary_grouped carries, on top of the GROUP-BY columns:
 All are computed from columns already in the matview's GROUP BY, so they add no new grain.
 
 The matview is rebuilt with its dependency chain (z_age_group / z_dates_acys / aircraft_information /
-grouped_by_reg). aircraft_information additionally carries "Age Group" and "Current Family" — the latter read
-from Cirium's current snapshot per registration (cross-schema join to cirium.ciriumaircrafts).
+grouped_by_reg_and_year / grouped_by_reg). aircraft_information additionally carries "Age Group" and
+"Current Family" — the latter read from Cirium's current snapshot per registration (cross-schema join to
+cirium.ciriumaircrafts).
 
 Revision ID: forecast_grouped_route_cols
 Revises: forecast_aircraft_not_leased
@@ -142,13 +143,13 @@ _WAVG = ("((array_agg(av.v ORDER BY av.mon))[1] + "
          "(array_agg(av.v ORDER BY av.mon DESC))[1]) / 2.0")
 
 
-def _age_group(delivery: str = '"Delivery Date"') -> str:
+def _age_group(delivery: str = '"Delivery Date"', period_date: str = _PERIOD_DATE) -> str:
     # "Age Group" — the aircraft's age (years) bucketed into fixed bands. The number prefix ('1. …') is part of
     # the label ON PURPOSE so PowerBI sorts the bands correctly. Age = the min flight "Age" of the bucket, else
     # (a flightless fleet-presence stub) from the delivery date to the bucket's month; NULL delivery -> NULL.
     # `delivery` is the delivery-date expression (a group column in the matview/by_reg, an aggregate elsewhere).
     age = (f'coalesce(min("Age"), CASE WHEN {delivery} IS NOT NULL '
-           f'THEN GREATEST(0, ({_PERIOD_DATE} - {delivery})::numeric / 365.25) END)')
+           f'THEN GREATEST(0, ({period_date} - {delivery})::numeric / 365.25) END)')
     return f"""CASE
         WHEN ({age}) IS NULL THEN NULL
         WHEN ({age}) < 1  THEN '1. Less than one year'
@@ -163,11 +164,11 @@ def _age_group(delivery: str = '"Delivery Date"') -> str:
         ELSE '10. More than 16 years' END"""
 
 
-def _age_group_sort(delivery: str = '"Delivery Date"') -> str:
+def _age_group_sort(delivery: str = '"Delivery Date"', period_date: str = _PERIOD_DATE) -> str:
     # PowerBI's sort-by-column key for "Age Group": the numeric band 1..10 parsed from the "N. " prefix. The
     # prefix alone does NOT sort right (PowerBI sorts the labels as TEXT, so "10. …" lands between "1." and
     # "2."). Emitted next to every "Age Group" column. NULL age group -> NULL sort.
-    return f"split_part({_age_group(delivery)}, '.', 1)::int"
+    return f"split_part({_age_group(delivery, period_date)}, '.', 1)::int"
 
 
 def _grouped(route_cols: bool) -> str:
@@ -241,6 +242,94 @@ SELECT
 FROM forecast.acys_summary_grouped
 GROUP BY
 {_BY_REG_KEYS}
+"""
+
+
+# acys_summary_grouped_by_reg_and_year — by_reg rolled up one level further: the MONTH ("Period" / "Date" /
+# "DateInt") is dropped, so the grain becomes the aircraft-YEAR (Registration x Contract Year x Data Type).
+# The year axis is the CONTRACT year, not the calendar one — it is the model's own yearly axis (the fiscal
+# window anchored at the request date).
+#
+# Aggregation:
+#   * "# Of Flights" / distances / flight times -> SUM (additive across the months of one aircraft-year)
+#   * "Age"                                     -> MIN (as in the parent view)
+#   * the descriptive columns (Operator / lease / seats / ...) -> MAX. Constant per aircraft-year in practice;
+#     a tail that switched operator or went Dry->Wet mid-year collapses to ONE value (MAX picks 'Wet' over
+#     'Dry'), which is why the lease columns here are a label, not a filter — filter on by_reg instead.
+#   * the whole Agreed-Value family -> RECOMPUTED here from the year's own MONTHLY series (`monthly` -> `yav`),
+#     NOT carried up with MAX. Carrying is what makes every value column read the same number: by_reg's four
+#     CY-columns are computed per (Registration, Contract Year) over the WHOLE contract year, so the Actuals
+#     half and the Forecast half of one CY both inherit the same four values regardless of which months the
+#     row actually covers. Recomputed per (Registration, Contract Year, Data Type), each column follows its
+#     OWN formula over exactly the months of ITS row:
+#       - "Agreed Value"                            = the MEAN of the row's monthly values. Taken over MONTHS
+#         (the `monthly` CTE), not over by_reg's rows, so a month split across several rows cannot outweigh a
+#         single-row month. Wet months are IN it — they carry the 0.00001 sentinel, i.e. ~no value — so a
+#         part-wet year averages down. "# Of Months" carries the n behind the mean.
+#       - "Agreed Value on Inception"               = the value of the row's FIRST month
+#       - "Agreed Value at the End of the Contract" = the value of its LAST month
+#       - "Weighted Average Agreed Value"           = (inception + end) / 2, the time-average of a straight
+#         line start->end (same formula as the parent, on this row's own endpoints)
+#       - "Activity-Weighted Average Agreed Value"  = sum(value * flights) / sum(flights) across its months
+#     The last four skip WET months and non-positive values (the model excludes them from all four — a wet
+#     month has no market value to average), so an all-wet aircraft-year leaves them NULL, exactly as by_reg
+#     does. The mean above deliberately does not, which is why the five columns no longer coincide.
+_BY_REG_YEAR_PERIOD = """max(to_date("Period", 'MM-YYYY'))"""
+
+_BY_REG_YEAR = f"""
+CREATE MATERIALIZED VIEW forecast.acys_summary_grouped_by_reg_and_year AS
+WITH monthly AS (
+    SELECT "Registration" reg, "Contract Year" cy, "Data Type" dt,
+           to_date("Period", 'MM-YYYY') AS mon,
+           max("Agreed Value")   AS av,
+           sum("# Of Flights")   AS flights,
+           bool_and("Lease Dry Wet" IS DISTINCT FROM 'Wet') AS dry
+    FROM forecast.acys_summary_grouped_by_reg
+    GROUP BY 1, 2, 3, 4
+),
+yav AS (
+    SELECT reg, cy, dt,
+           avg(av)    AS av_mean,
+           count(*)   AS months,
+           (array_agg(av ORDER BY mon)      FILTER (WHERE dry AND av > 0))[1] AS inception,
+           (array_agg(av ORDER BY mon DESC) FILTER (WHERE dry AND av > 0))[1] AS at_end,
+           sum(av * flights) FILTER (WHERE dry AND av > 0)
+               / nullif(sum(flights) FILTER (WHERE dry AND av > 0), 0)        AS awavg
+    FROM monthly
+    GROUP BY 1, 2, 3
+)
+SELECT
+    "Registration",
+    "Contract Year",
+    "Data Type",
+    max("Operator")            AS "Operator",
+    max("Master Series")       AS "Master Series",
+    max("Manufacturer")        AS "Manufacturer",
+    max("Aircraft Sub Series") AS "Aircraft Sub Series",
+    max("Primary Usage")       AS "Primary Usage",
+    max(y.av_mean)             AS "Agreed Value",
+    max(y.months)::int         AS "# Of Months",
+    max("Total Seats")         AS "Total Seats",
+    max("Total PAX")           AS "Total PAX",
+    max("Delivery Date")       AS "Delivery Date",
+    max("Lease Type")          AS "Lease Type",
+    max("Lease Dry Wet")       AS "Lease Dry Wet",
+    max("Operational Lessor")  AS "Operational Lessor",
+    min("Age")                 AS "Age",
+    sum("# Of Flights")        AS "# Of Flights",
+    sum("Circle Distance")     AS "Circle Distance",
+    sum("Actual Distance FR")  AS "Actual Distance FR",
+    sum("Flight Time")         AS "Flight Time",
+    sum("Flight Time FR")      AS "Flight Time FR",
+    max(y.inception)                            AS "Agreed Value on Inception",
+    max(y.at_end)                               AS "Agreed Value at the End of the Contract",
+    (max(y.inception) + max(y.at_end)) / 2.0    AS "Weighted Average Agreed Value",
+    max(y.awavg)                                AS "Activity-Weighted Average Agreed Value",
+    {_age_group('max("Delivery Date")', _BY_REG_YEAR_PERIOD)}      AS "Age Group",
+    {_age_group_sort('max("Delivery Date")', _BY_REG_YEAR_PERIOD)} AS "Age Group Sort"
+FROM forecast.acys_summary_grouped_by_reg
+LEFT JOIN yav y ON y.reg = "Registration" AND y.cy = "Contract Year" AND y.dt = "Data Type"
+GROUP BY "Registration", "Contract Year", "Data Type"
 """
 
 
@@ -405,6 +494,7 @@ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'grp_aviation_write') THEN
     EXECUTE 'ALTER MATERIALIZED VIEW forecast.acys_summary_grouped        OWNER TO grp_aviation_write';
     EXECUTE 'ALTER MATERIALIZED VIEW forecast.acys_summary_grouped_by_reg OWNER TO grp_aviation_write';
+    EXECUTE 'ALTER MATERIALIZED VIEW forecast.acys_summary_grouped_by_reg_and_year OWNER TO grp_aviation_write';
     EXECUTE 'ALTER MATERIALIZED VIEW forecast.aircraft_information        OWNER TO grp_aviation_write';
     EXECUTE 'ALTER MATERIALIZED VIEW powerbi.z_dates_acys                 OWNER TO grp_aviation_write';
   END IF;
@@ -418,7 +508,8 @@ BEGIN
   FOREACH r IN ARRAY ARRAY['grp_aixii_read','grp_aviation_write'] LOOP
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
       EXECUTE format('GRANT SELECT ON forecast.acys_summary_grouped, '
-                     'forecast.acys_summary_grouped_by_reg, forecast.aircraft_information, '
+                     'forecast.acys_summary_grouped_by_reg, '
+                     'forecast.acys_summary_grouped_by_reg_and_year, forecast.aircraft_information, '
                      'powerbi.z_dates_acys, powerbi.z_age_group TO %I', r);
     END IF;
   END LOOP;
@@ -488,6 +579,14 @@ _BY_REG_INDEXES = [
     'CREATE INDEX ix_by_reg_dtype    ON forecast.acys_summary_grouped_by_reg ("Data Type")',
     'CREATE INDEX ix_by_reg_dateint  ON forecast.acys_summary_grouped_by_reg ("DateInt")',
 ]
+# The grain columns ARE the key (one row per aircraft x Contract Year x Data Type), so they carry the UNIQUE
+# index — which also leaves the door open for a future REFRESH ... CONCURRENTLY. The chain refreshes plain.
+_BY_REG_YEAR_INDEXES = [
+    'CREATE UNIQUE INDEX ix_by_reg_year_grain ON forecast.acys_summary_grouped_by_reg_and_year '
+    '("Registration", "Contract Year", "Data Type")',
+    'CREATE INDEX ix_by_reg_year_cy    ON forecast.acys_summary_grouped_by_reg_and_year ("Contract Year")',
+    'CREATE INDEX ix_by_reg_year_dtype ON forecast.acys_summary_grouped_by_reg_and_year ("Data Type")',
+]
 _AIRCRAFT_INFO_INDEXES = [
     'CREATE UNIQUE INDEX ix_acinfo_mkey ON forecast.aircraft_information ("MERGED_KEY")',
     'CREATE INDEX ix_acinfo_reg      ON forecast.aircraft_information ("Registration")',
@@ -505,14 +604,16 @@ def _drop_chain() -> None:
     op.execute("DROP VIEW IF EXISTS powerbi.z_age_group")
     op.execute("DROP MATERIALIZED VIEW IF EXISTS powerbi.z_dates_acys")
     op.execute("DROP MATERIALIZED VIEW IF EXISTS forecast.aircraft_information")
+    op.execute("DROP MATERIALIZED VIEW IF EXISTS forecast.acys_summary_grouped_by_reg_and_year")
     op.execute("DROP MATERIALIZED VIEW IF EXISTS forecast.acys_summary_grouped_by_reg")
     op.execute("DROP MATERIALIZED VIEW IF EXISTS forecast.acys_summary_grouped")
 
 
 def _rebuild(route_cols: bool) -> None:
     # Built in dependency order, each matview WITH DATA reading the one it sits on:
-    # acys_summary_by_day (table) -> grouped -> grouped_by_reg -> aircraft_information; z_dates_acys reads
-    # acys_summary_by_day directly. Every panel run REFRESHes all four in this same order (panel.py).
+    # acys_summary_by_day (table) -> grouped -> grouped_by_reg -> {by_reg_and_year, aircraft_information};
+    # z_dates_acys reads acys_summary_by_day directly. Every panel run REFRESHes them in this same order
+    # (panel.py).
     op.execute(_grouped(route_cols))
     for ix in _INDEXES:
         op.execute(ix)
@@ -521,6 +622,9 @@ def _rebuild(route_cols: bool) -> None:
             op.execute(ix)
     op.execute(_BY_REG)
     for ix in _BY_REG_INDEXES:
+        op.execute(ix)
+    op.execute(_BY_REG_YEAR)
+    for ix in _BY_REG_YEAR_INDEXES:
         op.execute(ix)
     op.execute(_AIRCRAFT_INFO)
     for ix in _AIRCRAFT_INFO_INDEXES:
