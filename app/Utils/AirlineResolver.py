@@ -21,8 +21,11 @@ an ambiguous match is REPORTED, never guessed at.
 WHY A MINIMUM LENGTH. "A" matches the reference row "A+" with similarity 1.000 and a clear margin —
 neither rule above catches it. Two characters cannot identify a carrier, so they are refused outright.
 
-Nothing here writes a name the caller did not almost certainly mean: what cannot be resolved
-confidently comes back as a rejection listing the near misses, for a human to settle.
+Nothing here writes a name the caller did not almost certainly mean. What cannot be resolved
+confidently is NOT invented and NOT refused either: `resolved` stays None, `stored` falls back to the
+name as sent, and the near misses come back with it so a human can settle the spelling later. A
+claim exists whether or not the reference knows the carrier under that name, so refusing the row
+would lose data that is otherwise perfectly good.
 """
 from dataclasses import dataclass
 from typing import Optional, List, Sequence
@@ -61,9 +64,10 @@ _TRGM_FLOOR = 0.25
 class AirlineMatch:
     """The outcome for one typed name.
 
-    `resolved` is the reference spelling to store; None when nothing could be settled confidently.
-    `changed` says whether it differs from what was typed — that is what a caller reports back so a
-    silent correction is never invisible. `candidates` carries the near misses behind a rejection."""
+    `resolved` is the reference spelling; None when nothing could be settled confidently.
+    `stored` is what a caller should actually write — the reference spelling, or the typed name when
+    there is none. `changed` says whether it differs from what was typed — that is what a caller
+    reports back so a silent correction is never invisible. `candidates` carries the near misses."""
     typed: str
     resolved: Optional[str]
     exact: bool
@@ -74,6 +78,13 @@ class AirlineMatch:
     @property
     def changed(self) -> bool:
         return bool(self.resolved) and self.resolved != self.typed
+
+    @property
+    def stored(self) -> str:
+        """The name to write: the reference spelling when one was settled, otherwise the name as
+        sent (only its whitespace collapsed, the same normalisation resolution used). An unknown
+        carrier is a gap in the reference, not a bad row — the claim still happened."""
+        return self.resolved or " ".join((self.typed or "").split())
 
 
 # Exact match first, case- and whitespace-insensitive: no scoring can beat a name that is simply
