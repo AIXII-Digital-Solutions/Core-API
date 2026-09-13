@@ -10,6 +10,10 @@ POST /forecast/          — validate (operator and/or registrations) and enqueu
                            `forecast_restore`, which pours that saved run back into
                            acys_summary_by_day and refreshes the same report matviews. Same job_id and
                            status contract, three steps instead of ten.
+                           A REQUEST THAT ALREADY RAN TODAY IS NOT REBUILT: the worker pours that
+                           run back instead (same three steps), since the same day's scope, as-of
+                           date and model parameters produce the same dataset. `force: true`
+                           rebuilds anyway.
 GET  /forecast/last      — the most recent trigger (datetime + request_type + params).
 GET  /forecast/snapshots — the saved runs of the last 30 days, filterable by registration(s),
                            operator(s) and date. The id listed here is what POST /forecast/ takes as
@@ -89,6 +93,13 @@ class ForecastRequest(BaseModel):
         None, description="Name of a service.forecast_profiles tuning profile. Omitted, the default "
                           "profile is used. A named profile that does not exist fails the run rather "
                           "than silently falling back.")
+    force: bool = Field(
+        False,
+        description="Rebuild even if this exact request already ran today. Left false, a repeat of "
+                    "the same scope / as-of date / model parameters on the same day pours that run "
+                    "back instead of spending an hour reproducing it. Set it when the SOURCE data "
+                    "has moved under an unchanged request — a Cirium revision loaded since the "
+                    "morning run, say — which is the one thing the reuse check cannot see.")
     snapshot_id: Optional[int] = Field(
         None, ge=1,
         description="RE-SHOW A SAVED RUN instead of producing a new one: the id of a row from "
@@ -114,9 +125,9 @@ class ForecastRequest(BaseModel):
         scope) would be a guess, and the two differ by an hour of work and a different dataset."""
         scope = bool(self.norm_operators() or self.registrations)
         if self.snapshot_id is not None:
-            if scope or self.date is not None or self.profile is not None:
+            if scope or self.date is not None or self.profile is not None or self.force:
                 raise ValueError("snapshot_id re-shows a saved run: send it alone, without "
-                                 "operators / registrations / date / profile")
+                                 "operators / registrations / date / profile / force")
             return self
         if not scope:
             raise ValueError("provide operators and/or registrations, or a snapshot_id")
@@ -242,6 +253,9 @@ async def _start_restore(snapshot_id: int, request: Request, response: Response)
     description="Start the forecast panel build (Cirium × FR24 → forecast.acys_summary_by_day; "
                 "grouped rollup in the forecast.acys_summary_grouped view) for one or more operators "
                 "and/or a list of registrations. Multiple operators are each forecast within one run. "
+                "A request identical to one that already ran TODAY (same scope, as-of date and model "
+                "parameters) is NOT rebuilt — the worker pours that run back, three steps instead of "
+                "ten; send `force: true` to rebuild it anyway. "
                 "Send `snapshot_id` INSTEAD of a scope to re-show a saved run (GET /forecast/snapshots): "
                 "nothing is fetched or forecast — the saved dataset is poured back into the report table "
                 "and the report matviews are refreshed. Both forms return a job_id and report progress "
@@ -297,6 +311,7 @@ async def start_forecast(body: ForecastRequest, request: Request, response: Resp
             registrations=registrations,
             as_of=as_of,
             profile=body.profile,
+            force=body.force,
             correlation_id=request.state.correlation_id,
             _job_id=job_id,
             _queue_name=EXTERNAL_QUEUE,
@@ -304,8 +319,12 @@ async def start_forecast(body: ForecastRequest, request: Request, response: Resp
         return success_response(
             request=request, response=response,
             data={"job_id": job_id, "operators": operators, "registrations": registrations,
-                  "as_of": as_of, "profile": body.profile},
-            msg="Forecast panel started", status_code=status.HTTP_202_ACCEPTED,
+                  "as_of": as_of, "profile": body.profile, "force": body.force},
+            # Whether this one rebuilds or reuses today's run is the WORKER's call — it is the side
+            # that resolves the model parameters the decision turns on. The answer arrives on the
+            # status stream (three steps and `reused_today` in the summary mean it was reused), not
+            # here, so this message must not promise a build.
+            msg="Forecast panel requested", status_code=status.HTTP_202_ACCEPTED,
         )
     except Exception as _ex:
         return error_response(request=request, exc=_ex, response=response)
