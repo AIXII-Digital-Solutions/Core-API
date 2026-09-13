@@ -1,17 +1,24 @@
 """Airline claims experience (forecast.acys_claims) — the aggregated claims sheet, per airline/year.
 
-One row is "this airline had N claims worth X in this calendar year, under this section of cover, in
-this state". It is loaded as stated (a broker's claims-experience summary), NOT derived from
-individual loss events.
+One row is "this airline had N claims worth X in this calendar year under this section of cover, of
+which Y is still outstanding". It is loaded as stated (a broker's claims-experience summary), NOT
+derived from individual loss events.
 
 NOT to be confused with /insurance/claims (insurance.insurance_claims), which registers ONE loss against a
 specific aircraft and policy, with a full change history. This router is the summary table that feeds
 reporting; that one is the operational record.
 
 The grain is
-    airline x calendar_year x currency x policy_type x claims_status
-so Settled and Ongoing are separate rows for the same year, as are two currencies. `claim_amount`
-itself is never summed across currencies; `claim_amounts_usd` is the column that may be.
+    airline x calendar_year x currency x policy_type
+so two currencies are separate rows for the same year. Neither amount is ever summed across
+currencies; the `_usd` pair is what may be.
+
+SETTLED VS OUTSTANDING IS NOT A ROW SPLIT. It used to be a `claims_status` column, so one year's
+experience arrived as two rows that a reader had to add back together. It is now two columns of ONE
+row: `claims_amount_total` is everything the year cost, `claims_amount_outstanding` the part of it
+still moving as a reserve. The settled figure is the difference. The two are deliberately not
+constrained against each other — a sheet occasionally states an outstanding figure above its total,
+and this table's contract is "as stated".
 
 DUPLICATES ARE KEPT. The grain is not unique: the same combination may appear as many times as it is
 sent, and nothing here merges, replaces or rejects it. A sheet may state a combination twice for its
@@ -30,20 +37,24 @@ TWO THINGS HAPPEN ON THE WAY IN, and the second is why a load can be rejected:
    flag in the response, not a rejected sheet. See Utils/AirlineResolver.py for why a threshold
    alone is not enough.
 
-2. THE AMOUNT IS CONVERTED TO USD, AT ITS OWN YEAR'S RATE. A 2019 row is converted at the 2019
+2. BOTH AMOUNTS ARE CONVERTED TO USD, AT THE ROW'S OWN YEAR'S RATE. A 2019 row is converted at the 2019
    close-of-year rate, not today's — converting old claims at a current rate restates history by
    tens of percent. Only a row in the current year uses the latest published rate, since its
-   31 December has not happened yet. The rate goes in `currency_rate` and claim_amount x rate in
-   `claim_amounts_usd`; USD rows get a rate of exactly 1 and the amount unchanged, so every row has
-   the same shape. A year with no published series (before 1999) and an unreachable FX source both
-   refuse the write rather than storing it unconverted.
+   31 December has not happened yet. The rate goes in `currency_rate`, and each amount times that
+   rate in `claims_amount_total_usd` / `claims_amount_outstanding_usd` — ONE rate for both, so a row
+   can never hold two figures booked at different rates. USD rows get a rate of exactly 1 and the
+   amounts unchanged, so every row has the same shape. A year with no published series (before 1999)
+   and an unreachable FX source both refuse the write rather than storing it unconverted.
 
-    GET    /forecast/claims           list, filtered (airline, year range, currency, type, status)
+    GET    /forecast/claims           list, filtered (airline, year range, currency, policy type)
     GET    /forecast/claims/{id}      one row
     POST   /forecast/claims           add one row
     POST   /forecast/claims/bulk      load many rows in one transaction (all of them, duplicates included)
     PATCH  /forecast/claims/{id}      correct a row (re-resolves and re-converts what it touches)
-    DELETE /forecast/claims/{id}      remove a row
+
+THERE IS NO DELETE. A row is corrected, never removed: this table is the claims history a report
+reads, and a year that quietly disappears from it is indistinguishable from a year that had no
+claims. A row entered by mistake is edited to what it should have been.
 
 PowerBI reads the table (or a service-side filtered slice of it) directly as `bi_reader`; this router
 is the write path and the ad-hoc read path.
@@ -54,15 +65,13 @@ from typing import Optional, List
 
 from fastapi import Request, Response, Depends, Query, Path, status
 from pydantic import BaseModel, Field, ConfigDict
-from sqlalchemy import select, func, delete as sa_delete
+from sqlalchemy import select, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
 from Config import setup_logger
 from settings import Router
-from Database.ForecastModels import (
-    AcysClaims, ClaimCurrency, ClaimPolicyType, ClaimsStatus,
-)
+from Database.ForecastModels import AcysClaims, ClaimCurrency, ClaimPolicyType
 from api_auth import authorize, SCOPE_PREDICTIVE_READ, SCOPE_PREDICTIVE_WRITE
 from Utils import success_response, warning_response, error_response
 from Utils.ResponsesFunc import build_responses
@@ -79,10 +88,10 @@ _SORTABLE = {
     "airline": AcysClaims.airline,
     "calendar_year": AcysClaims.calendar_year,
     "number_of_claims": AcysClaims.number_of_claims,
-    "claim_amount": AcysClaims.claim_amount,
+    "claims_amount_total": AcysClaims.claims_amount_total,
+    "claims_amount_outstanding": AcysClaims.claims_amount_outstanding,
     "currency": AcysClaims.currency,
     "policy_type": AcysClaims.policy_type,
-    "claims_status": AcysClaims.claims_status,
     "created_at": AcysClaims.created_at,
     "updated_at": AcysClaims.updated_at,
 }
@@ -97,10 +106,14 @@ class ClaimRow(BaseModel):
                          description='Airline name as the claims sheet states it, e.g. "Emirates".')
     calendar_year: int = Field(..., ge=1950, le=2200, description="Calendar year the claims fall in.")
     number_of_claims: int = Field(..., ge=0, description="How many claims the row aggregates.")
-    claim_amount: Decimal = Field(..., ge=0, description="Total amount, in `currency`. Not converted.")
+    claims_amount_total: Decimal = Field(
+        ..., ge=0, description="Everything the year cost, in `currency`. Not converted.")
+    claims_amount_outstanding: Decimal = Field(
+        ..., ge=0, description="The part of the total still moving as a reserve, in `currency`. The "
+                               "settled figure is the difference of the two. Send 0 for a year that "
+                               "is fully settled.")
     currency: ClaimCurrency = Field(..., description="USD, EUR or GBP.")
     policy_type: ClaimPolicyType = Field(..., description="HD, HSL, HW or WXS.")
-    claims_status: ClaimsStatus = Field(..., description="Settled or Ongoing.")
 
 
 class ClaimPatch(BaseModel):
@@ -112,10 +125,10 @@ class ClaimPatch(BaseModel):
     airline: Optional[str] = Field(None, min_length=1, max_length=200)
     calendar_year: Optional[int] = Field(None, ge=1950, le=2200)
     number_of_claims: Optional[int] = Field(None, ge=0)
-    claim_amount: Optional[Decimal] = Field(None, ge=0)
+    claims_amount_total: Optional[Decimal] = Field(None, ge=0)
+    claims_amount_outstanding: Optional[Decimal] = Field(None, ge=0)
     currency: Optional[ClaimCurrency] = None
     policy_type: Optional[ClaimPolicyType] = None
-    claims_status: Optional[ClaimsStatus] = None
 
 
 class ClaimBulk(BaseModel):
@@ -132,13 +145,17 @@ def _json(row: AcysClaims) -> dict:
         "calendar_year": row.calendar_year,
         "number_of_claims": row.number_of_claims,
         # NUMERIC in the column (exact cents), a plain number on the wire
-        "claim_amount": float(row.claim_amount) if row.claim_amount is not None else None,
+        "claims_amount_total": (float(row.claims_amount_total)
+                                if row.claims_amount_total is not None else None),
+        "claims_amount_outstanding": (float(row.claims_amount_outstanding)
+                                      if row.claims_amount_outstanding is not None else None),
         "currency_rate": float(row.currency_rate) if row.currency_rate is not None else None,
-        "claim_amounts_usd": (float(row.claim_amounts_usd)
-                              if row.claim_amounts_usd is not None else None),
+        "claims_amount_total_usd": (float(row.claims_amount_total_usd)
+                                    if row.claims_amount_total_usd is not None else None),
+        "claims_amount_outstanding_usd": (float(row.claims_amount_outstanding_usd)
+                                          if row.claims_amount_outstanding_usd is not None else None),
         "currency": row.currency.value if row.currency else None,
         "policy_type": row.policy_type.value if row.policy_type else None,
-        "claims_status": row.claims_status.value if row.claims_status else None,
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
     }
@@ -149,12 +166,18 @@ def _conflict_msg(ex: IntegrityError) -> Optional[str]:
     ours (in which case it is a 500, not a 409)."""
     text = str(getattr(ex, "orig", ex))
     for ck, what in (("ck_acys_claims_count_non_negative", "number_of_claims cannot be negative"),
-                     ("ck_acys_claims_amount_non_negative", "claim_amount cannot be negative"),
+                     ("ck_acys_claims_amount_non_negative",
+                      "claims_amount_total cannot be negative"),
+                     ("ck_acys_claims_outstanding_non_negative",
+                      "claims_amount_outstanding cannot be negative"),
                      ("ck_acys_claims_year_sane", "calendar_year is outside 1950-2200"),
                      ("ck_acys_claims_usd_pair_complete",
-                      "currency_rate and claim_amounts_usd must be set together"),
+                      "currency_rate and both converted amounts must be set together"),
                      ("ck_acys_claims_rate_positive", "currency_rate must be positive"),
-                     ("ck_acys_claims_usd_non_negative", "claim_amounts_usd cannot be negative")):
+                     ("ck_acys_claims_usd_non_negative",
+                      "claims_amount_total_usd cannot be negative"),
+                     ("ck_acys_claims_usd_outstanding_non_negative",
+                      "claims_amount_outstanding_usd cannot be negative")):
         if ck in text:
             return what
     return None
@@ -191,7 +214,6 @@ async def list_claims(
     year_to: Optional[int] = Query(None, ge=1950, le=2200, description="Range end, inclusive."),
     currency: Optional[ClaimCurrency] = Query(None),
     policy_type: Optional[ClaimPolicyType] = Query(None),
-    claims_status: Optional[ClaimsStatus] = Query(None),
     sort: str = Query("calendar_year", description=f"One of: {', '.join(sorted(_SORTABLE))}."),
     order: str = Query("desc", pattern="^(asc|desc)$"),
     limit: int = Query(100, ge=1, le=1000),
@@ -224,8 +246,6 @@ async def list_claims(
             conds.append(AcysClaims.currency == currency)
         if policy_type is not None:
             conds.append(AcysClaims.policy_type == policy_type)
-        if claims_status is not None:
-            conds.append(AcysClaims.claims_status == claims_status)
 
         col = _SORTABLE[sort]
         col = col.desc() if order == "desc" else col.asc()
@@ -282,9 +302,9 @@ async def get_claim(
     description=(
         "Add one claims row. The airline name is resolved against the reference data first (a "
         "one-character misspelling still lands on the right carrier; the stored name is the "
-        "reference spelling, and the response reports the correction), and the amount is converted "
-        "to USD at the rate of the row's OWN calendar year (the latest rate only for a row in the "
-        "current year). A row repeating one already in the table is stored as another "
+        "reference spelling, and the response reports the correction), and BOTH amounts are "
+        "converted to USD at the rate of the row's OWN calendar year (the latest rate only for a row "
+        "in the current year). A row repeating one already in the table is stored as another "
         "row — duplicates are kept, not merged. An airline the reference cannot settle is stored "
         "exactly as sent and flagged in the response; only a missing FX rate refuses the write (502)."
     ),
@@ -317,12 +337,13 @@ async def create_claim(request: Request, response: Response, body: ClaimRow):
                 airline=match.stored,
                 calendar_year=body.calendar_year,
                 number_of_claims=body.number_of_claims,
-                claim_amount=body.claim_amount,
+                claims_amount_total=body.claims_amount_total,
+                claims_amount_outstanding=body.claims_amount_outstanding,
                 currency=body.currency,
                 policy_type=body.policy_type,
-                claims_status=body.claims_status,
                 currency_rate=rate,
-                claim_amounts_usd=to_usd(body.claim_amount, rate),
+                claims_amount_total_usd=to_usd(body.claims_amount_total, rate),
+                claims_amount_outstanding_usd=to_usd(body.claims_amount_outstanding, rate),
             )
             session.add(row)
             try:
@@ -355,7 +376,7 @@ async def create_claim(request: Request, response: Response, body: ClaimRow):
     description=(
         "Load many rows in ONE transaction — either all of them land or none do, so a rejected sheet "
         "never leaves a half-imported year behind. Every airline name is resolved against the "
-        "reference data and every amount converted to USD — each row at its own calendar year's "
+        "reference data and both amounts converted to USD — each row at its own calendar year's "
         "rate — before anything is written; only an unavailable rate rejects the whole batch, while "
         "a name the reference cannot settle is stored exactly as sent and listed back under "
         "`airlines_unresolved`. EVERY row is then "
@@ -399,12 +420,13 @@ async def bulk_load_claims(request: Request, response: Response, body: ClaimBulk
                     "airline": matches[r.airline].stored,
                     "calendar_year": r.calendar_year,
                     "number_of_claims": r.number_of_claims,
-                    "claim_amount": r.claim_amount,
+                    "claims_amount_total": r.claims_amount_total,
+                    "claims_amount_outstanding": r.claims_amount_outstanding,
                     "currency": r.currency,
                     "policy_type": r.policy_type,
-                    "claims_status": r.claims_status,
                     "currency_rate": rate,
-                    "claim_amounts_usd": to_usd(r.claim_amount, rate),
+                    "claims_amount_total_usd": to_usd(r.claims_amount_total, rate),
+                    "claims_amount_outstanding_usd": to_usd(r.claims_amount_outstanding, rate),
                 })
 
             stmt = pg_insert(AcysClaims).values(values).returning(AcysClaims.id)
@@ -454,10 +476,11 @@ async def bulk_load_claims(request: Request, response: Response, body: ClaimBulk
     description=(
         "Correct one row. Only the fields present in the body change. A new airline name goes "
         "through the same resolution as a load — one the reference cannot settle is stored as "
-        "sent and flagged — and changing the amount, the currency OR the "
-        "calendar year RE-CONVERTS the row at that year's rate — otherwise the stored USD figure "
-        "would keep converting a number, or a year, that is no longer there. Moving a row onto a grain another row already occupies is "
-        "allowed: duplicates are kept."
+        "sent and flagged — and changing EITHER amount, the currency OR the "
+        "calendar year RE-CONVERTS both amounts at that year's rate — otherwise the stored USD "
+        "figures would keep converting a number, or a year, that is no longer there. Moving a row "
+        "onto a grain another row already occupies is allowed: duplicates are kept. There is no "
+        "delete: a row is corrected, never removed."
     ),
     responses=build_responses(include={
         status.HTTP_200_OK, status.HTTP_400_BAD_REQUEST, status.HTTP_404_NOT_FOUND,
@@ -497,12 +520,17 @@ async def update_claim(
                 elif match.resolved is None:
                     unresolved_note = _unresolved_msg(match)
 
-            # The conversion is a function of (amount, currency, year) — the year included,
-            # because the rate is that year's. Touch any of the three and the stored pair is stale,
-            # so it is recomputed exactly as a fresh load would have computed it.
-            if {"claim_amount", "currency", "calendar_year"} & set(changes):
+            # The conversion is a function of (amounts, currency, year) — the year included,
+            # because the rate is that year's. Touch any of them and the stored set is stale, so it
+            # is recomputed exactly as a fresh load would have computed it. BOTH amounts are
+            # recomputed even when only one changed: they share one rate, and re-reading the
+            # untouched one from the row keeps the pair consistent either way.
+            if {"claims_amount_total", "claims_amount_outstanding",
+                    "currency", "calendar_year"} & set(changes):
                 new_currency = changes.get("currency", row.currency)
-                new_amount = changes.get("claim_amount", row.claim_amount)
+                new_total = changes.get("claims_amount_total", row.claims_amount_total)
+                new_outstanding = changes.get("claims_amount_outstanding",
+                                              row.claims_amount_outstanding)
                 new_year = changes.get("calendar_year", row.calendar_year)
                 try:
                     rate = await get_usd_rate(getattr(request.state, "redis", None),
@@ -516,7 +544,8 @@ async def update_claim(
                         status_code=status.HTTP_502_BAD_GATEWAY,
                     )
                 changes["currency_rate"] = rate
-                changes["claim_amounts_usd"] = to_usd(new_amount, rate)
+                changes["claims_amount_total_usd"] = to_usd(new_total, rate)
+                changes["claims_amount_outstanding_usd"] = to_usd(new_outstanding, rate)
 
             for field, value in changes.items():
                 setattr(row, field, value)
@@ -544,37 +573,4 @@ async def update_claim(
                  else unresolved_note if unresolved_note is not None else "Success"))
     except Exception as ex:
         logger.error(f"update_claim failed: {ex}")
-        return error_response(request=request, response=response, exc=ex)
-
-
-@router.delete(
-    "/{claim_id}",
-    description=(
-        "Delete one row. The deleted row comes back in full, so it is complete enough to re-POST if "
-        "it turns out the wrong id was sent."
-    ),
-    responses=build_responses(include={
-        status.HTTP_200_OK, status.HTTP_404_NOT_FOUND, status.HTTP_500_INTERNAL_SERVER_ERROR,
-    }),
-    dependencies=[Depends(authorize(SCOPE_PREDICTIVE_WRITE))],
-)
-async def delete_claim(
-    request: Request,
-    response: Response,
-    claim_id: int = Path(..., ge=1),
-):
-    try:
-        async with request.app.state.db_client.session(_DB) as session:
-            row = await session.get(AcysClaims, claim_id)
-            if row is None:
-                return warning_response(
-                    request=request, response=response,
-                    msg=f"Claims row {claim_id} not found",
-                    status_code=status.HTTP_404_NOT_FOUND,
-                )
-            data = _json(row)
-            await session.execute(sa_delete(AcysClaims).where(AcysClaims.id == claim_id))
-        return success_response(request=request, response=response, data={"deleted": data})
-    except Exception as ex:
-        logger.error(f"delete_claim failed: {ex}")
         return error_response(request=request, response=response, exc=ex)
