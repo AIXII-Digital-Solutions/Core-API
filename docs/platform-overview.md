@@ -67,7 +67,8 @@ Full keyspace / channel details: [architecture.md](architecture.md).
 
 After the **AIXII consolidation** there are exactly **two physical Postgres databases**:
 - **`aixii`** — every aviation domain is a **schema**: `cirium`, `airlabs`, `flightradar`, `aviationedge`,
-  plus `forecast` and a temporary `main`. Tables emit as `cirium.aircrafts`, `flightradar.livepositions`, …
+  plus `api` (airlines + registration), `insurance` (insured aircraft, policies, claims), `forecast` and a
+  temporary `main`. Tables emit as `cirium.aircrafts`, `flightradar.livepositions`, …
 - **`service`** — schema-less: `job_statuses`, `schedule_registry`, `api_tokens`, `forecast_profiles`,
   `forecast_last_requests`, `forecast_step_timings`.
 
@@ -115,6 +116,13 @@ The **ACYS forecast** projects operator fleet utilisation. This is the most cros
   running worker. Design rationale in `predictive/README.md` and `External-Worker/docs/forecast_model_spec.md`.
 - **Runtime knobs (portal-configurable):** stored in `service.forecast_profiles.params` (JSONB overrides).
   core-api serves `GET /forecast/params/schema` and manages profiles via `/forecast/profiles`.
+- **The last month of runs:** `forecast.acys_summary_by_day` holds exactly ONE run (every request TRUNCATEs
+  it), so each successful run copies its finished dataset into `forecast.acys_snapshots` +
+  `acys_snapshot_rows` and prunes anything past `FORECAST_SNAPSHOT_RETENTION_DAYS` (30). core-api lists them
+  at `GET /forecast/snapshots` (filters: registration / operator / date / as_of, ANDed) and re-shows one via
+  `POST /forecast/` with `snapshot_id` — the ARQ job **`forecast_restore`** (`ForecastAPI/restore.py`), which
+  pours the rows back and refreshes the same `REPORT_MATVIEWS` a real run refreshes. No fetch, no model.
+  Budget ~0.5 GB of database per saved run.
 - **The spec — THREE byte-identical copies** (`diff` them on any change):
   `db-contract/forecast_params.py` (source) → `Core-API/app/Utils/forecast_params.py` (validate on write) →
   `External-Worker/worker/API/ForecastAPI/params.py` (resolve on read). Adding a knob = add to `SPEC` with a

@@ -1,12 +1,25 @@
 """Forecast panel trigger + last-request read-back + the model's tuning profiles.
 
-POST /forecast/       — validate (operator and/or registrations) and enqueue the external-worker
-                        `forecast_panel` job (build forecast.acys_actuals from Cirium × FR24, merge
-                        into forecast.acys_summary_by_day). Returns the job_id. The worker publishes a
-                        SEQUENTIAL status per step, read from /status/{job_id} (poll) or
-                        /status/stream (SSE), and writes the service.forecast_last_requests row ONLY
-                        after the whole panel finishes successfully (not at trigger time).
-GET  /forecast/last   — the most recent trigger (datetime + request_type + params).
+POST /forecast/          — validate (operator and/or registrations) and enqueue the external-worker
+                           `forecast_panel` job (build forecast.acys_actuals from Cirium × FR24, merge
+                           into forecast.acys_summary_by_day). Returns the job_id. The worker publishes
+                           a SEQUENTIAL status per step, read from /status/{job_id} (poll) or
+                           /status/stream (SSE), and writes the service.forecast_last_requests row ONLY
+                           after the whole panel finishes successfully (not at trigger time).
+                           WITH `snapshot_id` INSTEAD OF A SCOPE it computes NOTHING: it enqueues
+                           `forecast_restore`, which pours that saved run back into
+                           acys_summary_by_day and refreshes the same report matviews. Same job_id and
+                           status contract, three steps instead of ten.
+GET  /forecast/last      — the most recent trigger (datetime + request_type + params).
+GET  /forecast/snapshots — the saved runs of the last 30 days, filterable by registration(s),
+                           operator(s) and date. The id listed here is what POST /forecast/ takes as
+                           `snapshot_id`.
+
+WHY SNAPSHOTS EXIST: acys_summary_by_day holds exactly ONE run — every request TRUNCATEs it and
+rebuilds it. Each successful run therefore copies its finished dataset into forecast.acys_snapshots +
+forecast.acys_snapshot_rows, which external-worker prunes to FORECAST_SNAPSHOT_RETENTION_DAYS (30) at
+the end of the next run. Re-showing a run is then a copy and a matview refresh instead of an hour of
+fetching and forecasting.
 
 TUNING PROFILES (service.forecast_profiles) — what the portal's settings screen talks to:
 GET    /forecast/params/schema  — the FORM DESCRIPTOR: every knob with type/bounds/default/label/
@@ -48,8 +61,15 @@ logger = setup_logger("forecast_api")
 router = Router(prefix="/forecast", tags=["Forecast"])
 
 _REF = "forecast_panel"
+_RESTORE_REF = "forecast_restore"   # the job that re-shows a saved run (no fetch, no model)
 _REQUEST_TYPE = "ACYS"              # current Cirium×FR24 panel algorithm
 _STATUS_CHANNEL = "status:events"   # must match the workers' status.py / StatusCheck.py
+_DB = "aixii"                       # logical name -> the physical aixii database (forecast schema)
+
+# The listing window. Kept equal to external-worker's FORECAST_SNAPSHOT_RETENTION_DAYS on purpose: a
+# wider window here would list runs the worker has already pruned, and a narrower one would hide runs
+# that are still restorable.
+_SNAPSHOT_WINDOW_DAYS = 30
 
 
 class ForecastRequest(BaseModel):
@@ -69,6 +89,13 @@ class ForecastRequest(BaseModel):
         None, description="Name of a service.forecast_profiles tuning profile. Omitted, the default "
                           "profile is used. A named profile that does not exist fails the run rather "
                           "than silently falling back.")
+    snapshot_id: Optional[int] = Field(
+        None, ge=1,
+        description="RE-SHOW A SAVED RUN instead of producing a new one: the id of a row from "
+                    "GET /forecast/snapshots. Nothing is fetched and nothing is forecast — the saved "
+                    "dataset is poured back into the report table and the report matviews are "
+                    "refreshed. Mutually exclusive with operators / registrations / date / profile, "
+                    "which all describe a run that would be COMPUTED.")
 
     def norm_operators(self) -> List[str]:
         """The de-duplicated, stripped operator list — merging the legacy single `operator` in."""
@@ -82,32 +109,143 @@ class ForecastRequest(BaseModel):
 
     @model_validator(mode="after")
     def _at_least_one_mode(self):
-        if not self.norm_operators() and not self.registrations:
-            raise ValueError("provide operators and/or registrations")
+        """Exactly one of the two modes. A body carrying BOTH a snapshot_id and a scope is rejected
+        rather than silently resolved: either reading of it (re-show the saved run / compute the
+        scope) would be a guess, and the two differ by an hour of work and a different dataset."""
+        scope = bool(self.norm_operators() or self.registrations)
+        if self.snapshot_id is not None:
+            if scope or self.date is not None or self.profile is not None:
+                raise ValueError("snapshot_id re-shows a saved run: send it alone, without "
+                                 "operators / registrations / date / profile")
+            return self
+        if not scope:
+            raise ValueError("provide operators and/or registrations, or a snapshot_id")
         return self
 
 
-async def _mark_queued(request: Request, job_id: str, label: str) -> None:
+async def _mark_queued(request: Request, job_id: str, label: str, *, ref: str = _REF,
+                       what: str = "forecast panel") -> None:
     """Insert a `queued` job_statuses row and publish it, so /status is populated immediately."""
-    msg = f"Queued: forecast panel for {label}"
+    msg = f"Queued: {what} for {label}"
     async with request.app.state.db_client.session("service") as session:
-        session.add(JobStatus(job_id=job_id, kind="external", ref=_REF,
+        session.add(JobStatus(job_id=job_id, kind="external", ref=ref,
                               state="queued", progress=0, message=msg))
         await session.commit()
     try:
         await request.app.state.redis.publish(_STATUS_CHANNEL, json.dumps({
-            "job_id": job_id, "kind": "external", "ref": _REF,
+            "job_id": job_id, "kind": "external", "ref": ref,
             "state": "queued", "progress": 0, "message": msg,
         }))
     except Exception:
         pass
 
 
+# The columns a listing row is built from. `covered_registrations` is COUNTED, not listed: an
+# operator-scoped run covers its whole fleet, and a few hundred tails per row would make the listing
+# heavier than the thing it lists. The filter still matches against the full array server-side.
+_SNAPSHOT_COLS = """
+    s.id, s.created_at, s.job_id, s.request_type, s.operators, s.registrations,
+    s.covered_operators, cardinality(s.covered_registrations) AS covered_registration_count,
+    s.as_of, s.profile, s.row_count, s.restored_at, s.restore_count
+"""
+
+_SNAPSHOT_ONE_SQL = f"SELECT {_SNAPSHOT_COLS} FROM forecast.acys_snapshots s WHERE s.id = :sid"
+
+# Every filter is written as "no value sent OR it matches", so any combination of them ANDs together
+# with no branching in Python — operator AND date is the same statement as operator alone.
+#
+# Scope matching reads the REQUESTED arrays and the COVERED ones as one list (`||`): an operator-scoped
+# run names no tails, yet its dataset holds every tail of that operator, so a search for a tail has to
+# look at what the run CONTAINS, not only at what was typed to start it. Matching is case-insensitive
+# and trimmed on both sides, because a registration reaches us from a form as often as from the model.
+#
+# CAST(:p AS text[]) rather than a bare :p — a NULL parameter with no inferable type is one asyncpg
+# refuses to send at all ("could not determine data type"), and an inline ::cast is the footgun this
+# codebase has been bitten by before.
+_SNAPSHOT_LIST_SQL = f"""
+SELECT {_SNAPSHOT_COLS}, count(*) OVER () AS total_count
+FROM forecast.acys_snapshots s
+WHERE s.created_at >= now() - make_interval(days => :window)
+  AND (CAST(:regs AS text[]) IS NULL OR EXISTS (
+        SELECT 1 FROM unnest(s.registrations || s.covered_registrations) AS r(v)
+        WHERE upper(btrim(r.v)) = ANY(CAST(:regs AS text[]))))
+  AND (CAST(:ops AS text[]) IS NULL OR EXISTS (
+        SELECT 1 FROM unnest(s.operators || s.covered_operators) AS o(v)
+        WHERE lower(btrim(o.v)) = ANY(CAST(:ops AS text[]))))
+  AND (CAST(:day AS date) IS NULL
+       OR CAST(s.created_at AT TIME ZONE 'UTC' AS date) = CAST(:day AS date))
+  AND (CAST(:as_of AS date) IS NULL OR s.as_of = CAST(:as_of AS date))
+ORDER BY s.created_at DESC
+LIMIT :limit OFFSET :offset
+"""
+
+
+def _snapshot_out(row) -> dict:
+    """One saved run as the portal lists it. `id` is what POST /forecast/ takes as `snapshot_id`."""
+    return {
+        "id": int(row["id"]),
+        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+        "job_id": row["job_id"],
+        "request_type": row["request_type"],
+        # what was ASKED FOR — empty for the other mode (an operator run names no tails and vice versa)
+        "operators": list(row["operators"] or []),
+        "registrations": list(row["registrations"] or []),
+        # what the dataset actually HOLDS
+        "covered_operators": list(row["covered_operators"] or []),
+        "covered_registration_count": int(row["covered_registration_count"] or 0),
+        "as_of": row["as_of"].isoformat() if row["as_of"] else None,
+        "profile": row["profile"],
+        "row_count": int(row["row_count"] or 0),
+        "restored_at": row["restored_at"].isoformat() if row["restored_at"] else None,
+        "restore_count": int(row["restore_count"] or 0),
+    }
+
+
+async def _start_restore(snapshot_id: int, request: Request, response: Response):
+    """POST /forecast/ with a snapshot_id: enqueue `forecast_restore` instead of the panel.
+
+    The saved run is only LOOKED UP here (a 404 for one the retention window has already dropped is
+    worth more than a job that fails a minute later); the work itself belongs to the worker, which
+    owns the report tables — core-api's role may read forecast.* but not TRUNCATE it or REFRESH a
+    matview, and the refresh is minutes of work that must not sit inside an HTTP request."""
+    async with request.app.state.db_client.session(_DB) as session:
+        row = (await session.execute(text(_SNAPSHOT_ONE_SQL),
+                                     {"sid": snapshot_id})).mappings().first()
+    if row is None:
+        return warning_response(
+            request=request, response=response,
+            msg=f"Saved forecast run {snapshot_id} not found — it may have passed the "
+                f"{_SNAPSHOT_WINDOW_DAYS}-day retention window",
+            status_code=status.HTTP_404_NOT_FOUND)
+
+    snapshot = _snapshot_out(row)
+    job_id = uuid.uuid4().hex
+    await _mark_queued(request, job_id, f"saved run {snapshot_id}",
+                       ref=_RESTORE_REF, what="forecast restore")
+    await request.state.arq.enqueue_job(
+        _RESTORE_REF,
+        snapshot_id=snapshot_id,
+        correlation_id=request.state.correlation_id,
+        _job_id=job_id,
+        _queue_name=EXTERNAL_QUEUE,
+    )
+    return success_response(
+        request=request, response=response,
+        data={"job_id": job_id, "mode": "snapshot", "snapshot": snapshot},
+        msg=f"Restoring saved forecast run {snapshot_id}",
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+
+
 @router.post(
     path="/",
     description="Start the forecast panel build (Cirium × FR24 → forecast.acys_summary_by_day; "
                 "grouped rollup in the forecast.acys_summary_grouped view) for one or more operators "
-                "and/or a list of registrations. Multiple operators are each forecast within one run.",
+                "and/or a list of registrations. Multiple operators are each forecast within one run. "
+                "Send `snapshot_id` INSTEAD of a scope to re-show a saved run (GET /forecast/snapshots): "
+                "nothing is fetched or forecast — the saved dataset is poured back into the report table "
+                "and the report matviews are refreshed. Both forms return a job_id and report progress "
+                "the same way.",
     status_code=status.HTTP_202_ACCEPTED,
     responses=build_responses(include={
         status.HTTP_202_ACCEPTED, status.HTTP_404_NOT_FOUND,
@@ -117,6 +255,12 @@ async def _mark_queued(request: Request, job_id: str, label: str) -> None:
 )
 async def start_forecast(body: ForecastRequest, request: Request, response: Response):
     try:
+        # Re-showing a saved run shares this endpoint (one button, one contract) but none of its work:
+        # no scope to validate, no panel to enqueue. The body validator has already ruled out a request
+        # that asks for both.
+        if body.snapshot_id is not None:
+            return await _start_restore(body.snapshot_id, request, response)
+
         operators = body.norm_operators()
         registrations = [r.strip() for r in body.registrations if r and r.strip()] if body.registrations else None
         registrations = registrations or None
@@ -193,6 +337,59 @@ async def last_forecast(
             "datetime": row.created_at.isoformat() if row.created_at else None,
             "request_type": row.request_type,
             "request_params": row.request_params,
+        })
+    except Exception as _ex:
+        return error_response(request=request, exc=_ex, response=response)
+
+
+@router.get(
+    path="/snapshots",
+    description=f"The forecast runs saved over the last {_SNAPSHOT_WINDOW_DAYS} days, newest first. "
+                "Filters COMBINE (they are ANDed): registration + date lists only the runs that cover "
+                "one of those tails AND were produced on that date. A registration matches a run that "
+                "ASKED for it or whose dataset CONTAINS it, so an operator-scoped run is found by any "
+                "of its tails. `id` is what POST /forecast/ takes as `snapshot_id` to re-show the run.",
+    responses=build_responses(include={status.HTTP_200_OK, status.HTTP_500_INTERNAL_SERVER_ERROR}),
+    dependencies=[Depends(authorize(SCOPE_PREDICTIVE_READ))],
+)
+async def list_snapshots(
+    request: Request, response: Response,
+    registration: Optional[List[str]] = Query(
+        None, description="Registration(s), repeatable — ?registration=N123AB&registration=N456CD. "
+                          "Case-insensitive. A run matches if it was requested for the tail OR its "
+                          "dataset contains it."),
+    operator: Optional[List[str]] = Query(
+        None, description="Airline / Cirium Operator name(s), repeatable. Case-insensitive, matched "
+                          "in full (not a substring)."),
+    date: Optional[date_cls] = Query(
+        None, description="The DAY THE RUN WAS PRODUCED (UTC), YYYY-MM-DD. For the run's as-of date "
+                          "(the Contract Year anchor it was built around) use `as_of` instead."),
+    as_of: Optional[date_cls] = Query(
+        None, description="The run's own as-of date, YYYY-MM-DD."),
+    limit: int = Query(100, ge=1, le=500, description="Page size."),
+    offset: int = Query(0, ge=0, description="Rows to skip; `total` in the response is the unpaged count."),
+):
+    try:
+        # Normalised HERE, once, so the SQL compares like with like: registrations upper-cased (the
+        # model stores them that way, portals rarely do), operator names lower-cased.
+        regs = [r.strip().upper() for r in (registration or []) if r and r.strip()] or None
+        ops = [o.strip().lower() for o in (operator or []) if o and o.strip()] or None
+        async with request.app.state.db_client.session(_DB) as session:
+            rows = (await session.execute(text(_SNAPSHOT_LIST_SQL), {
+                "window": _SNAPSHOT_WINDOW_DAYS, "regs": regs, "ops": ops,
+                # the date objects themselves: CAST(:day AS date) makes the driver infer the
+                # parameter's type as `date`, and asyncpg then refuses an isoformat string.
+                "day": date, "as_of": as_of,
+                "limit": limit, "offset": offset,
+            })).mappings().all()
+        total = int(rows[0]["total_count"]) if rows else 0
+        return success_response(request=request, response=response, data={
+            "total": total, "limit": limit, "offset": offset,
+            "retention_days": _SNAPSHOT_WINDOW_DAYS,
+            "filters": {"registration": regs, "operator": ops,
+                        "date": date.isoformat() if date else None,
+                        "as_of": as_of.isoformat() if as_of else None},
+            "items": [_snapshot_out(r) for r in rows],
         })
     except Exception as _ex:
         return error_response(request=request, exc=_ex, response=response)

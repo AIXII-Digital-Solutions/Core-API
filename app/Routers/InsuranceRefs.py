@@ -21,7 +21,8 @@ from sqlalchemy import select, or_
 
 from Config import setup_logger
 from settings import Router
-from Database.ApiModels import Airlines, AircraftTypes, EngineTypes, Parties
+from Database.ApiModels import Airlines          # stayed in the `api` schema
+from Database.InsuranceModels import AircraftTypes, EngineTypes, Parties
 from api_auth import authorize, SCOPE_INSURANCE_READ
 from Utils import success_response, error_response
 from Utils.ResponsesFunc import build_responses

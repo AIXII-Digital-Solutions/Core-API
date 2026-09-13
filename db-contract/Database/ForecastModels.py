@@ -73,7 +73,7 @@ class AcysClaims(Base):
     """Insurance claims experience per airline and calendar year, aggregated — one row is "this
     airline had N claims worth X in this year, under this section of cover, in this state".
 
-    NOT the same thing as `api.insurance_claims`, which records individual loss events against a
+    NOT the same thing as `insurance.insurance_claims`, which records individual loss events against a
     specific aircraft and policy. This table is the summary a broker's claims-experience sheet
     states directly, loaded as given; it is a reporting input, not a derived rollup of that table.
 

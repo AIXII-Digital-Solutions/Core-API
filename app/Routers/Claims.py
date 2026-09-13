@@ -4,21 +4,21 @@ Like Routers/Insurance.py the write body is a flat 1:1 mirror of the source sche
 (registration / msn / airline / policy_period / type_of_damage / date_of_loss / ... / hsl_paid) —
 callers never deal with surrogate ids. This router resolves it into the `api` schema:
 
-    registration + msn        ->  api.aircrafts        (find-or-create, MSN is identity)
+    registration + msn        ->  insurance.aircrafts        (find-or-create, MSN is identity)
     airline                   ->  api.airlines         (find-or-create)
-    surveyor / leader         ->  api.parties          (find-or-create, role flags accumulate)
-    policy_period             ->  api.insurance_policies — either the period given explicitly, or,
+    surveyor / leader         ->  insurance.parties          (find-or-create, role flags accumulate)
+    policy_period             ->  insurance.insurance_policies — either the period given explicitly, or,
                                   when omitted, the policy that was in force for THAT aircraft on
-                                  date_of_loss, taken from api.insurance_records
-    everything else           ->  api.insurance_claims
+                                  date_of_loss, taken from insurance.insurance_records
+    everything else           ->  insurance.insurance_claims
 
-The change history is the point of the table, not a side effect: `api.insurance_claims_audit()`
-snapshots every INSERT / UPDATE / DELETE into api.insurance_claim_history, and
+The change history is the point of the table, not a side effect: `insurance.insurance_claims_audit()`
+snapshots every INSERT / UPDATE / DELETE into insurance.insurance_claim_history, and
 GET /insurance/claims/{id}/history turns those snapshots into a `changes` list (field, old, new —
 foreign keys already resolved to names) that a UI can render straight into an info button.
 
 Claims are NOT mutually exclusive: one aircraft can suffer several losses on the same day, so there
-is no overlap constraint here (unlike api.insurance_records).
+is no overlap constraint here (unlike insurance.insurance_records).
 """
 from datetime import date
 from decimal import Decimal
@@ -32,8 +32,9 @@ from sqlalchemy.exc import IntegrityError
 from Config import setup_logger
 from settings import Router
 from Database import ApiToken
-from Database.ApiModels import (
-    Aircrafts, Airlines, InsurancePolicies, InsuranceRecords,
+from Database.ApiModels import Airlines          # stayed in the `api` schema
+from Database.InsuranceModels import (
+    Aircrafts, InsurancePolicies, InsuranceRecords,
     InsuranceClaims, InsuranceClaimHistory, ClaimDamageType,
 )
 from api_auth import authorize, SCOPE_INSURANCE_READ, SCOPE_INSURANCE_WRITE
@@ -457,7 +458,7 @@ async def update_claim(
         "Delete one claim — for a claim raised in error. A claim that was settled is NOT deleted, it "
         "keeps its `paid_date`; a claim that was withdrawn by the insurer is a correction, not a "
         "deletion. The removal is audited like any other change, so the pre-image survives in "
-        "api.insurance_claim_history and GET /insurance/claims/{claim_id}/history keeps working "
+        "insurance.insurance_claim_history and GET /insurance/claims/{claim_id}/history keeps working "
         "afterwards — the returned `deleted` object is also complete enough to re-POST. The "
         "aircraft and the policy are NOT touched."
     ),
