@@ -123,6 +123,11 @@ The **ACYS forecast** projects operator fleet utilisation. This is the most cros
   `POST /forecast/` with `snapshot_id` — the ARQ job **`forecast_restore`** (`ForecastAPI/restore.py`), which
   pours the rows back and refreshes the same `REPORT_MATVIEWS` a real run refreshes. No fetch, no model.
   Budget ~0.5 GB of database per saved run.
+- **A same-day repeat is not rebuilt:** `run_forecast_panel` first asks `snapshots.find_reusable` whether
+  this exact request already ran TODAY — same normalised scope, same as-of date, same
+  `params_fingerprint` (a hash of the RESOLVED model parameters, so tuning a profile makes it a different
+  request) — and hands over to the restore path if it did. `force: true` on the request rebuilds anyway;
+  that is the escape hatch for source data that moved under an unchanged request.
 - **The spec — THREE byte-identical copies** (`diff` them on any change):
   `db-contract/forecast_params.py` (source) → `Core-API/app/Utils/forecast_params.py` (validate on write) →
   `External-Worker/worker/API/ForecastAPI/params.py` (resolve on read). Adding a knob = add to `SPEC` with a
