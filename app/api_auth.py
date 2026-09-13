@@ -17,13 +17,21 @@ How it fits the platform (what to tell API-key holders):
   or the workers. Scope what each person needs; revoke by disabling or deleting the row.
 
 Only the sha256+pepper HASH of a secret is stored; the secret is shown once at creation.
+
+Both credentials are declared as OpenAPI SECURITY SCHEMES rather than plain header parameters. That
+difference is invisible at runtime and decisive in the docs: a scheme puts them behind Swagger's
+Authorize button — entered once, sent with every request — while a header parameter is a box to
+retype on every single operation, which is how a working credential comes to look like a rejected
+one. The schemes are listed side by side (OpenAPI reads a LIST of requirements as OR), which is
+exactly what authorize() does: either credential is enough.
 """
 import hashlib
 import hmac
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import Request, Header, HTTPException, status
+from fastapi import Depends, Request, HTTPException, status
+from fastapi.security import APIKeyHeader
 from sqlalchemy import select
 
 from settings import SERVICE_TOKEN, API_TOKEN_PEPPER
@@ -54,6 +62,19 @@ ALL_SCOPES = {
 
 # How long to coalesce last_used_at writes (avoid a DB write on every authorised request).
 _LAST_USED_THROTTLE = timedelta(seconds=60)
+
+
+# auto_error=False on both: a missing credential must fall through to OUR check, which answers 401
+# naming BOTH headers. Left at the default, FastAPI would reject first with a bare 403 that tells the
+# caller nothing about which credential it wanted.
+SERVICE_TOKEN_HEADER = APIKeyHeader(
+    name="X-Service-Token", scheme_name="ServiceToken", auto_error=False,
+    description="The master service token. Full access, no scopes — for the platform's own "
+                "backends. Either this or X-Api-Key.")
+API_KEY_HEADER = APIKeyHeader(
+    name="X-Api-Key", scheme_name="ApiKey", auto_error=False,
+    description="A scoped key, `<prefix>.<secret>`, minted at /tokens. Its scopes must cover the "
+                "endpoint (or hold `admin`). Either this or X-Service-Token.")
 
 
 def hash_secret(secret: str) -> str:
@@ -101,8 +122,8 @@ def authorize(*required_scopes: str):
 
     async def dependency(
         request: Request,
-        x_service_token: Optional[str] = Header(default=None),
-        x_api_key: Optional[str] = Header(default=None),
+        x_service_token: Optional[str] = Depends(SERVICE_TOKEN_HEADER),
+        x_api_key: Optional[str] = Depends(API_KEY_HEADER),
     ) -> Optional[ApiToken]:
         if _service_token_ok(x_service_token):
             return None  # trusted internal caller — full access
@@ -125,6 +146,7 @@ def authorize(*required_scopes: str):
 
 __all__ = [
     "hash_secret", "authorize", "ALL_SCOPES",
+    "SERVICE_TOKEN_HEADER", "API_KEY_HEADER",
     "SCOPE_FLIGHTS_READ", "SCOPE_STATUS_READ", "SCOPE_FILES_WRITE",
     "SCOPE_SCHEDULER_READ", "SCOPE_SCHEDULER_WRITE", "SCOPE_QUEUES_ADMIN",
     "SCOPE_TOKENS_ADMIN", "SCOPE_PREDICTIVE_READ", "SCOPE_PREDICTIVE_WRITE",

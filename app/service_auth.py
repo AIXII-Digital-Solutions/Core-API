@@ -6,15 +6,21 @@ reachable only by trusted backends.
 """
 import hmac
 
-from fastapi import Header, HTTPException, status
+from fastapi import Depends, HTTPException, status
 
+from api_auth import SERVICE_TOKEN_HEADER
 from settings import SERVICE_TOKEN
 
 
-async def verify_service_token(x_service_token: str | None = Header(default=None)) -> None:
+async def verify_service_token(x_service_token: str | None = Depends(SERVICE_TOKEN_HEADER)) -> None:
     """Reject the request unless a valid X-Service-Token header is presented.
 
     If SERVICE_TOKEN is unset the route is closed (denies all) rather than open.
+
+    Reads the header through the same OpenAPI security scheme as `authorize`, so the routes that
+    accept ONLY the service token sit behind the same Authorize button as everything else — one
+    credential entered once, rather than a header box that appears on some operations and not
+    others.
     """
     if (not SERVICE_TOKEN or not x_service_token
             or not hmac.compare_digest(x_service_token.encode("utf-8"), SERVICE_TOKEN.encode("utf-8"))):
