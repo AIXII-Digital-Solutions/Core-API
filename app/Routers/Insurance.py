@@ -5,15 +5,15 @@ aircraft_type / mtow / policy_from ... / source) — callers do not deal with su
 router normalises that row into the `api` schema:
 
     airline / aircraft_type / engines_type / lessee / lessor   ->  find-or-create reference rows
-    registration + msn                                          ->  api.aircrafts (msn is identity)
-    mtow + number_of_engines                                    ->  api.aircraft_specs (1:1, optional)
-    engine_msn_1..4                                             ->  api.aircraft_engines (positions)
-    policy_from/policy_to/CSL/currency                          ->  api.insurance_policies (shared)
-    everything else                                             ->  api.insurance_records
+    registration + msn                                          ->  insurance.aircrafts (msn is identity)
+    mtow + number_of_engines                                    ->  insurance.aircraft_specs (1:1, optional)
+    engine_msn_1..4                                             ->  insurance.aircraft_engines (positions)
+    policy_from/policy_to/CSL/currency                          ->  insurance.insurance_policies (shared)
+    everything else                                             ->  insurance.insurance_records
 
 History is never overwritten: a renewal is a new policy + a new record (the old one keeps its
 period), and an in-place PATCH is captured pre-image-and-post-image by the DB audit trigger into
-api.insurance_record_history. A 409 means the GiST exclusion constraint rejected an overlap — the
+insurance.insurance_record_history. A 409 means the GiST exclusion constraint rejected an overlap — the
 aircraft already has an insurance record covering part of that period.
 
 Spelling note: the source columns are `depriciation_date` / `depriciation_rate`; the API and the
@@ -32,8 +32,9 @@ from sqlalchemy.exc import IntegrityError
 from Config import setup_logger
 from settings import Router
 from Database import ApiToken
-from Database.ApiModels import (
-    Airlines, Aircrafts, AircraftTypes, AircraftSpecs, AircraftEngines,
+from Database.ApiModels import Airlines          # stayed in the `api` schema
+from Database.InsuranceModels import (
+    Aircrafts, AircraftTypes, AircraftSpecs, AircraftEngines,
     InsurancePolicies, InsuranceRecords, InsuranceRecordHistory, InsuranceClaims,
     InsuranceStatus, InsuranceSource,
 )
@@ -102,7 +103,7 @@ class InsuranceCreate(BaseModel):
     airline: Optional[str] = Field(default=None, max_length=256)
     aircraft_type: Optional[str] = Field(default=None, max_length=128)
 
-    # --- technical block (all optional; omit it entirely and no api.aircraft_specs row is created)
+    # --- technical block (all optional; omit it entirely and no insurance.aircraft_specs row is created)
     mtow: Optional[Decimal] = Field(default=None, gt=0, description="Maximum take-off weight, KILOGRAMS.")
     number_of_engines: Optional[int] = Field(default=None, ge=1, le=8)
     engines_type: Optional[str] = Field(default=None, max_length=128)
@@ -475,7 +476,7 @@ async def create_insurance(
     description=(
         "Update one insurance record in place (endorsement / correction). Only the fields present "
         "in the body change; the previous version is archived automatically into "
-        "api.insurance_record_history. To record a RENEWAL, POST a new record instead."
+        "insurance.insurance_record_history. To record a RENEWAL, POST a new record instead."
     ),
     responses=build_responses(include={
         status.HTTP_200_OK, status.HTTP_400_BAD_REQUEST, status.HTTP_404_NOT_FOUND,
@@ -554,7 +555,7 @@ async def update_insurance(
     description=(
         "Delete one insurance record — for a row entered by mistake. This is NOT how a policy ends: "
         "a record that simply expired keeps its period and stays. The deletion is audited like any "
-        "other change, so the full pre-image survives in api.insurance_record_history and "
+        "other change, so the full pre-image survives in insurance.insurance_record_history and "
         "GET /insurance/{record_id}/history keeps working afterwards — the returned `deleted` object "
         "is also complete enough to re-POST. The aircraft, its technical data and its policy are NOT "
         "touched: they outlive the record, and a policy left with no records is reused by the next "

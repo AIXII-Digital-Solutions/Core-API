@@ -76,6 +76,15 @@ class ApiBase(AsyncAttrs, BaseMixin, DeclarativeBase):
     metadata = MetaData(schema="api")
 
 
+# Base class for the aircraft-insurance domain -> schema `insurance` (in the aixii database).
+# Split out of `api` by revision `insurance_schema_move`: insured aircraft, their policies, records,
+# claims and the two audit trails are one business domain and get one schema, like every aviation
+# source does. `api.airlines` deliberately stayed on ApiBase, so InsuranceModels links to it with
+# the Column object (a ForeignKey STRING is resolved inside the owning MetaData only).
+class InsuranceBase(AsyncAttrs, BaseMixin, DeclarativeBase):
+    metadata = MetaData(schema="insurance")
+
+
 # Base class for ICAO models -> schema `icao` (ICAO + ICAO-API reference/reporting data).
 # Uses BaseMixin like the other domains, so each model gets id/created_at/updated_at for free.
 class IcaoBase(AsyncAttrs, BaseMixin, DeclarativeBase):

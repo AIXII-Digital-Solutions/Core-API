@@ -4,7 +4,7 @@ One row is "this airline had N claims worth X in this calendar year, under this 
 this state". It is loaded as stated (a broker's claims-experience summary), NOT derived from
 individual loss events.
 
-NOT to be confused with /insurance/claims (api.insurance_claims), which registers ONE loss against a
+NOT to be confused with /insurance/claims (insurance.insurance_claims), which registers ONE loss against a
 specific aircraft and policy, with a full change history. This router is the summary table that feeds
 reporting; that one is the operational record.
 

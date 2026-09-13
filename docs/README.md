@@ -17,7 +17,7 @@ Documentation for the three-service platform (core-api + external-worker + file-
 - **[capacity-control.md](capacity-control.md)** — portal-facing start/stop of the Power BI Embedded
   Azure capacity (`/api/v1/capacity/*`, scope `capacity:admin`): contract, `PBIE_*` config, Azure
   provisioning, the 401/403/409/502/503 codes, and credential rotation.
-- **[insurance.md](insurance.md)** — the aircraft-insurance domain in the `api` schema
+- **[insurance.md](insurance.md)** — the aircraft-insurance domain in its own `insurance` schema
   (`/api/v1/insurance/*` and `/api/v1/insurance/claims/*`, scopes `insurance:read` /
   `insurance:write`): how the flat policy and claims schedules are normalised across eleven tables,
   how policy history, claim history and the trigger-written audit trail work, and the constraints
