@@ -32,7 +32,7 @@ as the `postgres` superuser.
 |---|---|---|
 | `grp_aixii_read` | `USAGE` + `SELECT` | **all** `aixii` schemas (sources + `api` + any read-exposed schema like `forecast`) |
 | `grp_aviation_write` | `USAGE` + DML (`SELECT/INSERT/UPDATE/DELETE`) + sequence usage | the source schemas: `flightradar`, `aviationedge`, `cirium`, `airlabs`, `icao` |
-| `grp_api_write` | `USAGE` + DML + sequence usage | `api`, plus the single table `forecast.acys_claims` (see note below) |
+| `grp_api_write` | `USAGE` + DML + sequence usage | `api` and `insurance`, plus the single table `forecast.acys_claims` (see note below) |
 | `grp_service_write` | `USAGE` + DML + sequence usage | `public` schema of the **`service`** DB |
 
 ### Login users (what actually connects) + their group membership
@@ -42,7 +42,7 @@ as the `postgres` superuser.
 | `bi_reader` | PowerBI / BI read-only | `grp_aixii_read` | SELECT on all read-exposed `aixii` schemas. **No** CONNECT to `service`. |
 | `svc_external_worker` | external-worker service | `grp_aviation_write`, `grp_service_write` | DML on sources + `service`; SELECT on `api` (granted directly, see setup script). |
 | `svc_file_worker` | file-processor service | `grp_aviation_write`, `grp_service_write` | DML on sources + `service`. |
-| `svc_api` | Core-API runtime | `grp_aixii_read`, `grp_api_write`, `grp_service_write` | SELECT everywhere in `aixii` + DML on `api` + DML on `service` + DML on `forecast.acys_claims`. |
+| `svc_api` | Core-API runtime | `grp_aixii_read`, `grp_api_write`, `grp_service_write` | SELECT everywhere in `aixii` + DML on `api` and `insurance` + DML on `service` + DML on `forecast.acys_claims`. |
 | `developer` | owner / migrator (SUPERUSER) | — (owns everything) | Everything. Alembic runs as this role. |
 
 > **The one exception to "`grp_api_write` = schema `api`":** `forecast.acys_claims` is written by

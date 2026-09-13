@@ -1,8 +1,8 @@
 # Aircraft insurance — schema and API
 
-Owner: core-api. Schema: `api` (in the `aixii` database). Migrations: `ad60f0b27298` (policies and
-records), `fa38ae0ab542` (claims).
-Models: `db-contract/Database/ApiModels.py` (runtime copy `app/Database/ApiModels.py`).
+Owner: core-api. Schema: **`insurance`** (in the `aixii` database). Migrations: `ad60f0b27298`
+(policies and records), `fa38ae0ab542` (claims), `insurance_schema_move` (the schema split).
+Models: `db-contract/Database/InsuranceModels.py` (runtime copy `app/Database/InsuranceModels.py`).
 Routers: `app/Routers/Insurance.py` (policies/records), `app/Routers/Claims.py` (claims),
 `app/Routers/InsuranceRefs.py` (autocomplete lookups), with the shared plumbing in
 `app/Utils/InsuranceCommon.py`. Scopes: `insurance:read`, `insurance:write`.
@@ -13,24 +13,39 @@ that are easy to undo wrongly.
 
 ## Tables
 
+Everything lives in the `insurance` schema. The one exception is the airline reference: `api.airlines`
+is **not** an insurance table (the cirium asg sync resolves names against it, `api.registration` has a
+FK to it, `grp_aviation_write` reads it while refreshing matviews), so it stayed in `api` and the
+insurance tables link to it across schemas — ordinary in PostgreSQL, and nothing about it is special
+to work with.
+
 ```
-reference     api.airlines            (pre-existing)  airline
-              api.parties             lessee, lessor, surveyor, leader — ONE table, the referencing
-                                      column decides the role
-              api.aircraft_types      aircraft_type   (+ default_* fallbacks for the importer)
-              api.engine_types        engines_type
+reference     api.airlines                        (in schema `api`)  airline
+              insurance.parties                   lessee, lessor, surveyor, leader — ONE table, the
+                                                  referencing column decides the role
+              insurance.aircraft_types            aircraft_type  (+ default_* fallbacks for the importer)
+              insurance.engine_types              engines_type
 
-airframe      api.aircrafts           registration, msn, -> aircraft_type, -> airline
-              api.aircraft_specs      1:1 OPTIONAL — mtow_kg, number_of_engines, source
-              api.aircraft_engines    one row per installed engine, replaces engine_msn_1..4
+airframe      insurance.aircrafts                 registration, msn, -> aircraft_type, -> airline
+              insurance.aircraft_specs            1:1 OPTIONAL — mtow_kg, number_of_engines, source
+              insurance.aircraft_engines          one row per installed engine, replaces engine_msn_1..4
 
-insurance     api.insurance_policies  the contract: airline, number, period, currency, CSL
-              api.insurance_records   one time-bounded record per aircraft — everything else
-              api.insurance_record_history   audit trail, written by a DB trigger
+insurance     insurance.insurance_policies        the contract: airline, number, period, currency, CSL
+              insurance.insurance_records         one time-bounded record per aircraft — everything else
+              insurance.insurance_record_history  audit trail, written by a DB trigger
 
-claims        api.insurance_claims    one loss event: damage, reserves, payments, who is handling it
-              api.insurance_claim_history    its audit trail, also trigger-written
+claims        insurance.insurance_claims          one loss event: damage, reserves, payments, who handles it
+              insurance.insurance_claim_history   its audit trail, also trigger-written
 ```
+
+The domain was born in schema `api` and moved out wholesale by `insurance_schema_move` — one schema
+per business domain, like every aviation source has. The move is `ALTER TABLE … SET SCHEMA` (a
+catalogue update: no data copied, ids and sequence positions untouched, table grants carried along)
+plus three enums, both audit functions recreated to write to the moved history tables, and a rename
+of the `ix_api_*` indexes to `ix_insurance_*` — SQLAlchemy derives implicit index names from the
+table's schema, so without the rename autogenerate would propose recreating ~25 indexes forever.
+The table names keep their `insurance_` prefix (`insurance.insurance_records`): renaming them is a
+separate decision, not a side effect of moving them.
 
 ### Where each source column went
 
@@ -69,7 +84,7 @@ separator-insensitive — `YLLTD` finds `YL-LTD`.
 **Never FK to `api.registration`.** That table is a projection of `cirium.asg` rebuilt by
 `api.sync_registration_from_asg()` with `TRUNCATE … RESTART IDENTITY` after every asg refresh, so
 its `id` is not stable. Join to it on `reg`/`msn` if you need the asg view; anchor on
-`api.aircrafts`.
+`insurance.aircrafts`.
 
 **Technical data is a separate 1:1 table**, not nullable columns on `aircrafts`. A missing
 `aircraft_specs` row means "we have no technical data", which nullable columns could not
@@ -93,8 +108,8 @@ keeps the pairing honest: `status = 'insured'` requires a policy.
 1. *Business history* — a renewal is a NEW policy + a NEW record; the old record keeps its period.
    "What was in force in 2024" is a period query, not an audit query.
 2. *Technical audit* — an endorsement or correction inside a live period is an in-place UPDATE, and
-   the trigger `api.insurance_records_audit()` copies the pre-image and post-image into
-   `api.insurance_record_history`. Chosen over versioned rows so that reads of the current state
+   the trigger `insurance.insurance_records_audit()` copies the pre-image and post-image into
+   `insurance.insurance_record_history`. Chosen over versioned rows so that reads of the current state
    stay a plain SELECT with no `WHERE is_current`.
 
 `changed_by` reads the `app.actor` GUC, which the router sets per transaction with
@@ -120,7 +135,7 @@ differs.
 ## Claims — decisions worth not re-litigating
 
 **The money is FLAT on the claim, deliberately.** `hd_reserve` / `hd_paid` / `hw_*` / `hsl_*` are six
-columns on `api.insurance_claims`, not a child table keyed by coverage section — even though the
+columns on `insurance.insurance_claims`, not a child table keyed by coverage section — even though the
 sections line up exactly with the three `type_of_damage` values. The tidier normal form loses on the
 one thing this table exists for: a single row means a SINGLE audit trigger captures every money
 movement in one snapshot. Split the amounts out and you split their history too. The section set is
@@ -131,10 +146,10 @@ totals as the schedule states them; the schedule supplies both levels and they d
 reconcile. Store what was stated. The read layer exposes `outstanding` (= reserve − paid) and list
 `totals`; nothing silently overwrites a stated figure with a computed one.
 
-**`policy_period` is a link, not a string.** A claim points at `api.insurance_policies`. Send the
+**`policy_period` is a link, not a string.** A claim points at `insurance.insurance_policies`. Send the
 period explicitly and it is found-or-created against the airline (so a claim can be loaded before
 its policy row exists); omit it and the claim attaches to whichever policy actually covered THAT
-aircraft on `date_of_loss`, read from `api.insurance_records`. The FK is `ON DELETE RESTRICT` — a
+aircraft on `date_of_loss`, read from `insurance.insurance_records`. The FK is `ON DELETE RESTRICT` — a
 claim must never vanish because a policy row was deleted.
 
 **No overlap constraint here.** Unlike `insurance_records`, claims may freely coincide: one aircraft
@@ -142,7 +157,7 @@ can suffer several distinct losses on the same day. The only uniqueness is `clai
 only when it is supplied (partial unique index).
 
 **The claims trigger fires on INSERT too**, unlike the records one, hence `old_row` is nullable in
-`api.insurance_claim_history`. The portal renders a full timeline per claim — who opened it, then
+`insurance.insurance_claim_history`. The portal renders a full timeline per claim — who opened it, then
 every reserve and payment movement — and the create event with its actor is part of that story.
 
 **The API returns diffs, not just snapshots.** The trigger persists whole-row JSONB (self-contained,
@@ -289,13 +304,20 @@ distorts the exposure figure.
 
 ## Changing the schema
 
-The usual three steps (see `../CLAUDE.md`): edit `db-contract/Database/ApiModels.py`, run
+The usual three steps (see `../CLAUDE.md`): edit `db-contract/Database/InsuranceModels.py`, run
 `python tools/migrate.py revision aixii "…"` then `upgrade aixii head` **with the Core-API venv's
-python**, then copy the model file to `app/Database/ApiModels.py`.
+python**, then copy the model file to `app/Database/InsuranceModels.py`.
+
+The models hang off `InsuranceBase` (`MetaData(schema="insurance")` in `Database/config.py`), which
+is registered in `migration/env.py`'s aixii target. The link to `api.airlines` is made with the
+Column object (`ForeignKey(Airlines.__table__.c.id)`) and `relationship(Airlines)`, not with the
+strings `"api.airlines.id"` / `"Airlines"`: a string target is resolved inside the OWNING MetaData
+and class registry, which cannot see another Base's table. Keep it that way for any further
+cross-schema link.
 
 Things autogenerate cannot emit and will silently omit if you regenerate from scratch: the exclusion
-constraint and BOTH audit triggers (`api.insurance_records_audit()`,
-`api.insurance_claims_audit()`). Autogenerate also proposes unrelated drift on `api.registration`
+constraint and BOTH audit triggers (`insurance.insurance_records_audit()`,
+`insurance.insurance_claims_audit()`). Autogenerate also proposes unrelated drift on `api.registration`
 and `cirium.ciriumaircrafts` — that predates this domain; strip it from any new revision.
 
 Raw SQL in a migration runs through `sa.text()` and then asyncpg: one statement per `op.execute()`

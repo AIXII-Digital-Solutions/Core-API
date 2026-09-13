@@ -10,11 +10,12 @@ from typing import Optional, Any, Iterable
 from sqlalchemy import select, text, or_, desc
 
 from Database import ApiToken
-from Database.ApiModels import (
-    Airlines, Aircrafts, AircraftTypes, EngineTypes, Parties, InsurancePolicies,
+from Database.ApiModels import Airlines          # stayed in the `api` schema
+from Database.InsuranceModels import (
+    Aircrafts, AircraftTypes, EngineTypes, Parties, InsurancePolicies,
 )
 
-# api.parties holds every non-airline entity the domain names; the flag says which roles it has been
+# insurance.parties holds every non-airline entity the domain names; the flag says which roles it has been
 # seen in. Flags accumulate and never restrict use — they exist so the portal can filter autocomplete.
 PARTY_ROLE_FLAGS = {
     "lessee": "is_lessee",
@@ -34,7 +35,7 @@ def norm(value: str) -> str:
 
 
 def norm_reg(value: str) -> str:
-    """upper + strip separators — matches api.aircrafts.registration_normalized ('YLLTD' == 'YL-LTD')."""
+    """upper + strip separators — matches insurance.aircrafts.registration_normalized ('YLLTD' == 'YL-LTD')."""
     return "".join(ch for ch in value.upper() if ch.isalnum())
 
 
