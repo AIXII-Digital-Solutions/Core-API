@@ -31,8 +31,8 @@ the current-year rate is cached under today's date, so a new publication is simp
 way a bulk load of a thousand rows costs at most one lookup per (currency, year) pair it contains.
 
 FAILURE. If no source answers, the loader is told so and the write is refused rather than stored with
-a missing or guessed rate — forecast.acys_claims allows the pair to be NULL, but a silently
-unconverted row would still be found later and believed.
+a missing or guessed rate — forecast.acys_claims allows the rate and both converted amounts to
+be NULL together, but a silently unconverted row would still be found later and believed.
 """
 from datetime import date
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP

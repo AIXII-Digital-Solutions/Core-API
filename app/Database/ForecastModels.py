@@ -48,13 +48,6 @@ class ClaimPolicyType(str, PyEnum):
     WXS = "WXS"
 
 
-class ClaimsStatus(str, PyEnum):
-    """Whether the claims counted by the row are closed or still moving. An `Ongoing` amount is a
-    reserve and will change; a `Settled` one will not."""
-    SETTLED = "Settled"
-    ONGOING = "Ongoing"
-
-
 _CURRENCY_ENUM = Enum(
     ClaimCurrency, name="claim_currency", schema="forecast",
     values_callable=lambda e: [m.value for m in e],
@@ -63,23 +56,31 @@ _POLICY_TYPE_ENUM = Enum(
     ClaimPolicyType, name="claim_policy_type", schema="forecast",
     values_callable=lambda e: [m.value for m in e],
 )
-_CLAIMS_STATUS_ENUM = Enum(
-    ClaimsStatus, name="claims_status", schema="forecast",
-    values_callable=lambda e: [m.value for m in e],
-)
 
 
 class AcysClaims(Base):
     """Insurance claims experience per airline and calendar year, aggregated — one row is "this
-    airline had N claims worth X in this year, under this section of cover, in this state".
+    airline had N claims worth X in this year under this section of cover, of which Y is still
+    outstanding".
 
     NOT the same thing as `insurance.insurance_claims`, which records individual loss events against a
     specific aircraft and policy. This table is the summary a broker's claims-experience sheet
     states directly, loaded as given; it is a reporting input, not a derived rollup of that table.
 
-    Grain: airline × calendar_year × currency × policy_type × claims_status. Settled and Ongoing are
-    separate rows for the same year, as are two currencies — which is why `claim_amount` is never
-    summed across the currency column (`claim_amounts_usd` is the one that may be).
+    Grain: airline × calendar_year × currency × policy_type. Two currencies are separate rows —
+    which is why neither amount is ever summed across the currency column (the `_usd` pair is what
+    may be).
+
+    SETTLED VS OUTSTANDING IS NO LONGER A ROW SPLIT. It used to be a `claims_status` column, so one
+    year's experience arrived as two rows that had to be added up to answer "what did this year
+    cost". It is now two columns of ONE row: `claims_amount_total` is everything the year cost and
+    `claims_amount_outstanding` is the part of that which is still a moving reserve. The settled
+    part is the difference, so nothing is lost and nothing has to be re-joined.
+
+    The two are NOT constrained against each other on purpose. Outstanding above total is arithmetic
+    nonsense, but a broker's sheet occasionally states one, and refusing the whole load over it is
+    worse than storing what was sent: this table's contract is "as stated", and a reporting layer
+    can flag the row.
 
     The grain is NOT unique: duplicates are kept exactly as sent. A sheet may legitimately state the
     same combination more than once, and the loader is not the place to decide which one is real. The
@@ -93,14 +94,15 @@ class AcysClaims(Base):
     number_of_claims: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # Money is NUMERIC, never float: the API accepts and returns a plain number, but the column
     # keeps exact decimal cents, so summing a column in the report cannot drift.
-    claim_amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False, default=0)
+    claims_amount_total: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False, default=0)
+    claims_amount_outstanding: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False,
+                                                               default=0)
     currency: Mapped[ClaimCurrency] = mapped_column(_CURRENCY_ENUM, nullable=False)
     policy_type: Mapped[ClaimPolicyType] = mapped_column(_POLICY_TYPE_ENUM, nullable=False)
-    claims_status: Mapped[ClaimsStatus] = mapped_column(_CLAIMS_STATUS_ENUM, nullable=False)
 
-    # The currency -> USD rate for THIS ROW'S calendar_year, and claim_amount converted with it.
-    # `claim_amounts_usd` is the ONLY amount that may be totalled across currencies; claim_amount
-    # stays in its own currency and summing that column across rows is meaningless.
+    # The currency -> USD rate for THIS ROW'S calendar_year, and BOTH amounts converted with it.
+    # The `_usd` columns are the ONLY amounts that may be totalled across currencies; the amounts
+    # above stay in their own currency and summing those columns across rows is meaningless.
     #
     # The rate belongs to the row's own year (close-of-year), not to the day it was loaded: a 2019
     # claim is worth what it was worth in 2019, and converting it at a current rate would restate
@@ -113,31 +115,41 @@ class AcysClaims(Base):
     # later can be traced back to the exact rate it was booked at. USD rows carry rate = 1 rather
     # than NULL, so "converted" and "not converted" are the same shape.
     #
-    # Nullable as a pair (enforced by ck_acys_claims_usd_pair_complete): a row written when no FX
-    # source was reachable — or one whose year predates the published series — has neither, instead
-    # of a silently wrong amount.
+    # Nullable as a SET (enforced by ck_acys_claims_usd_pair_complete): a row written when no FX
+    # source was reachable — or one whose year predates the published series — has none of the
+    # three, instead of a silently wrong amount. One rate converts both amounts, so a row can never
+    # hold a total and an outstanding figure booked at different rates.
     currency_rate: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=True, default=None)
-    claim_amounts_usd: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=True, default=None)
+    claims_amount_total_usd: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=True,
+                                                             default=None)
+    claims_amount_outstanding_usd: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=True,
+                                                                   default=None)
 
     __table_args__ = (
         # The grain is how the table is READ — "everything this airline had in this year, by cover
-        # section and state" — but it is deliberately NOT unique: duplicates are kept as sent. That
-        # is why there is no upsert; loading the same sheet twice stores it twice.
-        Index("ix_acys_claims_grain",
-              "airline", "calendar_year", "currency", "policy_type", "claims_status"),
+        # section" — but it is deliberately NOT unique: duplicates are kept as sent. That is why
+        # there is no upsert; loading the same sheet twice stores it twice.
+        Index("ix_acys_claims_grain", "airline", "calendar_year", "currency", "policy_type"),
         # The service filters by airline before handing PowerBI its slice; year-within-airline is
         # the ordering the report reads in.
         Index("ix_acys_claims_airline_year", "airline", "calendar_year"),
         CheckConstraint("number_of_claims >= 0", name="ck_acys_claims_count_non_negative"),
-        CheckConstraint("claim_amount >= 0", name="ck_acys_claims_amount_non_negative"),
+        CheckConstraint("claims_amount_total >= 0", name="ck_acys_claims_amount_non_negative"),
+        CheckConstraint("claims_amount_outstanding >= 0",
+                        name="ck_acys_claims_outstanding_non_negative"),
         CheckConstraint("calendar_year BETWEEN 1950 AND 2200", name="ck_acys_claims_year_sane"),
-        # The converted amount and the rate it came from are one fact: half of it is not auditable.
-        CheckConstraint("(currency_rate IS NULL) = (claim_amounts_usd IS NULL)",
+        # The converted amounts and the rate they came from are ONE fact: a fragment of it is not
+        # auditable, and a row holding one converted amount but not the other could not be read.
+        CheckConstraint("(currency_rate IS NULL) = (claims_amount_total_usd IS NULL) "
+                        "AND (currency_rate IS NULL) = (claims_amount_outstanding_usd IS NULL)",
                         name="ck_acys_claims_usd_pair_complete"),
         CheckConstraint("currency_rate IS NULL OR currency_rate > 0",
                         name="ck_acys_claims_rate_positive"),
-        CheckConstraint("claim_amounts_usd IS NULL OR claim_amounts_usd >= 0",
+        CheckConstraint("claims_amount_total_usd IS NULL OR claims_amount_total_usd >= 0",
                         name="ck_acys_claims_usd_non_negative"),
+        CheckConstraint("claims_amount_outstanding_usd IS NULL "
+                        "OR claims_amount_outstanding_usd >= 0",
+                        name="ck_acys_claims_usd_outstanding_non_negative"),
     )
 
 
