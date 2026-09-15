@@ -21,7 +21,7 @@ from Config import setup_logger
 from Database import ApiToken
 from Utils import success_response, warning_response, error_response
 from Utils.ResponsesFunc import build_responses
-from api_auth import authorize, hash_secret, ALL_SCOPES, SCOPE_TOKENS_ADMIN, SCOPE_ADMIN
+from api_auth import authorize, hash_secret, forget_cached_tokens, ALL_SCOPES, SCOPE_TOKENS_ADMIN, SCOPE_ADMIN
 
 logger = setup_logger("tokens_api")
 
@@ -134,7 +134,7 @@ async def list_tokens(
     _auth: Optional[ApiToken] = Depends(authorize(SCOPE_TOKENS_ADMIN)),
 ):
     try:
-        async with request.app.state.db_client.session("service") as session:
+        async with request.app.state.db_client.read_session("service") as session:
             rows = (await session.execute(select(ApiToken).order_by(ApiToken.created_at.desc()))).scalars().all()
         return success_response(request=request, response=response, data=[_serialize(r) for r in rows])
     except Exception as ex:
@@ -184,6 +184,7 @@ async def update_token(
             if "expires_at" in body.model_fields_set:   # explicit null clears the expiry
                 row.expires_at = _as_utc(body.expires_at)
             data = _serialize(row)
+        forget_cached_tokens(prefix)   # this worker at once; the others within API_TOKEN_CACHE_SECONDS
         return success_response(request=request, response=response, data=data, msg="Token updated")
     except Exception as ex:
         logger.error(f"update_token failed: {ex}")
@@ -208,6 +209,7 @@ async def revoke_token(
                 return warning_response(request=request, response=response,
                                         msg=f"No token with prefix '{prefix}'", status_code=status.HTTP_404_NOT_FOUND)
             await session.delete(row)
+        forget_cached_tokens(prefix)   # this worker at once; the others within API_TOKEN_CACHE_SECONDS
         return success_response(request=request, response=response, data={"prefix": prefix}, msg="Token revoked")
     except Exception as ex:
         logger.error(f"revoke_token failed: {ex}")

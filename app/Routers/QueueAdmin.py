@@ -48,13 +48,18 @@ def _paused_key(queue_name: str) -> str:
 async def list_queues(request: Request, response: Response):
     """List managed queues with their depth and paused flag."""
     try:
-        arq = request.state.arq
-        redis = request.state.redis
-        data = []
-        for alias, qname in sorted(_QUEUES.items()):
-            depth = await arq.zcard(qname)
-            paused = bool(await redis.exists(_paused_key(qname)))
-            data.append({"queue": alias, "name": qname, "queued": int(depth), "paused": paused})
+        queues = sorted(_QUEUES.items())
+        # One pipelined round trip instead of two per queue. Both keys live on the same Redis; the
+        # replies are integers, so the binary arq client reads the paused flag just as well.
+        pipe = request.state.arq.pipeline(transaction=False)
+        for _, qname in queues:
+            pipe.zcard(qname)
+            pipe.exists(_paused_key(qname))
+        replies = await pipe.execute()
+        data = [
+            {"queue": alias, "name": qname, "queued": int(replies[2 * i]), "paused": bool(replies[2 * i + 1])}
+            for i, (alias, qname) in enumerate(queues)
+        ]
         return success_response(request=request, response=response, data=data)
     except Exception as ex:
         logger.error(f"list_queues failed: {ex}")

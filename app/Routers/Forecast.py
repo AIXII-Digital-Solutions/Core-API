@@ -219,7 +219,7 @@ async def _start_restore(snapshot_id: int, request: Request, response: Response)
     worth more than a job that fails a minute later); the work itself belongs to the worker, which
     owns the report tables — core-api's role may read forecast.* but not TRUNCATE it or REFRESH a
     matview, and the refresh is minutes of work that must not sit inside an HTTP request."""
-    async with request.app.state.db_client.session(_DB) as session:
+    async with request.app.state.db_client.read_session(_DB) as session:
         row = (await session.execute(text(_SNAPSHOT_ONE_SQL),
                                      {"sid": snapshot_id})).mappings().first()
     if row is None:
@@ -286,7 +286,7 @@ async def start_forecast(body: ForecastRequest, request: Request, response: Resp
         if registrations:
             clauses.append('"Registration" = ANY(:regs)'); params["regs"] = registrations
         where = "(" + " OR ".join(clauses) + ")"
-        async with request.app.state.db_client.session("cirium") as session:
+        async with request.app.state.db_client.read_session("cirium") as session:
             found = (await session.execute(
                 text(f'SELECT 1 FROM cirium.ciriumaircrafts WHERE {where} LIMIT 1'), params)).first()
         if found is None:
@@ -346,7 +346,7 @@ async def last_forecast(
         stmt = select(ForecastLastRequest).order_by(ForecastLastRequest.created_at.desc()).limit(1)
         if request_type:
             stmt = stmt.where(ForecastLastRequest.request_type == request_type)
-        async with request.app.state.db_client.session("service") as session:
+        async with request.app.state.db_client.read_session("service") as session:
             row = (await session.execute(stmt)).scalars().first()
         if row is None:
             return warning_response(request=request, response=response,
@@ -393,7 +393,7 @@ async def list_snapshots(
         # model stores them that way, portals rarely do), operator names lower-cased.
         regs = [r.strip().upper() for r in (registration or []) if r and r.strip()] or None
         ops = [o.strip().lower() for o in (operator or []) if o and o.strip()] or None
-        async with request.app.state.db_client.session(_DB) as session:
+        async with request.app.state.db_client.read_session(_DB) as session:
             rows = (await session.execute(text(_SNAPSHOT_LIST_SQL), {
                 "window": _SNAPSHOT_WINDOW_DAYS, "regs": regs, "ops": ops,
                 # the date objects themselves: CAST(:day AS date) makes the driver infer the
@@ -499,7 +499,7 @@ async def params_schema(request: Request, response: Response):
 )
 async def list_profiles(request: Request, response: Response):
     try:
-        async with request.app.state.db_client.session("service") as session:
+        async with request.app.state.db_client.read_session("service") as session:
             rows = (await session.execute(
                 select(ForecastProfile).order_by(ForecastProfile.is_default.desc(),
                                                  ForecastProfile.name))).scalars().all()

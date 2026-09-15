@@ -27,12 +27,14 @@ exactly what authorize() does: either credential is enough.
 """
 import hashlib
 import hmac
+import os
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import Depends, Request, HTTPException, status
 from fastapi.security import APIKeyHeader
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from settings import SERVICE_TOKEN, API_TOKEN_PEPPER
 from Database import ApiToken
@@ -89,6 +91,40 @@ def _service_token_ok(x_service_token: Optional[str]) -> bool:
             and hmac.compare_digest(x_service_token.encode("utf-8"), SERVICE_TOKEN.encode("utf-8")))
 
 
+# Validated keys are remembered IN THIS PROCESS for a few seconds. Checking a key otherwise costs a
+# transaction on the service database for every request (BEGIN, SELECT, COMMIT — three round trips to
+# a database on another machine), which is more than most endpoints spend on their own work.
+# The price is the window: disabling, deleting or narrowing a key takes up to this long to reach every
+# API worker (the one that served the /tokens change drops its entry at once). 0 turns the cache off.
+_TOKEN_CACHE_TTL_S = float(os.getenv("API_TOKEN_CACHE_SECONDS", "10"))
+_TOKEN_CACHE_MAX = 1024
+# sha256(full header value) -> (cached_at monotonic, detached ApiToken). Never the raw secret as a key.
+_token_cache: dict[str, tuple[float, ApiToken]] = {}
+
+
+def forget_cached_tokens(token_prefix: Optional[str] = None) -> None:
+    """Drop cached keys — one prefix, or all. Called by the /tokens router after it changes a key."""
+    if token_prefix is None:
+        _token_cache.clear()
+        return
+    for k in [k for k, (_, row) in _token_cache.items() if row.token_prefix == token_prefix]:
+        _token_cache.pop(k, None)
+
+
+async def _load_api_token(request: Request, prefix: str, secret: str) -> Optional[ApiToken]:
+    """The database check: the row behind ``prefix``, if it exists, is enabled and the secret matches."""
+    async with request.app.state.db_client.read_session("service") as session:
+        row = (await session.execute(
+            select(ApiToken).where(ApiToken.token_prefix == prefix)
+        )).scalar_one_or_none()
+        if row is None or not row.enabled:
+            return None
+        if not hmac.compare_digest(row.token_hash, hash_secret(secret)):
+            return None
+        session.expunge(row)      # detached: it outlives the session and is shared by cached hits
+        return row
+
+
 async def _lookup_api_token(request: Request, x_api_key: Optional[str]) -> Optional[ApiToken]:
     """Validate an X-Api-Key and return its ApiToken row, or None if invalid/expired/disabled."""
     if not x_api_key or "." not in x_api_key:
@@ -97,20 +133,30 @@ async def _lookup_api_token(request: Request, x_api_key: Optional[str]) -> Optio
     if not prefix or not secret:
         return None
     now = datetime.now(timezone.utc)
-    async with request.app.state.db_client.session("service") as session:
-        row = (await session.execute(
-            select(ApiToken).where(ApiToken.token_prefix == prefix)
-        )).scalar_one_or_none()
-        if row is None or not row.enabled:
+    key = hashlib.sha256(x_api_key.encode("utf-8")).hexdigest()
+    hit = _token_cache.get(key)
+    if hit is not None and time.monotonic() - hit[0] < _TOKEN_CACHE_TTL_S:
+        row = hit[1]
+    else:
+        # Only successes are cached: a wrong key always goes to the database, so the cache can never
+        # turn a rejected key into an accepted one.
+        row = await _load_api_token(request, prefix, secret)
+        if row is None:
+            _token_cache.pop(key, None)
             return None
-        if not hmac.compare_digest(row.token_hash, hash_secret(secret)):
-            return None
-        if row.expires_at is not None and row.expires_at < now:
-            return None
-        # throttled best-effort last_used_at (coalesced so we don't write on every request)
-        if row.last_used_at is None or (now - row.last_used_at) > _LAST_USED_THROTTLE:
-            row.last_used_at = now
-        return row  # detached after the session commits (expire_on_commit=False keeps attrs)
+        if _TOKEN_CACHE_TTL_S > 0:
+            if len(_token_cache) >= _TOKEN_CACHE_MAX:
+                _token_cache.clear()
+            _token_cache[key] = (time.monotonic(), row)
+    if row.expires_at is not None and row.expires_at < now:
+        return None
+    # throttled best-effort last_used_at (coalesced so we don't write on every request): a single
+    # autocommitted UPDATE, no transaction around it
+    if row.last_used_at is None or (now - row.last_used_at) > _LAST_USED_THROTTLE:
+        row.last_used_at = now
+        async with request.app.state.db_client.read_session("service") as session:
+            await session.execute(update(ApiToken).where(ApiToken.id == row.id).values(last_used_at=now))
+    return row
 
 
 def authorize(*required_scopes: str):
@@ -145,7 +191,7 @@ def authorize(*required_scopes: str):
 
 
 __all__ = [
-    "hash_secret", "authorize", "ALL_SCOPES",
+    "hash_secret", "authorize", "forget_cached_tokens", "ALL_SCOPES",
     "SERVICE_TOKEN_HEADER", "API_KEY_HEADER",
     "SCOPE_FLIGHTS_READ", "SCOPE_STATUS_READ", "SCOPE_FILES_WRITE",
     "SCOPE_SCHEDULER_READ", "SCOPE_SCHEDULER_WRITE", "SCOPE_QUEUES_ADMIN",

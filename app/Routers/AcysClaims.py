@@ -254,7 +254,7 @@ async def list_claims(
                 .order_by(col, AcysClaims.airline, AcysClaims.id)
                 .limit(limit).offset(offset))
 
-        async with request.app.state.db_client.session(_DB) as session:
+        async with request.app.state.db_client.read_session(_DB) as session:
             rows = (await session.execute(stmt)).scalars().all()
             total = await session.scalar(
                 select(func.count()).select_from(AcysClaims).where(*conds))
@@ -283,7 +283,7 @@ async def get_claim(
     claim_id: int = Path(..., ge=1),
 ):
     try:
-        async with request.app.state.db_client.session(_DB) as session:
+        async with request.app.state.db_client.read_session(_DB) as session:
             row = await session.get(AcysClaims, claim_id)
             if row is None:
                 return warning_response(

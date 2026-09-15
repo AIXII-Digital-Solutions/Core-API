@@ -1,10 +1,12 @@
+import atexit
 import datetime
 import glob
 import logging
 import multiprocessing
 import os
+import queue
 import zipfile
-from logging.handlers import RotatingFileHandler
+from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
 
 from .config import LOGS_DIR, DEV_MODE
 
@@ -73,6 +75,47 @@ def _resolve_level() -> int:
     return logging.DEBUG if DEV_MODE else logging.INFO
 
 
+# All loggers of this process feed ONE queue, drained by ONE listener thread that owns the real handlers.
+# A logging call on the event loop then costs a queue put; the console write, the file write and the
+# rotating handler's size check happen on the listener thread, never blocking a request.
+_log_queue: "queue.SimpleQueue[logging.LogRecord]" = queue.SimpleQueue()
+_listener: "QueueListener | None" = None
+
+
+def _ensure_listener() -> None:
+    global _listener
+    if _listener is not None:
+        return
+    # Records arrive already formatted (see _PreformattingQueueHandler) — each logger keeps its own format.
+    passthrough = logging.Formatter("%(message)s")
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(passthrough)
+    handlers = [console_handler]
+
+    # Only the MAIN process writes to the rotating file. Child processes — ProcessPoolExecutor workers and
+    # uvicorn's worker processes alike — must NOT attach their own RotatingFileHandler to the same file:
+    # concurrent doRollover() across processes races/corrupts. They log to the console, which the
+    # container captures.
+    if multiprocessing.parent_process() is None:
+        log_file = LOGS_DIR / f"LOG_{datetime.datetime.now().strftime('%Y-%m-%d')}.log"
+        file_handler = CustomLogHandler(
+            filename=log_file,
+            maxBytes=10 * 1024 * 1024,  # 10 MiB
+            backupCount=5
+        )
+        file_handler.setFormatter(passthrough)
+        handlers.append(file_handler)
+
+    _listener = QueueListener(_log_queue, *handlers)
+    _listener.start()
+    atexit.register(_listener.stop)   # flush what is still queued on a clean exit
+
+
+class _PreformattingQueueHandler(QueueHandler):
+    """QueueHandler.prepare() formats the record with THIS handler's formatter before it is queued, so
+    per-logger formats survive a shared listener; tracebacks are folded into the message too."""
+
+
 def setup_logger(name: str, log_format: str = log_format) -> logging.Logger:
     logger = logging.getLogger(name)
     logger.setLevel(_resolve_level())
@@ -82,24 +125,10 @@ def setup_logger(name: str, log_format: str = log_format) -> logging.Logger:
         # Already configured (idempotent): refresh the level but don't add duplicate handlers.
         return logger
 
-    formatter = logging.Formatter(log_format)
-
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
-
-    # Only the MAIN process writes to the rotating file. ProcessPoolExecutor children must NOT
-    # attach their own RotatingFileHandler to the same file — concurrent doRollover() across
-    # processes races/corrupts. Children log to console (captured by the container).
-    if multiprocessing.parent_process() is None:
-        log_file = LOGS_DIR / f"LOG_{datetime.datetime.now().strftime('%Y-%m-%d')}.log"
-        file_handler = CustomLogHandler(
-            filename=log_file,
-            maxBytes=10 * 1024 * 1024,  # 10 MiB
-            backupCount=5
-        )
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
+    _ensure_listener()
+    queue_handler = _PreformattingQueueHandler(_log_queue)
+    queue_handler.setFormatter(logging.Formatter(log_format))
+    logger.addHandler(queue_handler)
 
     for module in _BLACKLIST:
         logging.getLogger(module).setLevel(logging.ERROR)

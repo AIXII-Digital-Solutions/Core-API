@@ -26,6 +26,11 @@ engine_cache = {}
 session_cache = {}
 
 
+@functools.lru_cache(maxsize=1)
+def _db_settings() -> DBSettings:
+    return DBSettings()
+
+
 class DBProxy:
     """
     DBProxy wraps the database and Redis interface:
@@ -35,7 +40,10 @@ class DBProxy:
 
     def __init__(self, redis: Redis):
         self._open_sessions = []
-        self.db_settings = DBSettings()
+        # A DBProxy is built for EVERY request. DBSettings() is a pydantic-settings model with an env_file:
+        # constructing one re-reads and re-parses the .env file from disk and re-validates every field, so
+        # doing it here cost a file read per HTTP request for a value that never changes. Built once.
+        self.db_settings = _db_settings()
         self.redis = redis
 
     async def get_db(self, db_name: str):

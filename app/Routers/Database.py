@@ -28,7 +28,7 @@ async def get_db(type: str, request: Request, background_tasks: BackgroundTasks)
     if type.lower() == 'lease_agr':
         # NOTE: Lease_Output is a `main`/core model — core is being rewritten and is not
         # migrated into aixii yet, so this endpoint will not return data until core is rebuilt.
-        async with request.app.state.db_client.session("main") as main_db:
+        async with request.app.state.db_client.read_session("main") as main_db:
             result = await main_db.execute(
                 select(Lease_Output).order_by(Lease_Output.id.asc())
             )

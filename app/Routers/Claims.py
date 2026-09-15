@@ -517,7 +517,7 @@ async def get_claim_history(
     limit: int = Query(100, ge=1, le=500),
 ):
     try:
-        async with request.app.state.db_client.session(_DB) as session:
+        async with request.app.state.db_client.read_session(_DB) as session:
             rows = (await session.execute(
                 select(InsuranceClaimHistory)
                 .where(InsuranceClaimHistory.claim_id == claim_id)
@@ -546,7 +546,7 @@ async def get_claim_history(
 )
 async def get_claim(claim_id: int, request: Request, response: Response):
     try:
-        async with request.app.state.db_client.session(_DB) as session:
+        async with request.app.state.db_client.read_session(_DB) as session:
             claim = (await session.execute(
                 select(InsuranceClaims).where(InsuranceClaims.id == claim_id)
             )).scalar_one_or_none()
@@ -621,7 +621,7 @@ async def list_claims(
             tiebreak=(InsuranceClaims.date_of_loss.desc(), InsuranceClaims.id.desc()),
         ).limit(limit).offset(offset)
 
-        async with request.app.state.db_client.session(_DB) as session:
+        async with request.app.state.db_client.read_session(_DB) as session:
             rows = (await session.execute(stmt)).scalars().all()
             # totals over the whole filtered set — a page of claims tells you nothing about exposure
             totals = (await session.execute(
