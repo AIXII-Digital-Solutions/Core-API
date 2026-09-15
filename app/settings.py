@@ -32,6 +32,15 @@ from Config import require_env, require_secret, ROOT
 
 HOST: str = require_env("HOST", "0.0.0.0")
 PORT: int = int(require_env("PORT", 8000))
+# Process model (app/main.py). One uvicorn process runs all Python work — request parsing, validation,
+# JSON encoding — on ONE core. Several worker processes spread it across the host's cores. Each worker
+# costs roughly 150-250 MB of memory and holds its own DB pools (see DB_POOL_SIZE / DB_MAX_OVERFLOW in
+# Database/Client.py), so size this to the API host, not to the database server.
+API_WORKERS: int = int(require_env("API_WORKERS", 4))
+# How long an idle keep-alive connection stays open. uvicorn's default is 5 s, which is shorter than a
+# reverse proxy's usual upstream keep-alive: the proxy would keep reopening TCP connections to the API,
+# and every reopen is a handshake over the network. 65 s outlives the common 60 s proxy setting.
+API_KEEPALIVE_TIMEOUT: int = int(require_env("API_KEEPALIVE_TIMEOUT", 65))
 
 SELF_HOST: str = require_env("SELF_HOST", "api.aixii.com")
 SELF_PORT: int = int(require_env("SELF_PORT", 8000))

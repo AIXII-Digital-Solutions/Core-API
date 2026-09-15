@@ -15,6 +15,11 @@ arq==0.26.3
 fastapi==0.136.1
 
 uvicorn==0.46.0
+# C event loop + C HTTP parser for uvicorn (picked up by loop="auto"/http="auto" in app/main.py).
+# Both are Linux-image optimisations: no Windows builds for every Python a dev machine may run, and
+# uvicorn falls back to asyncio + h11 on its own when they are absent.
+uvloop==0.21.0; sys_platform != "win32"
+httptools==0.6.4; sys_platform != "win32"
 starlette==1.0.0
 python-multipart==0.0.29
 orjson==3.11.9

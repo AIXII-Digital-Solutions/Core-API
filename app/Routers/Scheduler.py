@@ -85,7 +85,7 @@ def _serialize(s: ScheduleEntry) -> dict:
 async def list_schedules(request: Request, response: Response):
     """List every schedule and its current state."""
     try:
-        async with request.app.state.db_client.session("service") as session:
+        async with request.app.state.db_client.read_session("service") as session:
             rows = (await session.execute(select(ScheduleEntry).order_by(ScheduleEntry.name))).scalars().all()
         return success_response(request=request, response=response, data=[_serialize(r) for r in rows])
     except Exception as ex:
@@ -100,7 +100,7 @@ async def list_schedules(request: Request, response: Response):
 )
 async def get_schedule(name: str, request: Request, response: Response):
     try:
-        async with request.app.state.db_client.session("service") as session:
+        async with request.app.state.db_client.read_session("service") as session:
             row = (await session.execute(select(ScheduleEntry).where(ScheduleEntry.name == name))).scalar_one_or_none()
         if row is None:
             return warning_response(request=request, response=response,

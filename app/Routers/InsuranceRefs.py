@@ -75,7 +75,7 @@ async def search_parties(
 
         stmt = (select(Parties).where(*conds)
                 .order_by(*typeahead_order(Parties.name, q)).limit(limit))
-        async with request.app.state.db_client.session(_DB) as session:
+        async with request.app.state.db_client.read_session(_DB) as session:
             rows = (await session.execute(stmt)).scalars().all()
         return success_response(request=request, response=response,
                                 data=[party_json(p) for p in rows])
@@ -108,7 +108,7 @@ async def search_aircraft_types(
                      _contains(AircraftTypes.manufacturer, q))] if q else []
         stmt = (select(AircraftTypes).where(*conds)
                 .order_by(*typeahead_order(AircraftTypes.name, q)).limit(limit))
-        async with request.app.state.db_client.session(_DB) as session:
+        async with request.app.state.db_client.read_session(_DB) as session:
             rows = (await session.execute(stmt)).scalars().all()
             data = [
                 {
@@ -149,7 +149,7 @@ async def search_engine_types(
                      _contains(EngineTypes.manufacturer, q))] if q else []
         stmt = (select(EngineTypes).where(*conds)
                 .order_by(*typeahead_order(EngineTypes.name, q)).limit(limit))
-        async with request.app.state.db_client.session(_DB) as session:
+        async with request.app.state.db_client.read_session(_DB) as session:
             rows = (await session.execute(stmt)).scalars().all()
         data = [{"id": e.id, "name": e.name, "manufacturer": e.manufacturer} for e in rows]
         return success_response(request=request, response=response, data=data)
@@ -183,7 +183,7 @@ async def search_airlines(
                      Airlines.iata.ilike(f"{q}%"))] if q else []
         stmt = (select(Airlines).where(*conds)
                 .order_by(*typeahead_order(Airlines.airline_name, q)).limit(limit))
-        async with request.app.state.db_client.session(_DB) as session:
+        async with request.app.state.db_client.read_session(_DB) as session:
             rows = (await session.execute(stmt)).scalars().all()
         data = [{"id": a.id, "name": a.airline_name, "icao": a.icao, "iata": a.iata} for a in rows]
         return success_response(request=request, response=response, data=data)

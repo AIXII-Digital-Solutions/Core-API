@@ -74,7 +74,7 @@ async def search_registrations(
             return success_response(request=request, response=response, data=[])
 
         stmt = select(CiriumRegistrations).where(*conds).order_by(*order).limit(limit)
-        async with request.app.state.db_client.session("aixii") as session:
+        async with request.app.state.db_client.read_session("aixii") as session:
             rows = (await session.execute(stmt)).scalars().all()
         data = [{"registration": r.registration, "operator": r.operator, "status": r.status} for r in rows]
         return success_response(request=request, response=response, data=data)

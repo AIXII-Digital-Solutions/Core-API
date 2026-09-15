@@ -622,7 +622,7 @@ async def get_aircraft_insurance(
     history: bool = Query(True, description="Include every past/future record, newest first."),
 ):
     try:
-        async with request.app.state.db_client.session(_DB) as session:
+        async with request.app.state.db_client.read_session(_DB) as session:
             aircraft = await find_aircraft(session, registration=registration, msn=msn)
             if aircraft is None:
                 return warning_response(
@@ -680,7 +680,7 @@ async def get_record_audit(
     limit: int = Query(50, ge=1, le=500),
 ):
     try:
-        async with request.app.state.db_client.session(_DB) as session:
+        async with request.app.state.db_client.read_session(_DB) as session:
             rows = (await session.execute(
                 select(InsuranceRecordHistory)
                 .where(InsuranceRecordHistory.record_id == record_id)
@@ -760,7 +760,7 @@ async def list_insurance(
             tiebreak=(InsuranceRecords.effective_from.desc(), InsuranceRecords.id.desc()),
         ).limit(limit).offset(offset)
 
-        async with request.app.state.db_client.session(_DB) as session:
+        async with request.app.state.db_client.read_session(_DB) as session:
             rows = (await session.execute(stmt)).scalars().all()
             total = (await session.execute(
                 base.with_only_columns(func.count(InsuranceRecords.id)).order_by(None)

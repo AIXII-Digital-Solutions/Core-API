@@ -1,4 +1,5 @@
 import asyncio
+import time
 import uuid
 from contextlib import asynccontextmanager
 
@@ -7,6 +8,7 @@ from fastapi import Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from redis.asyncio import Redis
+from starlette.middleware.gzip import GZipMiddleware
 
 import settings
 from Config import setup_logger, DBSettings, secrets
@@ -84,36 +86,77 @@ async def lifespan(app):
     logger.info("Shutdown completed. Bye!")
 
 
-def register_middlewares(app):
-    # Middleware for requests + logging and db/cache
-    @app.middleware("http")
-    async def log_and_db_requests(request: Request, call_next):
-        start_time = asyncio.get_event_loop().time()
-        request.state.redis = app.state.redis
-        request.state.db_proxy = DBProxy(app.state.redis)
-        request.state.arq = app.state.arq
+class RequestContextMiddleware:
+    """Per-request context, timing and logging — ONE pure-ASGI layer.
+
+    This replaces two `@app.middleware("http")` functions. Starlette turns each of those into a
+    BaseHTTPMiddleware, which re-wraps the response in its own anyio streams and task group on every
+    request: measurable overhead per layer, and it gets in the way of streaming (the SSE status feed).
+    A plain ASGI callable does the same job by touching only the scope and the response-start message.
+
+    What it sets up, unchanged for the code downstream: `request.state.correlation_id`, `.redis`, `.arq`
+    and `.db_proxy` (Starlette's `request.state` IS `scope["state"]`), the `X-Correlation-ID` response
+    header, one log line per request, and closing any sessions DBProxy opened.
+
+    It also adds `Server-Timing: app;dur=<ms>` — the time spent inside this process up to the response
+    headers. The API sits behind a proxy on another machine, so a client's latency mixes network, proxy
+    and application; this header is how to tell them apart without a login to the server."""
+
+    def __init__(self, app, fastapi_app):
+        self.app = app
+        self.fastapi_app = fastapi_app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        started = time.perf_counter()
+        correlation_id = str(uuid.uuid4())
+        app_state = self.fastapi_app.state
+        db_proxy = DBProxy(app_state.redis)
+        state = scope.setdefault("state", {})
+        state["correlation_id"] = correlation_id
+        state["redis"] = app_state.redis
+        state["arq"] = app_state.arq
+        state["db_proxy"] = db_proxy
+        status_code = 500   # what gets logged if the app raises before sending anything
+        cid_header = correlation_id.encode("ascii")
+
+        async def send_with_context(message):
+            nonlocal status_code
+            if message["type"] == "http.response.start":
+                status_code = message["status"]
+                elapsed_ms = (time.perf_counter() - started) * 1000
+                message["headers"] = [
+                    *message.get("headers", []),
+                    (b"x-correlation-id", cid_header),
+                    (b"server-timing", f"app;dur={elapsed_ms:.1f}".encode("ascii")),
+                ]
+            await send(message)
 
         try:
-            response = await call_next(request)
-
-            duration = asyncio.get_event_loop().time() - start_time
-            logger.info(
-                f"{request.method} {request.url.path} completed_in={duration:.2f}s | "
-                f"status_code={response.status_code} | "
-                f"correlation_id={getattr(request.state, 'correlation_id', None)}"
-            )
-            return response
+            await self.app(scope, receive, send_with_context)
         finally:
-            await request.state.db_proxy.close_all()
+            # Lazy %-formatting: with logging going through a queue, the message is only built by the
+            # listener thread, never on the event loop.
+            logger.info("%s %s completed_in=%.3fs | status_code=%s | correlation_id=%s",
+                        scope.get("method"), scope.get("path"), time.perf_counter() - started,
+                        status_code, correlation_id)
+            await db_proxy.close_all()
 
-    # Middleware for add correlation id to requests
-    @app.middleware("http")
-    async def add_correlation_id(request: Request, call_next):
-        correlation_id = str(uuid.uuid4())
-        request.state.correlation_id = correlation_id
-        response = await call_next(request)
-        response.headers["X-Correlation-ID"] = correlation_id
-        return response
+
+def register_middlewares(app):
+    # Order matters: add_middleware wraps from the inside out, so the LAST one added is the outermost.
+    # Context first (innermost of the two) so its Server-Timing header is in place before GZip, the
+    # outer layer, compresses the body.
+    app.add_middleware(RequestContextMiddleware, fastapi_app=app)
+    # JSON compresses 5-10x, and the heavy payloads here are JSON — including the FileResponse downloads
+    # under /database and /flightradar. Over a link with a ~150 ms round trip every TCP window a response
+    # needs costs a round trip, so shrinking a payload shortens the wall time, not just the bill.
+    # compresslevel 5, not the default 9: most of the ratio for a fraction of the CPU on the API host.
+    # Server-sent events are excluded by Starlette itself (text/event-stream is never buffered).
+    app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
 
     # Custom ValidationError handler
     @app.exception_handler(RequestValidationError)

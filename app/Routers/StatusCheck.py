@@ -59,7 +59,7 @@ async def list_status(
         stmt = stmt.where(JobStatus.kind == kind)
     if state:
         stmt = stmt.where(JobStatus.state == state)
-    async with request.app.state.db_client.session("service") as session:
+    async with request.app.state.db_client.read_session("service") as session:
         rows = (await session.execute(stmt)).scalars().all()
     return success_response(request=request, response=response, data=[_serialize(r) for r in rows])
 
@@ -115,7 +115,7 @@ async def stream_status(request: Request):
 
 @router.get("/{job_id}")
 async def get_status(job_id: str, request: Request, response: Response):
-    async with request.app.state.db_client.session("service") as session:
+    async with request.app.state.db_client.read_session("service") as session:
         row = (
             await session.execute(select(JobStatus).where(JobStatus.job_id == job_id))
         ).scalar_one_or_none()

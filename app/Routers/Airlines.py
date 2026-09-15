@@ -53,7 +53,7 @@ async def search_airlines(
                 )
                 .limit(limit)
             )
-            async with request.app.state.db_client.session("aixii") as session:
+            async with request.app.state.db_client.read_session("aixii") as session:
                 rows = (await session.execute(stmt)).scalars().all()
             data = [{"airline": r.airline, "icao": r.icao, "iata": r.iata} for r in rows]
             return success_response(request=request, response=response, data=data)
@@ -79,7 +79,7 @@ async def search_airlines(
             )
             .limit(limit)
         )
-        async with request.app.state.db_client.session("aixii") as session:
+        async with request.app.state.db_client.read_session("aixii") as session:
             rows = (await session.execute(stmt)).scalars().all()
         data = [{"airline": r.airline, "icao": r.icao, "iata": r.iata} for r in rows]
         return success_response(request=request, response=response, data=data)
