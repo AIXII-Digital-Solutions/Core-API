@@ -159,11 +159,13 @@ The state volume is **named, not a bind mount**: it holds the login refresh toke
 sit in the repo tree. It is persisted so a restart skips the login round-trip, and it is one volume
 per container — two processes sharing a `bw` state directory corrupt each other.
 
-`entrypoint.sh` resolves the **boot-critical** secrets before starting the app when
-`SECRETS_BACKEND != env`, so a bad vault produces one classified line at the top of the log instead
-of a traceback out of an import. It deliberately checks only `DB_USER`, `DB_PASSWORD`, `REDIS_USER`,
-`REDIS_USER_PASSWORD`, `SERVICE_TOKEN`, `FILE_PROCESSOR_TOKEN` — core-api never calls the three data
-providers, so a missing `AEROAPI_KEY` must not block a boot. It costs one extra unlock+sync (a few
+`entrypoint.sh` can resolve the **boot-critical** secrets before starting the app when
+`SECRETS_BACKEND != env`, but this is **off by default** (`CHECK_SECRETS_ON_BOOT`): it is a whole
+extra vault round trip in its own process, and `app/main.py` now reports the same failure itself as
+one classified `[core-api] FATAL: …` line instead of a traceback. Turn it on while setting a host up.
+It deliberately checks only `DB_USER`, `DB_PASSWORD`, `REDIS_USER`,
+`REDIS_USER_PASSWORD`, `SERVICE_TOKEN`, `FILE_PROCESSOR_TOKEN`, `MS_WEBHOOK_SECRET` — core-api never
+calls the three data providers, so a missing `AEROAPI_KEY` must not block a boot. It costs one extra unlock+sync (a few
 seconds); set `CHECK_SECRETS_ON_BOOT=false` to skip it.
 
 ## Hazards — read before deploying this
@@ -180,10 +182,17 @@ seconds); set `CHECK_SECRETS_ON_BOOT=false` to skip it.
 * **A fresh state dir reports `serverUrl: null`.** The provider treats null as "differs" and runs
   `config server` anyway; without that, `bw login` silently targets the bitwarden.com **cloud** and
   fails with a confusing auth error against credentials that are perfectly valid for your server.
-* **`bw get <field> <item>` searches by name across the whole vault** and decrypts every item to do
-  it. One broken item anywhere breaks *every* lookup, not just its own.
-* **`bw` is slow** — unlock plus sync is seconds. Values are cached for the process lifetime; never
-  resolve per request.
+* **`bw` is slow, and it is slow PER CALL** — every invocation starts Node and decrypts the whole
+  vault: measured at 4-5 s each, so six keys resolved one by one took ~37 s of boot. The provider
+  therefore takes ONE snapshot (`bw list items`) per process and answers every key from it; the
+  second key onwards costs nothing. Values are cached for the process lifetime; never resolve per
+  request.
+* **Several processes must not resolve secrets at once.** They share the CLI state directory, and
+  concurrent `bw` runs corrupt each other — the symptom is a `bw get` that exits 0 with EMPTY output,
+  i.e. a perfectly good credential reported as "field is empty", in a different process each time.
+  This bit production when the API went to four uvicorn workers: each spawned worker opened the vault
+  for itself. `app/main.py` now resolves everything in the parent and hands it to the workers
+  (`secrets.hand_to_child_processes`), so only one process ever talks to `bw`.
 * **Concurrency needs isolated state dirs.** `bw` keeps login state, the session and an encrypted
   vault cache in one directory, and two processes sharing it corrupt each other. The provider sets
   `BITWARDENCLI_APPDATA_DIR` to `<BW_APPDATA_BASE>/bw-<scope>`; give each concurrent process its own
