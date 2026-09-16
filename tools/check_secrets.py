@@ -39,10 +39,12 @@ from Config import secrets  # noqa: E402
 def main(argv: list[str]) -> int:
     keys = argv or None
     if keys:
-        unknown = [k for k in keys if k not in secrets.MANAGED_KEYS]
+        # declared_keys(), not MANAGED_KEYS: a host can map a further key with BW_ITEM_<KEY>
+        known = secrets.declared_keys()
+        unknown = [k for k in keys if k not in known]
         if unknown:
             print(f"unknown key(s): {', '.join(unknown)}", file=sys.stderr)
-            print(f"managed keys: {', '.join(secrets.MANAGED_KEYS)}", file=sys.stderr)
+            print(f"managed keys: {', '.join(known)}", file=sys.stderr)
             return len(unknown)
 
     try:

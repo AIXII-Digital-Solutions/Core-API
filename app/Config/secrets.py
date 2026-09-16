@@ -95,14 +95,46 @@ _ITEM_MAP: dict[str, tuple[str, str]] = {
     "AVIATION_EDGE_EXTRA_API_KEY": ("aixii-aviationedge-extra", "password"),
 }
 
+# Keys with no built-in item, which a host turns into vault keys by naming the item in its
+# environment (`BW_ITEM_MS_WEBHOOK_SECRET=ms_graph_webhook`, and `BW_FIELD_…` if it is not a login
+# item's `password`). They have no default here because the item may not exist in a given vault at
+# all, and a default that names a missing item would fail every boot on the hosts that keep the
+# value in the environment. Known ones: MS_WEBHOOK_SECRET, PBIE_CLIENT_SECRET.
+
 MANAGED_KEYS = tuple(_ITEM_MAP)
+
+# Keys that gate an OPTIONAL feature rather than a credential the service needs to work. For these
+# — and only these — a vault that HAS a mapping but no such item means "the feature is not
+# configured here", not "the deployment is broken": the resolver falls back to the environment (with
+# a warning) and then to the caller's default, and check_secrets reports them separately instead of
+# as a failure. PBIE_CLIENT_SECRET only unlocks the /capacity endpoints, which answer 503 without it.
+_OPTIONAL_KEYS = frozenset({"PBIE_CLIENT_SECRET"})
+
+# Field used for a key declared through the environment alone (see declared_keys).
+_DEFAULT_FIELD = "password"
 
 
 def item_for(key: str) -> tuple[str, str]:
-    """Resolve the (item, field) pair for a logical key, honouring the env overrides."""
-    default_item, default_field = _ITEM_MAP[key]
+    """Resolve the (item, field) pair for a logical key, honouring the env overrides.
+
+    Returns an EMPTY item name for a key with no mapping at all — the callers read that as "this is
+    a plain environment variable on this host", which is what an unmapped key is."""
+    default_item, default_field = _ITEM_MAP.get(key, ("", _DEFAULT_FIELD))
     return (os.getenv(f"BW_ITEM_{key}") or default_item,
             os.getenv(f"BW_FIELD_{key}") or default_field)
+
+
+def declared_keys() -> tuple[str, ...]:
+    """Every key that HAS a vault mapping on this host: the built-in ones plus any the environment
+    declares with `BW_ITEM_<KEY>`.
+
+    A deployment can therefore put a secret this code does not know about into the vault without a
+    code change — the item name is topology and belongs in the environment, next to the host's other
+    topology. `BW_FIELD_<KEY>` alone does not declare a key: without an item name there is nothing
+    to look up."""
+    env_declared = sorted(name[len("BW_ITEM_"):] for name in os.environ
+                          if name.startswith("BW_ITEM_") and name[len("BW_ITEM_"):] and os.environ[name])
+    return tuple(dict.fromkeys([*_ITEM_MAP, *env_declared]))
 
 
 # ==============================================================================================
@@ -458,13 +490,21 @@ class VaultwardenSecretsProvider(SecretsProvider):
     # --- the interface callers actually use -----------------------------------------------------
 
     def require(self, key: str) -> str:
-        if key not in _ITEM_MAP:
-            raise SecretsError(f"{key} has no vault mapping — add it to _ITEM_MAP in Config/secrets.py")
+        item, field = item_for(key)
+        if not item:
+            # No mapping means this key was never a vault key: it is a plain environment variable
+            # (the mapped ones NEVER fall back — that is the invariant this branch does not touch).
+            # Naming an item for it in the environment is what moves it into the vault.
+            value = os.getenv(key)
+            if not value:
+                raise SecretsItemNotFound(
+                    f"{key} is not set in the environment and has no vault mapping — "
+                    f"set BW_ITEM_{key} to the vault item that holds it, or set {key} itself")
+            return value
         with self._lock:
             if key in self._cache:
                 return self._cache[key]
 
-        item, field = item_for(key)
         try:
             value = self._get(key, item, field)
         except SecretsLocked:
@@ -498,10 +538,30 @@ class VaultwardenSecretsProvider(SecretsProvider):
     def optional(self, key: str, default: str = "") -> str:
         """Under this backend every MAPPED key is required — that is what fail-closed means. A
         deployment that runs a vault is production, where a silently-empty SERVICE_TOKEN (which
-        denies every caller) is a misconfiguration, not a valid state."""
-        if key in _ITEM_MAP:
+        denies every caller) is a misconfiguration, not a valid state.
+
+        The exception is an OPTIONAL key (see _OPTIONAL_KEYS): it gates a feature, not the service,
+        so a vault with no such item means the feature is not configured on this host. Only a
+        missing/empty ITEM takes that path — an unreachable vault, a bad credential or a TLS error
+        still raises, because "the vault is broken" must never look like "the feature is off"."""
+        item, _ = item_for(key)
+        if not item:
+            return os.getenv(key) or default
+        if key not in _OPTIONAL_KEYS:
             return self.require(key)
-        return os.getenv(key) or default
+        try:
+            return self.require(key)
+        except SecretsItemNotFound:
+            from_env = os.getenv(key)
+            if from_env:
+                # migration path: the host still carries the value while the vault item is created
+                _log().warning("%s is not in the vault (item '%s') — using the value from the "
+                               "environment; move it into the vault to finish the migration",
+                               key, item)
+                return from_env
+            _log().info("%s is not in the vault (item '%s') and not in the environment — the "
+                        "feature it gates stays disabled", key, item)
+            return default
 
     def close(self) -> None:
         with self._lock:
@@ -584,9 +644,16 @@ def check_secrets(keys: Optional[list[str]] = None, stream=sys.stdout) -> int:
     provider = get_provider()
     failures = 0
     print(f"backend: {provider.name}", file=stream)
-    for key in (keys or MANAGED_KEYS):
+    for key in (keys or declared_keys()):
         try:
             value = provider.require(key)
+        except SecretsItemNotFound as ex:
+            if key in _OPTIONAL_KEYS and not keys:
+                # gates a feature, not the service: not an error unless it was asked for by name
+                print(f"  {key} -> not configured (optional) {ex}", file=stream)
+                continue
+            failures += 1
+            print(f"  {key} -> FAIL ({type(ex).__name__}) {ex}", file=stream)
         except SecretsError as ex:
             failures += 1
             # the message is already scrubbed at raise time; it names the item, never the value
@@ -603,5 +670,5 @@ __all__ = [
     "SecretsTlsError", "SecretsAuthError", "SecretsUnlockError", "SecretsLocked",
     "SecretsItemNotFound", "SecretsCliError",
     "backend_name", "create_provider", "get_provider", "require_secret", "optional_secret",
-    "close_provider", "check_secrets", "item_for",
+    "close_provider", "check_secrets", "item_for", "declared_keys",
 ]

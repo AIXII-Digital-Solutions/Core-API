@@ -92,7 +92,10 @@ RESPONSES_PATH.mkdir(parents=True, exist_ok=True)
 
 # Microsoft Graph webhook validation (incoming notifications)
 
-MS_WEBHOOK_SECRET: str = require_env("MS_WEBHOOK_SECRET")  # REQUIRED — must equal external-worker
+# REQUIRED — must equal external-worker's. It comes from the vault on a host whose environment names
+# the item (BW_ITEM_MS_WEBHOOK_SECRET=<item>); with no such name it is read from the environment,
+# exactly as before. Either way an empty value fails the boot.
+MS_WEBHOOK_SECRET: str = require_secret("MS_WEBHOOK_SECRET")
 
 # Service-to-service token (e.g. the portal calling this API for aviation data).
 # Empty by default -> service-token-protected routes are effectively closed.
@@ -126,7 +129,10 @@ FILE_PROCESSOR_TOKEN: str = require_secret("FILE_PROCESSOR_TOKEN", "")  # must e
 # is unset the capacity endpoints return 503 and the rest of the API boots normally.
 PBIE_TENANT_ID: str = require_env("PBIE_TENANT_ID", "")
 PBIE_CLIENT_ID: str = require_env("PBIE_CLIENT_ID", "")
-PBIE_CLIENT_SECRET: str = require_env("PBIE_CLIENT_SECRET", "")
+# Same deal, and OPTIONAL: name the item with BW_ITEM_PBIE_CLIENT_SECRET to keep it in the vault.
+# A named item that is missing does not fail the boot — the value falls back to the environment, and
+# with neither the capacity endpoints stay at 503.
+PBIE_CLIENT_SECRET: str = require_secret("PBIE_CLIENT_SECRET", "")
 PBIE_SUBSCRIPTION_ID: str = require_env("PBIE_SUBSCRIPTION_ID", "")
 PBIE_RESOURCE_GROUP: str = require_env("PBIE_RESOURCE_GROUP", "")
 PBIE_CAPACITY_NAME: str = require_env("PBIE_CAPACITY_NAME", "")

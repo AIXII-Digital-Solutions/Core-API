@@ -27,7 +27,32 @@ addresses those fields directly without custom-field lookups.
 
 **The mapping is topology, not a secret.** It lives in `_ITEM_MAP` in code and is overridable per key
 with `BW_ITEM_<KEY>` / `BW_FIELD_<KEY>`. Keeping it visible is what makes a failure readable —
-"item 'aixii-postgres' not found" instead of "something went wrong".
+"item 'aixii-postgres' not found" instead of "something went wrong". The table above is the code's
+DEFAULT naming; the AIXII vault uses its own item names, which the deployment sets in its env file
+(`BW_ITEM_DB_PASSWORD=db_api`, …). `python tools/check_secrets.py` is how you confirm a host's names.
+
+## A key the code does not know about
+
+`BW_ITEM_<KEY>` also **declares** a key: set it for a key that is not in `_ITEM_MAP` and that key is
+resolved from the vault too — `declared_keys()` (and therefore `check_secrets`) includes it. This is
+how `MS_WEBHOOK_SECRET` and `PBIE_CLIENT_SECRET` reach the vault without a code change:
+
+```bash
+BW_ITEM_MS_WEBHOOK_SECRET=ms_graph_webhook      # login item's `password` field by default
+BW_FIELD_PBIE_CLIENT_SECRET=client_secret       # only if it is not `password`
+```
+
+They have no built-in item on purpose: a default naming an item that a given vault does not have
+would fail every boot on the hosts that still keep the value in their env file. **Without a name,
+such a key is a plain environment variable** — the old behaviour, unchanged. The mapped keys never
+fall back like that; that asymmetry is the whole point.
+
+`PBIE_CLIENT_SECRET` is further marked OPTIONAL (`_OPTIONAL_KEYS`): it gates the `/capacity`
+endpoints, which answer 503 without it. If its item is named but missing, the resolver warns and
+falls back to the environment instead of failing the boot, and `check_secrets` reports it as
+"not configured" rather than a failure. Every other mapped key stays fail-closed. A vault that is
+unreachable, a bad credential or a TLS error still raises for all of them — "the vault is broken"
+must never look like "the feature is off".
 
 ## How it is wired
 
