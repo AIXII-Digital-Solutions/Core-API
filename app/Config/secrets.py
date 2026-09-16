@@ -27,6 +27,7 @@ Operational notes that are load-bearing — see docs/secrets.md before changing 
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -74,44 +75,62 @@ _SHIM_UNSAFE = set('"%&|<>^()!\r\n')
 
 
 # ==============================================================================================
-# logical key -> (vault item, field)
+# logical key -> vault item (the FIELD is derived, see field_for)
 # ==============================================================================================
 # This mapping is TOPOLOGY, NOT A SECRET: keeping it in code (overridable per key by
-# BW_ITEM_<KEY> / BW_FIELD_<KEY>) is what makes a failure readable — "item 'aixii-postgres' not
-# found" instead of "something went wrong".
+# BW_ITEM_<KEY>) is what makes a failure readable — "item 'aixii-postgres' not found" instead of
+# "something went wrong".
 #
 # Credentials that belong together share one login item and use its native username/password
 # fields, which is exactly what a login item is for and what `bw get` addresses directly.
 
-_ITEM_MAP: dict[str, tuple[str, str]] = {
-    "DB_USER":                     ("aixii-postgres", "username"),
-    "DB_PASSWORD":                 ("aixii-postgres", "password"),
-    "REDIS_USER":                  ("aixii-redis", "username"),
-    "REDIS_USER_PASSWORD":         ("aixii-redis", "password"),
-    "SERVICE_TOKEN":               ("aixii-core-api-service-token", "password"),
-    "FILE_PROCESSOR_TOKEN":        ("aixii-file-processor-token", "password"),
-    "AEROAPI_KEY":                 ("aixii-flightaware-aeroapi", "password"),
-    "AVIATION_EDGE_API_KEY":       ("aixii-aviationedge", "password"),
-    "AVIATION_EDGE_EXTRA_API_KEY": ("aixii-aviationedge-extra", "password"),
+_ITEM_MAP: dict[str, str] = {
+    "DB_USER":                     "aixii-postgres",
+    "DB_PASSWORD":                 "aixii-postgres",
+    "REDIS_USER":                  "aixii-redis",
+    "REDIS_USER_PASSWORD":         "aixii-redis",
+    "SERVICE_TOKEN":               "aixii-core-api-service-token",
+    "FILE_PROCESSOR_TOKEN":        "aixii-file-processor-token",
+    "AEROAPI_KEY":                 "aixii-flightaware-aeroapi",
+    "AVIATION_EDGE_API_KEY":       "aixii-aviationedge",
+    "AVIATION_EDGE_EXTRA_API_KEY": "aixii-aviationedge-extra",
 }
 
 # Keys with no built-in item, which a host turns into vault keys by naming the item in its
-# environment (`BW_ITEM_MS_WEBHOOK_SECRET=ms_graph_webhook`, and `BW_FIELD_…` if it is not a login
-# item's `password`). They have no default here because the item may not exist in a given vault at
-# all, and a default that names a missing item would fail every boot on the hosts that keep the
-# value in the environment. Known ones: MS_WEBHOOK_SECRET, PBIE_CLIENT_SECRET.
+# environment (`BW_ITEM_MS_WEBHOOK_SECRET=ms_graph_webhook`). They have no default here because the
+# item may not exist in a given vault at all, and a default that names a missing item would fail
+# every boot on the hosts that keep the value in the environment.
 
 MANAGED_KEYS = tuple(_ITEM_MAP)
 
+# GROUPS: several keys out of ONE item, named once as `BW_ITEM_<GROUP>`. A login item holds a whole
+# service principal — id in `username`, secret in `password`, the rest in custom fields — and
+# splitting that across four env lines only invites them to drift apart.
+#   BW_ITEM_PBIE=powerbi-capacity-spn
+# A per-key BW_ITEM_<KEY> still wins, for the odd value that lives somewhere else.
+_GROUP_KEYS: dict[str, tuple[str, ...]] = {
+    "PBIE": ("PBIE_TENANT_ID", "PBIE_CLIENT_ID", "PBIE_CLIENT_SECRET", "PBIE_SUBSCRIPTION_ID"),
+}
+
+# Which FIELD of the item holds a key's value, where it is not the default (see field_for). Only
+# custom fields need to be listed: `tennant_id` is spelled the way the vault item spells it.
+_FIELD_MAP: dict[str, str] = {
+    "PBIE_CLIENT_ID":       "username",
+    "PBIE_TENANT_ID":       "tennant_id",
+    "PBIE_SUBSCRIPTION_ID": "subscription_id",
+}
+
+# The item objects `bw get <object> <item>` knows. Anything else is a CUSTOM field and is read out of
+# the item's JSON instead (see _custom_field) — asked for one directly, the CLI answers
+# `Unknown object "tennant_id"`.
+_NATIVE_OBJECTS = frozenset({"username", "password", "uri", "totp", "notes"})
+
 # Keys that gate an OPTIONAL feature rather than a credential the service needs to work. For these
-# — and only these — a vault that HAS a mapping but no such item means "the feature is not
+# — and only these — a vault that HAS a mapping but no such item or field means "the feature is not
 # configured here", not "the deployment is broken": the resolver falls back to the environment (with
 # a warning) and then to the caller's default, and check_secrets reports them separately instead of
-# as a failure. PBIE_CLIENT_SECRET only unlocks the /capacity endpoints, which answer 503 without it.
-_OPTIONAL_KEYS = frozenset({"PBIE_CLIENT_SECRET"})
-
-# Field used for a key declared through the environment alone (see declared_keys).
-_DEFAULT_FIELD = "password"
+# as a failure. The PBIE keys only unlock the /capacity endpoints, which answer 503 without them.
+_OPTIONAL_KEYS = frozenset(_GROUP_KEYS["PBIE"])
 
 
 def item_for(key: str) -> tuple[str, str]:
@@ -119,22 +138,54 @@ def item_for(key: str) -> tuple[str, str]:
 
     Returns an EMPTY item name for a key with no mapping at all — the callers read that as "this is
     a plain environment variable on this host", which is what an unmapped key is."""
-    default_item, default_field = _ITEM_MAP.get(key, ("", _DEFAULT_FIELD))
-    return (os.getenv(f"BW_ITEM_{key}") or default_item,
-            os.getenv(f"BW_FIELD_{key}") or default_field)
+    return _vault_item(key), field_for(key)
+
+
+def _vault_item(key: str) -> str:
+    """The item a key lives in: its own `BW_ITEM_<KEY>`, else its group's `BW_ITEM_<GROUP>`,
+    else the built-in mapping, else nothing."""
+    own = os.getenv(f"BW_ITEM_{key}")
+    if own:
+        return own
+    for group, keys in _GROUP_KEYS.items():
+        if key in keys:
+            shared = os.getenv(f"BW_ITEM_{group}")
+            if shared:
+                return shared
+    return _ITEM_MAP.get(key, "")
+
+
+def field_for(key: str) -> str:
+    """The item's field a key reads, derived from the key itself so the environment does not have to
+    repeat it: a `…_USER` key is the item's `username`, anything else its `password`.
+
+    `BW_FIELD_<KEY>` is therefore only for a value kept in a CUSTOM field — a login item that holds a
+    whole service principal, say, with the tenant id beside the credentials."""
+    override = os.getenv(f"BW_FIELD_{key}")
+    if override:
+        return override
+    if key in _FIELD_MAP:
+        return _FIELD_MAP[key]
+    return "username" if key.endswith("_USER") else "password"
 
 
 def declared_keys() -> tuple[str, ...]:
-    """Every key that HAS a vault mapping on this host: the built-in ones plus any the environment
-    declares with `BW_ITEM_<KEY>`.
+    """Every key that HAS a vault mapping on this host: the built-in ones, any key the environment
+    declares with `BW_ITEM_<KEY>`, and the members of any group it names with `BW_ITEM_<GROUP>`.
 
     A deployment can therefore put a secret this code does not know about into the vault without a
     code change — the item name is topology and belongs in the environment, next to the host's other
     topology. `BW_FIELD_<KEY>` alone does not declare a key: without an item name there is nothing
     to look up."""
-    env_declared = sorted(name[len("BW_ITEM_"):] for name in os.environ
-                          if name.startswith("BW_ITEM_") and name[len("BW_ITEM_"):] and os.environ[name])
-    return tuple(dict.fromkeys([*_ITEM_MAP, *env_declared]))
+    declared: list[str] = []
+    for name, value in os.environ.items():
+        if not name.startswith("BW_ITEM_") or not value:
+            continue
+        suffix = name[len("BW_ITEM_"):]
+        if not suffix:
+            continue
+        declared.extend(_GROUP_KEYS.get(suffix, (suffix,)))
+    return tuple(dict.fromkeys([*_ITEM_MAP, *sorted(declared)]))
 
 
 # ==============================================================================================
@@ -525,15 +576,41 @@ class VaultwardenSecretsProvider(SecretsProvider):
 
     def _get(self, key: str, item: str, field: str) -> str:
         session = self._unlock()
-        raw = self._run(["get", field, item, "--raw"], stage=f"get {key}",
-                        env_extra={"BW_SESSION": session})
-        value = (raw or "").strip()
+        if field in _NATIVE_OBJECTS:
+            raw = self._run(["get", field, item, "--raw"], stage=f"get {key}",
+                            env_extra={"BW_SESSION": session})
+            value = (raw or "").strip()
+        else:
+            value = self._custom_field(key, item, field, session)
         if not value:
             # exit 0 with empty stdout means the field exists but is empty: a configuration error.
             # Never hand an empty string to a caller.
             raise SecretsItemNotFound(
                 f"{key}: field '{field}' of vault item '{item}' is empty")
         return value
+
+    def _custom_field(self, key: str, item: str, field: str, session: str) -> str:
+        """Read a CUSTOM field out of the item's JSON.
+
+        `bw get <object> <item>` only understands an item's built-in objects; asked for a custom
+        field it answers `Unknown object "tennant_id"`. The item as a whole is an object, though, so
+        the custom fields come back inside it. The JSON carries the item's other secrets too — it
+        stays in memory here and is never logged; only FIELD NAMES, which are topology, reach an
+        error message."""
+        raw = self._run(["get", "item", item, "--raw"], stage=f"get {key}",
+                        env_extra={"BW_SESSION": session})
+        try:
+            fields = (json.loads(raw or "{}") or {}).get("fields") or []
+        except ValueError:
+            raise SecretsCliError(f"{key}: vault item '{item}' did not come back as JSON") from None
+        wanted = field.strip().lower()
+        for f in fields:
+            if (f.get("name") or "").strip().lower() == wanted:
+                return (f.get("value") or "").strip()
+        names = sorted(n for n in ((f.get("name") or "").strip() for f in fields) if n)
+        raise SecretsItemNotFound(
+            f"{key}: vault item '{item}' has no custom field '{field}'"
+            + (f" (it has: {', '.join(names)})" if names else " (it has no custom fields)"))
 
     def optional(self, key: str, default: str = "") -> str:
         """Under this backend every MAPPED key is required — that is what fail-closed means. A

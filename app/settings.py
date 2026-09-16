@@ -127,13 +127,15 @@ FILE_PROCESSOR_TOKEN: str = require_secret("FILE_PROCESSOR_TOKEN", "")  # must e
 # sandbox does not bill around the clock. PBIE_CLIENT_SECRET is a bearer credential for the capacity —
 # set in prod env / secret store only, never commit. All six are required to enable the feature; if any
 # is unset the capacity endpoints return 503 and the rest of the API boots normally.
-PBIE_TENANT_ID: str = require_env("PBIE_TENANT_ID", "")
-PBIE_CLIENT_ID: str = require_env("PBIE_CLIENT_ID", "")
-# Same deal, and OPTIONAL: name the item with BW_ITEM_PBIE_CLIENT_SECRET to keep it in the vault.
-# A named item that is missing does not fail the boot — the value falls back to the environment, and
-# with neither the capacity endpoints stay at 503.
+# The principal's four values come out of ONE vault item when the host names it (BW_ITEM_PBIE=<item>):
+# id and secret from the login fields, tenant and subscription from custom fields. Unnamed, or with
+# the item missing, they fall back to the environment and the endpoints simply stay at 503 — this is
+# a feature switch, not a credential the service needs to run.
+PBIE_TENANT_ID: str = require_secret("PBIE_TENANT_ID", "")
+PBIE_CLIENT_ID: str = require_secret("PBIE_CLIENT_ID", "")
 PBIE_CLIENT_SECRET: str = require_secret("PBIE_CLIENT_SECRET", "")
-PBIE_SUBSCRIPTION_ID: str = require_env("PBIE_SUBSCRIPTION_ID", "")
+PBIE_SUBSCRIPTION_ID: str = require_secret("PBIE_SUBSCRIPTION_ID", "")
+# Not secrets: which capacity to act on. They stay in the environment.
 PBIE_RESOURCE_GROUP: str = require_env("PBIE_RESOURCE_GROUP", "")
 PBIE_CAPACITY_NAME: str = require_env("PBIE_CAPACITY_NAME", "")
 
