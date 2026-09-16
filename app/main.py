@@ -1,6 +1,16 @@
+import sys
+
 import uvicorn
 
-from settings import HOST, PORT, API_WORKERS, API_KEEPALIVE_TIMEOUT
+from Config import secrets
+
+try:
+    from settings import HOST, PORT, API_WORKERS, API_KEEPALIVE_TIMEOUT
+except secrets.SecretsError as ex:
+    # The vault is the one dependency that fails BEFORE there is an app to report it: without this,
+    # a wrong item name or an unreachable Vaultwarden comes out as a traceback from an import.
+    print(f"[core-api] FATAL: cannot resolve secrets: {type(ex).__name__}: {ex}", file=sys.stderr)
+    raise SystemExit(1) from None
 
 # loop="auto" / http="auto" pick uvloop and httptools when they are installed (they are, in the Linux
 # image — see requirements.txt): a C event loop and a C HTTP parser instead of asyncio's pure-Python loop
@@ -11,6 +21,16 @@ _COMMON = dict(host=HOST, port=PORT, loop="auto", http="auto",
 
 if __name__ == "__main__":
     if API_WORKERS > 1:
+        # Resolve the secrets HERE, once, and hand them to the workers (see the function's docstring).
+        # uvicorn spawns its workers, so each would otherwise open the vault again — and several `bw`
+        # processes on one CLI state directory corrupt each other, which surfaces as a good credential
+        # being reported empty in a random worker.
+        try:
+            secrets.hand_to_child_processes()
+        except secrets.SecretsError as ex:
+            print(f"[core-api] FATAL: cannot resolve secrets: {type(ex).__name__}: {ex}",
+                  file=sys.stderr)
+            raise SystemExit(1) from None
         # Several processes need the app as an import string, so each worker builds its own. The
         # supervisor process deliberately never imports Server: it only forks, watches and restarts.
         uvicorn.run("Server:app", workers=API_WORKERS, **_COMMON)

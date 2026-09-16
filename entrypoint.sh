@@ -15,14 +15,13 @@ for _ in range(60):
 print("[entrypoint] WARNING: database not reachable after timeout"); sys.exit(0)
 PY
 
-# With a vault backend, resolve the boot-critical secrets BEFORE starting the app so a bad vault
-# produces one classified line at the top of the log ("Vaultwarden unreachable", "item not found")
-# instead of a Python traceback out of an import. Deliberately NOT the three provider API keys:
-# core-api never calls those providers, so a missing one must not block a boot. Nor
-# PBIE_CLIENT_SECRET: it gates the optional /capacity endpoints, which answer 503 without it.
-# MS_WEBHOOK_SECRET is here because settings.py requires it at import — a boot fails without it.
-# Costs one extra unlock+sync (seconds); set CHECK_SECRETS_ON_BOOT=false to skip.
-if [ "${SECRETS_BACKEND:-env}" != "env" ] && [ "${CHECK_SECRETS_ON_BOOT:-true}" = "true" ]; then
+# OPTIONAL pre-flight: resolve the boot-critical secrets in their own process before the app starts.
+# OFF by default, because it is a whole extra vault round trip (unlock, sync, read) and the app now
+# reports the same failure itself, as one classified line rather than a traceback — see app/main.py.
+# Turn it on (CHECK_SECRETS_ON_BOOT=true) while setting a host up, when knowing WHICH key is wrong
+# before anything else starts is worth the seconds. Deliberately not the provider API keys (nothing
+# in core-api resolves them) nor PBIE_CLIENT_SECRET (it gates /capacity, which answers 503 without it).
+if [ "${SECRETS_BACKEND:-env}" != "env" ] && [ "${CHECK_SECRETS_ON_BOOT:-false}" = "true" ]; then
   echo "[entrypoint] resolving boot secrets from ${SECRETS_BACKEND} ..."
   if ! python tools/check_secrets.py \
         DB_USER DB_PASSWORD REDIS_USER REDIS_USER_PASSWORD SERVICE_TOKEN FILE_PROCESSOR_TOKEN \

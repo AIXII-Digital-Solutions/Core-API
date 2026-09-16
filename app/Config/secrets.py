@@ -132,6 +132,12 @@ _NATIVE_OBJECTS = frozenset({"username", "password", "uri", "totp", "notes"})
 # as a failure. The PBIE keys only unlock the /capacity endpoints, which answer 503 without them.
 _OPTIONAL_KEYS = frozenset(_GROUP_KEYS["PBIE"])
 
+# What core-api itself cannot start without — the same list entrypoint.sh checks. Everything else
+# managed here belongs to somebody else's process (the _admin loaders, the worker services), so it
+# must never be able to fail this service's boot.
+BOOT_KEYS = ("DB_USER", "DB_PASSWORD", "REDIS_USER", "REDIS_USER_PASSWORD",
+             "SERVICE_TOKEN", "FILE_PROCESSOR_TOKEN", "MS_WEBHOOK_SECRET")
+
 
 def item_for(key: str) -> tuple[str, str]:
     """Resolve the (item, field) pair for a logical key, honouring the env overrides.
@@ -378,6 +384,7 @@ class VaultwardenSecretsProvider(SecretsProvider):
 
         self._session: Optional[Secret] = None
         self._cache: dict[str, str] = {}
+        self._snapshot: Optional[dict[str, list[dict]]] = None   # the vault, read once; see _items
         self._lock = threading.RLock()
 
     # --- process plumbing ---------------------------------------------------------------------
@@ -575,34 +582,59 @@ class VaultwardenSecretsProvider(SecretsProvider):
         return value
 
     def _get(self, key: str, item: str, field: str) -> str:
-        session = self._unlock()
-        if field in _NATIVE_OBJECTS:
-            raw = self._run(["get", field, item, "--raw"], stage=f"get {key}",
-                            env_extra={"BW_SESSION": session})
-            value = (raw or "").strip()
-        else:
-            value = self._custom_field(key, item, field, session)
-        if not value:
-            # exit 0 with empty stdout means the field exists but is empty: a configuration error.
-            # Never hand an empty string to a caller.
+        entry = self._items().get(item.strip().lower())
+        if entry is None:
+            raise SecretsItemNotFound(f"{key}: no vault item named '{item}'")
+        if len(entry) > 1:
             raise SecretsItemNotFound(
-                f"{key}: field '{field}' of vault item '{item}' is empty")
+                f"{key}: vault item '{item}' is ambiguous — {len(entry)} items share that name")
+        value = self._field_of(key, item, field, entry[0])
+        if not value:
+            raise SecretsItemNotFound(f"{key}: field '{field}' of vault item '{item}' is empty")
         return value
 
-    def _custom_field(self, key: str, item: str, field: str, session: str) -> str:
-        """Read a CUSTOM field out of the item's JSON.
+    def _items(self) -> dict[str, list[dict]]:
+        """The whole vault, once per process, indexed by item name.
 
-        `bw get <object> <item>` only understands an item's built-in objects; asked for a custom
-        field it answers `Unknown object "tennant_id"`. The item as a whole is an object, though, so
-        the custom fields come back inside it. The JSON carries the item's other secrets too — it
-        stays in memory here and is never logged; only FIELD NAMES, which are topology, reach an
-        error message."""
-        raw = self._run(["get", "item", item, "--raw"], stage=f"get {key}",
+        Every key used to cost its own `bw get`: a Node process start plus a full vault decrypt,
+        measured at 4-5 SECONDS each, so six boot credentials took half a minute. One `bw list
+        items` costs the same 4-5 seconds for ALL of them, and every field — including the custom
+        ones `bw get` cannot address at all — is in that JSON.
+
+        The snapshot holds every secret the bot can see. It stays in memory, is never logged, and
+        the process usually resolves all its keys within seconds of taking it."""
+        with self._lock:
+            if self._snapshot is not None:
+                return self._snapshot
+        session = self._unlock()
+        raw = self._run(["list", "items", "--raw"], stage="list items",
                         env_extra={"BW_SESSION": session})
         try:
-            fields = (json.loads(raw or "{}") or {}).get("fields") or []
+            items = json.loads(raw or "[]") or []
         except ValueError:
-            raise SecretsCliError(f"{key}: vault item '{item}' did not come back as JSON") from None
+            raise SecretsCliError("list items: the vault did not come back as JSON") from None
+        index: dict[str, list[dict]] = {}
+        for it in items:
+            name = (it.get("name") or "").strip().lower()
+            if name:
+                index.setdefault(name, []).append(it)
+        with self._lock:
+            self._snapshot = index
+        _log().info("vault snapshot taken (%d items)", len(items))
+        return index
+
+    @staticmethod
+    def _field_of(key: str, item: str, field: str, data: dict) -> str:
+        """One field of one item: a built-in object, or a custom field matched by name."""
+        if field in _NATIVE_OBJECTS:
+            login = data.get("login") or {}
+            if field == "notes":
+                return (data.get("notes") or "").strip()
+            if field == "uri":
+                uris = login.get("uris") or []
+                return ((uris[0] or {}).get("uri") or "").strip() if uris else ""
+            return (login.get(field) or "").strip()
+        fields = data.get("fields") or []
         wanted = field.strip().lower()
         for f in fields:
             if (f.get("name") or "").strip().lower() == wanted:
@@ -643,6 +675,7 @@ class VaultwardenSecretsProvider(SecretsProvider):
     def close(self) -> None:
         with self._lock:
             self._cache.clear()
+            self._snapshot = None        # drop the decrypted vault with everything else
             if self._session is None:
                 return
             self._session = None
@@ -694,6 +727,43 @@ def optional_secret(key: str, default: str = "") -> str:
     """Resolve a secret the service can legitimately run without (env backend only — see
     VaultwardenSecretsProvider.optional)."""
     return get_provider().optional(key, default)
+
+
+def hand_to_child_processes() -> int:
+    """Resolve every declared key ONCE here and pass the values to this process's children through
+    the environment, with the backend switched to `env` so they never open the vault themselves.
+    Returns how many keys were handed over (0 under the `env` backend, where there is nothing to do).
+
+    Why this exists. uvicorn SPAWNS its workers, so each one re-imports the app and would resolve
+    the same secrets again: N more unlock+sync round trips, and — the part that actually broke a
+    production boot — N `bw` processes on ONE CLI state directory, which corrupt each other. The
+    symptom is a `bw get` that exits 0 with empty output, i.e. a perfectly good credential reported
+    as an empty field, in a different worker each time.
+
+    What it costs. The values sit in the worker processes' environment. In this deployment that does
+    not widen anything: the vault's own bootstrap credentials (BW_CLIENTID / BW_CLIENTSECRET /
+    BW_PASSWORD) are already there, injected by compose, and they open the whole vault. Read the
+    environment of one of these processes and the vault was yours either way.
+
+    Call it in the PARENT, before the workers are spawned. The vault is locked afterwards."""
+    provider = get_provider()
+    if provider.name == "env":
+        return 0
+    handed = 0
+    for key in declared_keys():
+        try:
+            os.environ[key] = provider.require(key)
+            handed += 1
+        except SecretsItemNotFound:
+            if key in BOOT_KEYS:
+                raise      # the workers cannot start without it; fail here, once, with the reason
+            # Optional, or resolved by somebody else entirely (the data-provider keys belong to the
+            # loaders and the worker services): leave the environment untouched.
+            _log().info("%s not handed to the workers — not in the vault on this host", key)
+    os.environ["SECRETS_BACKEND"] = "env"
+    close_provider()
+    _log().info("resolved %d secrets for the worker processes; vault closed in this process", handed)
+    return handed
 
 
 def close_provider() -> None:
