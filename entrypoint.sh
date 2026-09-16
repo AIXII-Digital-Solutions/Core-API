@@ -18,12 +18,15 @@ PY
 # With a vault backend, resolve the boot-critical secrets BEFORE starting the app so a bad vault
 # produces one classified line at the top of the log ("Vaultwarden unreachable", "item not found")
 # instead of a Python traceback out of an import. Deliberately NOT the three provider API keys:
-# core-api never calls those providers, so a missing one must not block a boot.
+# core-api never calls those providers, so a missing one must not block a boot. Nor
+# PBIE_CLIENT_SECRET: it gates the optional /capacity endpoints, which answer 503 without it.
+# MS_WEBHOOK_SECRET is here because settings.py requires it at import — a boot fails without it.
 # Costs one extra unlock+sync (seconds); set CHECK_SECRETS_ON_BOOT=false to skip.
 if [ "${SECRETS_BACKEND:-env}" != "env" ] && [ "${CHECK_SECRETS_ON_BOOT:-true}" = "true" ]; then
   echo "[entrypoint] resolving boot secrets from ${SECRETS_BACKEND} ..."
   if ! python tools/check_secrets.py \
-        DB_USER DB_PASSWORD REDIS_USER REDIS_USER_PASSWORD SERVICE_TOKEN FILE_PROCESSOR_TOKEN; then
+        DB_USER DB_PASSWORD REDIS_USER REDIS_USER_PASSWORD SERVICE_TOKEN FILE_PROCESSOR_TOKEN \
+        MS_WEBHOOK_SECRET; then
     echo "[entrypoint] FATAL: could not resolve the boot secrets — refusing to start." >&2
     exit 1
   fi
