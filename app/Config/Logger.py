@@ -53,8 +53,11 @@ class CustomLogHandler(RotatingFileHandler):
             os.remove(zip_files.pop())
 
 
+# The pid is in here because the API runs several uvicorn workers, each a full copy of the app with
+# its own lifespan, pools and clients. Every startup line therefore appears once PER WORKER, and
+# without the pid four identical "Startup completed" lines read like a loop instead of four processes.
 log_format = (
-    '%(levelname)s:     [%(name)s] %(asctime)s | %(filename)s-%(lineno)d: %(message)s'
+    '%(levelname)s:     [%(name)s:%(process)d] %(asctime)s | %(filename)s-%(lineno)d: %(message)s'
 )
 
 # Noisy third-party loggers pinned to ERROR.

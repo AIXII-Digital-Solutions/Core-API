@@ -19,7 +19,7 @@ from Utils import DBProxy
 
 logger = setup_logger(
     'fastapi_app',
-    log_format='%(levelname)s:     [%(name)s] %(asctime)s | %(message)s'
+    log_format='%(levelname)s:     [%(name)s:%(process)d] %(asctime)s | %(message)s'
 )
 
 
