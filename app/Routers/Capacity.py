@@ -37,7 +37,7 @@ from Config import setup_logger
 from Database import ApiToken
 from Utils import success_response, warning_response, error_response
 from Utils.ResponsesFunc import build_responses
-from Utils.pbie_capacity import CapacityState, CapacityBusy, CapacityError
+from Utils.pbie_capacity import CapacityState, CapacityBusy, CapacityError, CapacityUnreachable
 from api_auth import authorize, SCOPE_CAPACITY_ADMIN
 
 logger = setup_logger("capacity_api")
@@ -47,6 +47,7 @@ router = Router(prefix="/capacity", tags=["Capacity"])
 _CODES = {
     status.HTTP_200_OK, status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN,
     status.HTTP_409_CONFLICT, status.HTTP_502_BAD_GATEWAY, status.HTTP_503_SERVICE_UNAVAILABLE,
+    status.HTTP_504_GATEWAY_TIMEOUT,
 }
 
 _NOT_CONFIGURED = "Capacity control is not configured on this server (PBIE_* / azure-identity)."
@@ -87,6 +88,12 @@ async def read_state(
                               msg=_NOT_CONFIGURED, status_code=status.HTTP_503_SERVICE_UNAVAILABLE)
     try:
         return success_response(request=request, response=response, data=_serialise(await client.get_state()))
+    except CapacityUnreachable as exc:
+        # Azure is unreachable from here, which says nothing about the capacity — 504, not 502.
+        logger.error("capacity unreachable op=state cid=%s: %s",
+                     getattr(request.state, "correlation_id", None), exc)
+        return error_response(request=request, response=response,
+                              msg=f"Azure unreachable: {exc}", status_code=status.HTTP_504_GATEWAY_TIMEOUT)
     except CapacityError as exc:
         logger.error("capacity ARM error op=state cid=%s: %s",
                      getattr(request.state, "correlation_id", None), exc)
@@ -129,6 +136,15 @@ async def _run(op: str, request: Request, response: Response, actor: str):
         # 409, not an error toast: someone/something got there first — the portal just keeps polling.
         return warning_response(request=request, response=response,
                                 msg=str(exc), status_code=status.HTTP_409_CONFLICT)
+    except CapacityUnreachable as exc:
+        # The action's outcome is UNKNOWN: it may have been accepted and lost on the way back. Say so,
+        # and point at /capacity/state — a blind retry on a capacity that is already resuming is worse
+        # than waiting. (CapacityUnreachable subclasses CapacityError, so it must be caught first.)
+        logger.error("capacity unreachable op=%s actor=%s cid=%s: %s", op, actor, cid, exc)
+        return error_response(
+            request=request, response=response,
+            msg=f"{exc} Poll GET /capacity/state — the request may have been accepted.",
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT)
     except CapacityError as exc:
         logger.error("capacity ARM error op=%s actor=%s cid=%s: %s", op, actor, cid, exc)
         return error_response(request=request, response=response,

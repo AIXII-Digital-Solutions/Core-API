@@ -29,6 +29,13 @@ ARM = "https://management.azure.com"
 ARM_SCOPE = "https://management.azure.com/.default"
 API_VERSION = "2021-01-01"
 
+# A suspend/resume POST gets longer than a plain read: ARM answers 202 quickly when it is healthy, but
+# this host is far from Azure and a slow answer to an action is worth waiting for — a timed-out action
+# leaves the caller not knowing whether the capacity is changing state.
+ACTION_TIMEOUT = 60.0
+# The state re-read after such a timeout must be quick: it exists to answer "did it start anyway?".
+RECHECK_TIMEOUT = 10.0
+
 # --------------------------------------------------------------------------------------------------
 # State model — the complete ARM ``properties.state`` enum, classified into the four values the portal
 # contract exposes. Anything transitional means a request is already in flight and a second one must
@@ -64,6 +71,14 @@ class CapacityBusy(Exception):
 
 class CapacityError(Exception):
     """ARM rejected the call or the capacity is in a bad state. The web layer maps this to HTTP 502."""
+
+
+class CapacityUnreachable(CapacityError):
+    """ARM never answered — a timeout or a transport failure between this host and Azure.
+
+    Distinct from CapacityError because the OUTCOME IS UNKNOWN: a POST that timed out may still have
+    been accepted, and the capacity may be changing state right now. The web layer maps this to
+    HTTP 504 and tells the caller to poll, never to retry blindly."""
 
 
 def classify(raw_state: str, provisioning_state: Optional[str]) -> Status:
@@ -120,7 +135,16 @@ class CapacityClient:
         self._client = httpx.AsyncClient(timeout=timeout)
 
     async def _headers(self) -> dict:
-        token = await self._credential.get_token(ARM_SCOPE)
+        try:
+            token = await self._credential.get_token(ARM_SCOPE)
+        except Exception as exc:
+            # A rotated secret, a missing role assignment and a dead network all surface here, and an
+            # operator needs to be told WHICH — none of them is a bug in this service, so none of them
+            # may escape as a 500.
+            from azure.core.exceptions import ServiceRequestError
+            if isinstance(exc, ServiceRequestError):
+                raise CapacityUnreachable(f"cannot reach Entra ID for a token: {exc}") from exc
+            raise CapacityError(f"could not get an ARM token: {type(exc).__name__}: {exc}") from exc
         return {"Authorization": f"Bearer {token.token}"}
 
     @staticmethod
@@ -132,11 +156,20 @@ class CapacityClient:
         except Exception:
             return f"HTTP {resp.status_code}"
 
-    async def get_state(self) -> CapacityState:
+    async def get_state(self, *, timeout: Optional[float] = None) -> CapacityState:
         """Read current capacity state. Cheap; safe for the portal to poll every ~10s."""
-        resp = await self._client.get(
-            self._resource_url, params={"api-version": API_VERSION}, headers=await self._headers(),
-        )
+        import httpx
+
+        kwargs = {"timeout": timeout} if timeout is not None else {}
+        try:
+            resp = await self._client.get(
+                self._resource_url, params={"api-version": API_VERSION},
+                headers=await self._headers(), **kwargs,
+            )
+        except httpx.TimeoutException as exc:
+            raise CapacityUnreachable(f"Azure did not answer within the timeout: {exc!s}") from exc
+        except httpx.TransportError as exc:
+            raise CapacityUnreachable(f"cannot reach Azure ARM: {type(exc).__name__}: {exc}") from exc
         if not resp.is_success:
             raise CapacityError(self._arm_error(resp))
         props = resp.json().get("properties", {})
@@ -166,10 +199,31 @@ class CapacityClient:
         if action == "resume" and current.status == "live":
             return current
 
-        resp = await self._client.post(
-            f"{self._resource_url}/{action}", params={"api-version": API_VERSION},
-            headers=await self._headers(),
-        )
+        import httpx
+
+        try:
+            resp = await self._client.post(
+                f"{self._resource_url}/{action}", params={"api-version": API_VERSION},
+                headers=await self._headers(), timeout=ACTION_TIMEOUT,
+            )
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            # The POST may well have REACHED ARM — losing the answer is not the same as the action not
+            # happening, and reporting a failure here is what makes an operator click resume again on a
+            # capacity that is already resuming. Ask the capacity itself what happened.
+            log.warning("pbie.capacity.%s actor=%s no answer from ARM (%s) — re-reading state",
+                        action, actor, type(exc).__name__)
+            try:
+                after = await self.get_state(timeout=RECHECK_TIMEOUT)
+            except CapacityError:
+                after = None
+            if after is not None and after.status == "transitioning":
+                log.info("pbie.capacity.%s actor=%s accepted after all (state=%s)",
+                         action, actor, after.raw_state)
+                return after
+            raise CapacityUnreachable(
+                f"Azure did not answer the {action} request ({type(exc).__name__}). The capacity was "
+                f"{current.raw_state} and is still {after.raw_state if after else 'unknown'} — check "
+                "the state before retrying.") from exc
         # A 409 from ARM means an op is already in flight (a race after our pre-check) — keep polling,
         # do not surface it as a hard error.
         if resp.status_code == 409:
