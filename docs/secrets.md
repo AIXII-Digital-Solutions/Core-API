@@ -21,6 +21,10 @@ something the calling code knows or can depend on.
 | `AVIATION_EDGE_API_KEY` | `aixii-aviationedge` | `password` |
 | `AVIATION_EDGE_EXTRA_API_KEY` | `aixii-aviationedge-extra` | `password` |
 
+**The field is derived, not configured.** A `…_USER` key reads the item's `username`, every other key
+its `password`, so a deployment only ever names the ITEM. `BW_FIELD_<KEY>` exists for the one case
+that cannot be derived: a value kept in a CUSTOM field.
+
 Credentials that belong together (postgres user+password, redis user+password) share ONE login item
 and use its native `username`/`password` fields — that is what a login item is for, and `bw get`
 addresses those fields directly without custom-field lookups.
@@ -39,8 +43,25 @@ how `MS_WEBHOOK_SECRET` and `PBIE_CLIENT_SECRET` reach the vault without a code 
 
 ```bash
 BW_ITEM_MS_WEBHOOK_SECRET=ms_graph_webhook      # login item's `password` field by default
-BW_FIELD_PBIE_CLIENT_SECRET=client_secret       # only if it is not `password`
 ```
+
+## One item, several keys
+
+A login item often holds a whole service principal: the id in `username`, the secret in `password`,
+the rest in custom fields — `powerbi-aad` is exactly that, with a `tennant_id` beside the
+credentials. Naming that item once per GROUP keeps the four values from drifting apart:
+
+```bash
+BW_ITEM_PBIE=powerbi-capacity
+```
+
+resolves `PBIE_CLIENT_ID` from `username`, `PBIE_CLIENT_SECRET` from `password`, `PBIE_TENANT_ID`
+from the custom field `tennant_id` and `PBIE_SUBSCRIPTION_ID` from `subscription_id`. A per-key
+`BW_ITEM_<KEY>` still wins for a value that lives elsewhere, and `BW_FIELD_<KEY>` renames a field an
+item spells differently. `PBIE_RESOURCE_GROUP` and `PBIE_CAPACITY_NAME` are not credentials — they
+say which capacity to act on — and stay in the env file.
+
+Groups live in `_GROUP_KEYS`, the custom-field names in `_FIELD_MAP` (`Config/secrets.py`).
 
 They have no built-in item on purpose: a default naming an item that a given vault does not have
 would fail every boot on the hosts that still keep the value in their env file. **Without a name,
