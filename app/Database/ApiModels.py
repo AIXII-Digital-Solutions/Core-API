@@ -12,7 +12,7 @@ Two tables only, and they are NOT the insurance domain: that lives in its own `i
 import inspect
 import sys
 
-from sqlalchemy import String, BigInteger, ForeignKey
+from sqlalchemy import String, BigInteger, ForeignKey, Boolean, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .config import ApiBase as Base
 
@@ -21,24 +21,22 @@ class Airlines(Base):
     airline_name: Mapped[str] = mapped_column(String, index=True)
     icao: Mapped[str] = mapped_column(String, index=True, nullable=True, default=None)
     iata: Mapped[str] = mapped_column(String, index=True, nullable=True, default=None)
+    # Which fleet the airline belongs to, and therefore which matview picks its aircraft up:
+    # TRUE -> cirium.asg_*, FALSE -> cirium.non_asg_insured_* (insured, not ASG).
+    is_asg: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
 
 
-# Active aircraft taken from cirium.asg (is_active = true). NOT hand-maintained: the table is
-# rebuilt by the DB function api.sync_registration_from_asg() after every cirium.asg refresh
-# (external-worker calls it right after the asg matview REFRESH). `airline` resolves the airline
-# name matched in asg to the api.airlines row.
+# HAND-KEPT list of registrations to track: insured aircraft whose operator is not in api.airlines
+# at all, so no airline match can find them. cirium.non_asg_insured_* pick a tail up when its
+# registration is listed here, which is also where its Cirium identity (operator, series, status)
+# comes from — nothing is stored here but the registration itself.
 #
-# WARNING: that function does TRUNCATE ... RESTART IDENTITY, so this table's `id` is NOT stable.
-# NEVER point a foreign key at it — the insurance tables anchor on `insurance.aircrafts` instead
-# and join to this one on reg/msn only.
+# It used to be derived, TRUNCATEd and refilled from cirium.asg_full on every refresh; that function
+# is gone (see the migration asg_split_insured_fleet), because it would wipe what somebody typed in.
+# The ids are still not stable across a manual clear-out — join on `reg`, never on `id`.
 class Registration(Base):
     reg: Mapped[str] = mapped_column(String, index=True)                 # Registration
     msn: Mapped[str] = mapped_column(String, index=True, nullable=True, default=None)  # Serial Number
-    airline_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("api.airlines.id", ondelete="SET NULL"),
-        index=True, nullable=True, default=None,
-    )
-    airline: Mapped["Airlines"] = relationship("Airlines", lazy="selectin")
 
 
 _current_module = sys.modules[__name__]
