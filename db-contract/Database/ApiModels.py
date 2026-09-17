@@ -37,6 +37,9 @@ class Airlines(Base):
 class Registration(Base):
     reg: Mapped[str] = mapped_column(String, index=True)                 # Registration
     msn: Mapped[str] = mapped_column(String, index=True, nullable=True, default=None)  # Serial Number
+    # Whose aircraft this is. A hand-listed tail is here BECAUSE no api.airlines name matched it, so
+    # the matview has no airline to offer and powerbi.last_seen_fleet falls back to this.
+    airline: Mapped[str] = mapped_column(String, nullable=True, default=None)
 
 
 _current_module = sys.modules[__name__]
