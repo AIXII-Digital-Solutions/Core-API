@@ -11,7 +11,13 @@ know *why*. This document is the contract.
 
 ## 1. Connecting
 
-Base URL: **`https://api.aixii.com/api/v1`** · interactive schema: `/api/docs`
+Base URL: **`https://api.aixii.com/api/v1`**
+
+| | |
+|---|---|
+| interactive schema | `https://api.aixii.com/api/docs` (and `/api/redoc`) |
+| machine-readable schema | `https://api.aixii.com/openapi.json` — at the ROOT, not under `/api/v1`. Generate your client from this. |
+| current version | `v1.1.0` |
 
 Every request carries one of two credentials:
 
@@ -61,7 +67,11 @@ On an error, `data` is `[]` and `details.msg` is the message to show the user:
 Show it. Do not map status codes to your own strings; you will say less than the API already did.
 
 **Log `correlationId` on every failure.** It is the only way anybody can find that request in the
-server logs, and it is also stamped on the response header `X-Correlation-ID`.
+server logs. The same value is on the `X-Correlation-ID` response header of every response,
+success or not, so a client can log it without parsing the body.
+
+Responses also carry `Server-Timing: app;dur=<ms>` — time spent inside the API, so a slow call
+can be attributed to the service or to the network without guessing.
 
 ### Status codes
 
@@ -80,9 +90,13 @@ A `422` carries per-field detail in `data`, which you can bind straight to form 
 
 ```json
 { "status_code": 422,
-  "details": { "msg": "Validation error", "correlationId": "…" },
-  "data": [ { "field": "body.position", "msg": "Input should be less than or equal to 4" } ] }
+  "details": { "msg": "Validation error", "correlationId": "99bd6471-…" },
+  "data": [ { "field": "body.master_series", "msg": "Field required",
+              "correlationId": "99bd6471-…" } ] }
 ```
+
+(The correlation id is repeated on each entry; `field` is dotted from the request root, so
+`body.master_series` and `body.engines.0.position` bind straight to your form.)
 
 ---
 
