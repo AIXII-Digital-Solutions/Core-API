@@ -76,13 +76,53 @@ class ApiBase(AsyncAttrs, BaseMixin, DeclarativeBase):
     metadata = MetaData(schema="api")
 
 
-# Base class for the aircraft-insurance domain -> schema `insurance` (in the aixii database).
-# Split out of `api` by revision `insurance_schema_move`: insured aircraft, their policies, records,
-# claims and the two audit trails are one business domain and get one schema, like every aviation
-# source does. `api.airlines` deliberately stayed on ApiBase, so InsuranceModels links to it with
-# the Column object (a ForeignKey STRING is resolved inside the owning MetaData only).
-class InsuranceBase(AsyncAttrs, BaseMixin, DeclarativeBase):
-    metadata = MetaData(schema="insurance")
+# ---------------------------------------------------------------------------------------------
+# The insured-aircraft domain, in four schemas (revision `insured_fleet_rebuild`).
+#
+# It used to be ONE schema, `insurance`, holding everything from the airframe to the claim. That
+# schema is gone: the domain is really four different subjects with different owners, lifetimes and
+# read patterns, and one schema made them look like one thing.
+#
+#   ref      shared reference data every other schema points at: the counterparties (lessor,
+#            insured, reinsured, retrocedent) and their contacts. Reused across leasing AND policy,
+#            so it belongs to neither.
+#   fleet    the physical aircraft: airframe, its type, its installed engines. Outlives every
+#            contract written about it and is the anchor everything else hangs off.
+#   leasing  the lease agreement and, per aircraft, the cover it REQUIRES (agreed values,
+#            depreciation, the limits the lessor stipulates).
+#   policy   the insurance policy and, per aircraft, the cover actually PROVIDED. Renewed yearly,
+#            so an aircraft accumulates one coverage row per policy period.
+#
+# `api.airlines` deliberately stays on ApiBase: it is not part of this domain (the cirium asg sync
+# resolves against it, api.registration and the fleet matviews read it). The links to it are made
+# with the Column object, because a ForeignKey STRING is resolved inside the owning MetaData only.
+
+
+# Base class for shared counterparty reference data -> schema `ref`
+class RefBase(AsyncAttrs, BaseMixin, DeclarativeBase):
+    metadata = MetaData(schema="ref")
+
+
+# Base class for the physical aircraft -> schema `fleet`
+class FleetBase(AsyncAttrs, BaseMixin, DeclarativeBase):
+    metadata = MetaData(schema="fleet")
+
+
+# Base class for lease agreements and their per-aircraft terms -> schema `leasing`
+class LeasingBase(AsyncAttrs, BaseMixin, DeclarativeBase):
+    metadata = MetaData(schema="leasing")
+
+
+# Base class for insurance policies and per-aircraft coverage -> schema `policy`
+class PolicyBase(AsyncAttrs, BaseMixin, DeclarativeBase):
+    metadata = MetaData(schema="policy")
+
+
+# Base class for the one generic change log -> schema `audit`. Every table in ref/fleet/leasing/
+# policy (and api.airlines) carries an AFTER trigger that writes here, so "what changed, when, by
+# whom" is one query against one table rather than a history table per subject.
+class AuditBase(AsyncAttrs, DeclarativeBase):
+    metadata = MetaData(schema="audit")
 
 
 # Base class for ICAO models -> schema `icao` (ICAO + ICAO-API reference/reporting data).

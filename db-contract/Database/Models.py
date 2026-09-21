@@ -11,7 +11,11 @@ from .AviationEdgeModels import *
 # ======================
 
 from .ApiModels import *
-from .InsuranceModels import *
+from .RefModels import *
+from .FleetModels import *
+from .LeasingModels import *
+from .PolicyModels import *
+from .AuditModels import *
 from .IcaoModels import *
 from .FlightAwareModels import *
 from .ForecastModels import *

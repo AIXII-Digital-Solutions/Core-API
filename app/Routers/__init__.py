@@ -13,6 +13,7 @@ from .AcysClaims import router as acys_claims   # before .Forecast: literal /for
 from .Forecast import router as forecast
 from .Registrations import router as registrations
 from .Capacity import router as capacity
-from .Claims import router as insurance_claims   # before .Insurance: literal /insurance/claims wins
-from .InsuranceRefs import router as insurance_refs   # same reason: /insurance/refs/*
-from .Insurance import router as insurance
+
+# The insured-aircraft routers were removed with the `insurance` schema
+# (revision `insured_fleet_rebuild`). The new ref/fleet/leasing/policy API is
+# the next step; nothing serves that domain until it lands.

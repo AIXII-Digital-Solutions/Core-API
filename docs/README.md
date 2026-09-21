@@ -17,10 +17,11 @@ Documentation for the three-service platform (core-api + external-worker + file-
 - **[capacity-control.md](capacity-control.md)** — portal-facing start/stop of the Power BI Embedded
   Azure capacity (`/api/v1/capacity/*`, scope `capacity:admin`): contract, `PBIE_*` config, Azure
   provisioning, the 401/403/409/502/503 codes, and credential rotation.
-- **[insurance.md](insurance.md)** — the aircraft-insurance domain in its own `insurance` schema
-  (`/api/v1/insurance/*` and `/api/v1/insurance/claims/*`, scopes `insurance:read` /
-  `insurance:write`): how the flat policy and claims schedules are normalised across eleven tables,
-  how policy history, claim history and the trigger-written audit trail work, and the constraints
-  (MSN identity, no-overlap exclusion, currency/units) you should not undo by accident.
+- **[insured-fleet.md](insured-fleet.md)** — the insured aircraft across the `ref` / `fleet` /
+  `leasing` / `policy` schemas plus the `audit` change log: which column holds which field of
+  the source specification, why leasing and policy each carry the same three limits (required
+  vs provided cover), how a yearly policy renewal is modelled, and how the two kinds of history
+  work. Replaced the single `insurance` schema, which was dropped empty together with its
+  claims tables and routers — **no API serves this domain yet.**
 
 For agent/Claude-Code guidance see `../CLAUDE.md`. The schema source of truth is `../db-contract/`.

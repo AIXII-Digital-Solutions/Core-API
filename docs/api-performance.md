@@ -5,6 +5,10 @@ is left. The short version: a read request used to make **six** round trips to t
 `X-Api-Key` request about **thirteen**; both now make **one**. Most of the latency a client sees on production,
 though, is not in this process at all — see [Where the time goes](#where-the-time-goes).
 
+> The `/insurance*` rows below are historical: those endpoints were removed with the `insurance`
+> schema in revision `insured_fleet_rebuild` (see `insured-fleet.md`). The measurements still
+> stand for the DB round-trip work they demonstrate.
+
 ## Where the time goes
 
 Measured from a client with `bench_api.py` (median of 8 after a warm-up, keep-alive connection):
@@ -113,7 +117,7 @@ The ~370 ms between openresty and api-master is the biggest single cost. In orde
 
 - Moving the API onto the data host (the proxy, Postgres and Redis are already there) removes the
   proxy hop and the DB/Redis RTT — expected `/health` ~160 ms, a DB GET ~170 ms from the client.
-- `/insurance`, `/insurance/claims`, `/forecast/claims` run a page query and a count: two round trips;
+- `/forecast/claims` runs a page query and a count: two round trips;
   `count(*) OVER ()` would make it one.
-- Reference lists (`/insurance/refs/*`, `/airlines`) could be cached in Redis — worthwhile only once the
+- Reference lists (`/airlines`, and whatever the insured-fleet API grows) could be cached in Redis — worthwhile only once the
   DB round trip, not the proxy, dominates.

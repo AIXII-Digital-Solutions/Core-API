@@ -63,9 +63,10 @@ class AcysClaims(Base):
     airline had N claims worth X in this year under this section of cover, of which Y is still
     outstanding".
 
-    NOT the same thing as `insurance.insurance_claims`, which records individual loss events against a
-    specific aircraft and policy. This table is the summary a broker's claims-experience sheet
-    states directly, loaded as given; it is a reporting input, not a derived rollup of that table.
+    NOT a per-aircraft loss record. The `insurance` schema that held those was dropped whole in
+    revision `insured_fleet_rebuild`, and this table never depended on it: it is the summary a
+    broker's claims-experience sheet states directly, loaded as given, and is a reporting input
+    rather than a rollup of anything the platform stores.
 
     Grain: airline × calendar_year × currency × policy_type. Two currencies are separate rows —
     which is why neither amount is ever summed across the currency column (the `_usd` pair is what

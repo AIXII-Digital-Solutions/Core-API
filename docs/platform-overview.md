@@ -67,7 +67,8 @@ Full keyspace / channel details: [architecture.md](architecture.md).
 
 After the **AIXII consolidation** there are exactly **two physical Postgres databases**:
 - **`aixii`** — every aviation domain is a **schema**: `cirium`, `airlabs`, `flightradar`, `aviationedge`,
-  plus `api` (airlines + registration), `insurance` (insured aircraft, policies, claims), `forecast` and a
+  plus `api` (airlines + registration), the insured-aircraft domain
+  (`ref`/`fleet`/`leasing`/`policy` + the `audit` change log), `forecast` and a
   temporary `main`. Tables emit as `cirium.aircrafts`, `flightradar.livepositions`, …
 - **`service`** — schema-less: `job_statuses`, `schedule_registry`, `api_tokens`, `forecast_profiles`,
   `forecast_last_requests`, `forecast_step_timings`.
