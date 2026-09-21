@@ -1,7 +1,7 @@
 """The change log — schema `audit` in the aixii database.
 
 ONE table for every audited table in the insured-aircraft domain, written by ONE trigger function,
-`audit.log_change()`. Every table in `ref`, `fleet`, `leasing` and `policy`, plus `api.airlines`,
+`audit.log_change()`. Every table in `ref`, `fleet`, `leasing` and `policy`
 carries an `AFTER INSERT OR UPDATE OR DELETE … FOR EACH ROW` trigger that calls it.
 
 WHY ONE TABLE AND NOT A HISTORY TABLE PER SUBJECT. The previous design gave each audited table its

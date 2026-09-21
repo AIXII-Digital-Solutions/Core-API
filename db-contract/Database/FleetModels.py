@@ -26,10 +26,10 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .config import FleetBase as Base
-# api.airlines lives on ApiBase, in another MetaData. A ForeignKey STRING ("api.airlines.id") is
+# ref.airline lives on RefBase, in another MetaData. A ForeignKey STRING ("ref.airline.id") is
 # resolved inside the OWNING metadata and cannot see another Base's table, so the cross-schema link
 # is made with the Column object and the relationship names the class.
-from .ApiModels import Airlines
+from .RefModels import Airline
 
 MAX_ENGINES = 4
 
@@ -85,12 +85,12 @@ class Aircraft(Base):
         index=True, nullable=True, default=None,
     )
     airline_id: Mapped[Optional[int]] = mapped_column(
-        BigInteger, ForeignKey(Airlines.__table__.c.id, ondelete="RESTRICT"),
+        BigInteger, ForeignKey(Airline.__table__.c.id, ondelete="RESTRICT"),
         index=True, nullable=True, default=None,
     )
 
     aircraft_type: Mapped[Optional["AircraftType"]] = relationship("AircraftType", lazy="selectin")
-    airline: Mapped[Optional["Airlines"]] = relationship(Airlines, lazy="selectin")
+    airline: Mapped[Optional["Airline"]] = relationship(Airline, lazy="selectin")
     engines: Mapped[List["AircraftEngine"]] = relationship(
         "AircraftEngine", back_populates="aircraft", lazy="selectin",
         order_by="(AircraftEngine.position, AircraftEngine.installed_on)",

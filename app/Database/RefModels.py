@@ -1,7 +1,15 @@
 """Shared reference data — schema `ref` in the aixii database.
 
-The counterparties the insured-aircraft domain names, and nothing else. One table for every legal
-entity, whatever role it plays: the same company is a lessor on one aircraft, the insured on a
+The two things every other schema in the insured-aircraft domain points at: the AIRLINE that
+operates an aircraft, and the COUNTERPARTIES a contract names.
+
+`ref.airline` moved here from `api.airlines` (revision `airlines_to_ref`) once the domain was
+rebuilt around it. It is deliberately NOT merged into `ref.party`: an airline carries an ICAO and
+an IATA code and is matched on them, a counterparty is matched on its name, and the two are
+different in every source the platform reads. The cirium asg matviews still resolve their operator
+strings against this table — moving it was a catalogue update, so those matviews never noticed.
+
+One table for every counterparty, whatever role it plays: the same company is a lessor on one aircraft, the insured on a
 policy and a retrocedent on another, so separate per-role tables would hold three copies of it and
 let them drift. The ROLE is decided by the referencing column
 (`leasing.agreement.lessor_id`, `policy.policy.insured_id` / `reinsured_id` / `retrocedent_id`) —
@@ -17,7 +25,9 @@ import inspect
 import sys
 from typing import Optional, List
 
-from sqlalchemy import String, Text, BigInteger, ForeignKey, Computed, UniqueConstraint, Index
+from sqlalchemy import (
+    String, Text, BigInteger, Boolean, ForeignKey, Computed, UniqueConstraint, Index, text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .config import RefBase as Base
@@ -32,6 +42,36 @@ CURRENCY_VALUES = ", ".join(f"'{c}'" for c in CURRENCIES)
 def currency_check(column: str = "currency") -> str:
     """The CHECK body for a currency column, so leasing and policy cannot disagree about it."""
     return f"{column} IN ({CURRENCY_VALUES})"
+
+
+class Airline(Base):
+    """An operating airline. The platform's own hand-kept reference, ~21 rows, not a directory:
+    a carrier is here because this business insures or tracks its fleet.
+
+    `is_asg` decides which cirium matview picks the carrier's aircraft up, and therefore which
+    tails FlightRadar is polled for — TRUE feeds `cirium.asg_*`, FALSE feeds
+    `cirium.non_asg_insured_*`. Changing it means the matviews must be refreshed before anything
+    downstream sees the difference.
+
+    Matching against this table is by SUBSTRING, longest name first, because Cirium writes
+    "Air Arabia Abu Dhabi" where this table holds "Air Arabia". That is why the names here stay
+    short and generic; do not lengthen one to make a single row match.
+    """
+    __tablename__ = "airline"
+
+    airline_name: Mapped[str] = mapped_column(String, index=True)
+    icao: Mapped[Optional[str]] = mapped_column(String, index=True, nullable=True, default=None)
+    iata: Mapped[Optional[str]] = mapped_column(String, index=True, nullable=True, default=None)
+    is_asg: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true"),
+        comment="TRUE = an ASG airline (cirium.asg_*); FALSE = insured but not ASG "
+                "(cirium.non_asg_insured_*).",
+    )
+    logo_url: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, default=None,
+        comment="URL into the platform image store. Never the bytes - a grid reads every airline "
+                "on the page and a blob per row would drag megabytes through the connection.",
+    )
 
 
 class Party(Base):
