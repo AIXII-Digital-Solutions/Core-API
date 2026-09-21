@@ -225,6 +225,14 @@ Both catalogues are loaded by `_admin/load_types.py` from Cirium: **806 airframe
 manufacturers, **365 engine models** over 54. `template_url` stays NULL — the drawings are not in
 Cirium.
 
+**The fleet itself is loaded too** — `_admin/load_insured_fleet.py` reads the four
+`cirium.asg_*` / `cirium.non_asg_insured_*` matviews into `fleet.aircraft` (148),
+`fleet.service_info` (148), `fleet.aircraft_engine` (297) and `ref.party` (97). Nine registrations
+appear twice because the matviews expose three Cirium revisions as current; the newest revision
+wins. What Cirium cannot supply is left empty rather than approximated: no lease (it has a period
+and a lessor but no agreement name and no money — and `Indicative Market Value` is a market
+estimate, not a contractual agreed value) and no policy at all.
+
 **Engine swaps are new rows, not edits.** There is no `installed_to` — a removal is implied by the
 next installation at that position. The fitted set is
 
