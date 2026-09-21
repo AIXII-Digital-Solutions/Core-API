@@ -10,11 +10,10 @@ terms in force on a day are the newest row not later than it. So `GET /leasing/l
 the terms in force TODAY (`current_only=true`) and `current_only=false` shows the whole sequence.
 PATCH is for correcting a row that was written wrongly — not for a renegotiation, which is a POST.
 
-THE SERVICE BLOCK — `source`, `agreed_value_fixed`, `status`, `usage_status` — says how a record
-came to be rather than what it agrees. `status` is `insured` unless somebody states otherwise;
-`not_insured` records a KNOWN gap in cover, which `/policy/coverage/compare` reads as deliberate
-instead of reporting it as a missing policy. `usage_status` is the airframe's operational status as
-Cirium states it, stored verbatim.
+THE SERVICE BLOCK IS NOT HERE. `source`, `status`, `usage_status`, `agreed_value_fixed` and the
+currency moved to `fleet.service_info`, one row per aircraft, and are read and written at
+`/fleet/aircraft/{id}/service`. A lease payload still SHOWS the currency and the depreciated value,
+both resolved through that row.
 
 AGREED VALUE. `agreed_value_final` is what the schedule STATES. `agreed_value_calculated` is the
 same figure derived from `agreed_value_preliminary`, `depreciation_ratio` and
@@ -36,7 +35,7 @@ from settings import Router
 from Database import ApiToken
 from Database.RefModels import Party
 from Database.FleetModels import Aircraft
-from Database.LeasingModels import Agreement, AircraftLease, LeaseSource, InsuranceStatus
+from Database.LeasingModels import Agreement, AircraftLease
 from api_auth import authorize, SCOPE_INSURANCE_READ, SCOPE_INSURANCE_WRITE
 from Utils import success_response, warning_response, error_response
 from Utils.ResponsesFunc import build_responses
@@ -52,7 +51,6 @@ router = Router(prefix="/leasing", tags=["Leasing"])
 _AGREEMENT_SORTS = {
     "name": Agreement.name,
     "start_date": Agreement.start_date,
-    "currency": Agreement.currency,
     "created_at": Agreement.created_at,
 }
 _LEASE_SORTS = {
@@ -62,9 +60,6 @@ _LEASE_SORTS = {
     "depreciation_ratio": AircraftLease.depreciation_ratio,
     "combined_single_limit": AircraftLease.combined_single_limit,
     "hull_deductible_buy_down": AircraftLease.hull_deductible_buy_down,
-    "source": AircraftLease.source,
-    "status": AircraftLease.status,
-    "usage_status": AircraftLease.usage_status,
     "created_at": AircraftLease.created_at,
     "updated_at": AircraftLease.updated_at,
 }
@@ -88,8 +83,6 @@ class AgreementIn(BaseModel):
     alternative_contract_party: Optional[str] = None
     other_contracts: Optional[str] = Field(
         default=None, description="Contracts to be mentioned other than the lease agreement.")
-    currency: str = Field(default="USD", min_length=3, max_length=3,
-                          description="USD, EUR or GBP.")
 
 
 class AgreementPatch(BaseModel):
@@ -98,7 +91,6 @@ class AgreementPatch(BaseModel):
     lessor: Optional[str] = Field(default=None, max_length=256)
     alternative_contract_party: Optional[str] = None
     other_contracts: Optional[str] = None
-    currency: Optional[str] = Field(default=None, min_length=3, max_length=3)
 
 
 class LeaseIn(BaseModel):
@@ -113,27 +105,16 @@ class LeaseIn(BaseModel):
     agreement_name: Optional[str] = Field(default=None, max_length=512)
     agreement_start_date: Optional[date] = None
     lessor: Optional[str] = Field(default=None, max_length=256)
-    currency: Optional[str] = Field(default=None, min_length=3, max_length=3)
 
     effective_date: date
     agreed_value_preliminary: Optional[Decimal] = Field(default=None, ge=0)
     agreed_value_final: Optional[Decimal] = Field(default=None, ge=0)
-    agreed_value_fixed: bool = False
     depreciation_ratio: Optional[Decimal] = Field(
         default=None, ge=0, le=100, description="PERCENT per annum (5 = 5 %/year), not a fraction.")
     depreciation_start_date: Optional[date] = None
     combined_single_limit: Optional[Decimal] = Field(default=None, ge=0)
     hull_spares_war_excess_liability: Optional[Decimal] = Field(default=None, ge=0)
     hull_deductible_buy_down: Optional[Decimal] = Field(default=None, ge=0)
-    source: LeaseSource = LeaseSource.MANUAL
-    status: InsuranceStatus = Field(
-        default=InsuranceStatus.INSURED,
-        description="`not_insured` records a KNOWN gap in cover, and the comparison report reads "
-                    "it as deliberate rather than as a missing policy.")
-    usage_status: Optional[str] = Field(
-        default=None, max_length=64,
-        description="The airframe's operational status as Cirium states it — 'In Service', "
-                    "'Storage', 'Retired', 'Written off' ... Stored verbatim.")
 
     @model_validator(mode="after")
     def _check(self):
@@ -148,15 +129,11 @@ class LeasePatch(BaseModel):
     effective_date: Optional[date] = None
     agreed_value_preliminary: Optional[Decimal] = Field(default=None, ge=0)
     agreed_value_final: Optional[Decimal] = Field(default=None, ge=0)
-    agreed_value_fixed: Optional[bool] = None
     depreciation_ratio: Optional[Decimal] = Field(default=None, ge=0, le=100)
     depreciation_start_date: Optional[date] = None
     combined_single_limit: Optional[Decimal] = Field(default=None, ge=0)
     hull_spares_war_excess_liability: Optional[Decimal] = Field(default=None, ge=0)
     hull_deductible_buy_down: Optional[Decimal] = Field(default=None, ge=0)
-    source: Optional[LeaseSource] = None
-    status: Optional[InsuranceStatus] = None
-    usage_status: Optional[str] = Field(default=None, max_length=64)
 
 
 # ==============================================================================================
@@ -211,7 +188,7 @@ async def create_agreement(request: Request, response: Response, body: Agreement
                 name=body.name.strip(), start_date=body.start_date,
                 lessor_id=lessor.id if lessor else None,
                 alternative_contract_party=body.alternative_contract_party,
-                other_contracts=body.other_contracts, currency=body.currency.upper(),
+                other_contracts=body.other_contracts,
             )
             session.add(row)
             await session.flush()
@@ -276,8 +253,6 @@ async def update_agreement(request: Request, response: Response, agreement_id: i
             if "lessor" in fields:
                 lessor = await get_or_create_party(session, fields.pop("lessor"))
                 row.lessor_id = lessor.id if lessor else None
-            if "currency" in fields and fields["currency"]:
-                fields["currency"] = fields["currency"].upper()
             for key, value in fields.items():
                 setattr(row, key, value.strip() if key == "name" and value else value)
             await session.flush()
@@ -344,8 +319,6 @@ async def delete_agreement(request: Request, response: Response, agreement_id: i
 async def list_leases(
     request: Request, response: Response,
     aircraft_id: Optional[int] = Query(None), agreement_id: Optional[int] = Query(None),
-    status: Optional[InsuranceStatus] = Query(
-        None, description="insured | not_insured — filters the records, not the aircraft."),
     on_date: Optional[date] = Query(None, description="Which day the terms are read for."),
     current_only: bool = Query(True, description="One row per aircraft, in force on on_date."),
     limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0),
@@ -358,8 +331,6 @@ async def list_leases(
             conds.append(AircraftLease.aircraft_id == aircraft_id)
         if agreement_id is not None:
             conds.append(AircraftLease.agreement_id == agreement_id)
-        if status is not None:
-            conds.append(AircraftLease.status == status)
         if current_only:
             conds.append(AircraftLease.effective_date <= on)
 
@@ -435,8 +406,7 @@ async def create_lease(request: Request, response: Response, body: LeaseIn,
                     lessor = await get_or_create_party(session, body.lessor)
                     agreement = Agreement(
                         name=body.agreement_name.strip(), start_date=body.agreement_start_date,
-                        lessor_id=lessor.id if lessor else None,
-                        currency=(body.currency or "USD").upper())
+                        lessor_id=lessor.id if lessor else None)
                     session.add(agreement)
                     await session.flush()
 
@@ -445,13 +415,11 @@ async def create_lease(request: Request, response: Response, body: LeaseIn,
                 effective_date=body.effective_date,
                 agreed_value_preliminary=body.agreed_value_preliminary,
                 agreed_value_final=body.agreed_value_final,
-                agreed_value_fixed=body.agreed_value_fixed,
                 depreciation_ratio=body.depreciation_ratio,
                 depreciation_start_date=body.depreciation_start_date,
                 combined_single_limit=body.combined_single_limit,
                 hull_spares_war_excess_liability=body.hull_spares_war_excess_liability,
                 hull_deductible_buy_down=body.hull_deductible_buy_down,
-                source=body.source, status=body.status, usage_status=body.usage_status,
             )
             session.add(row)
             await session.flush()

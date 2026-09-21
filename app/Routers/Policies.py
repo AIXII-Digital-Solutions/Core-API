@@ -29,7 +29,8 @@ from settings import Router
 from Database import ApiToken
 from Database.RefModels import Party
 from Database.FleetModels import Aircraft
-from Database.LeasingModels import AircraftLease, InsuranceStatus
+from Database.LeasingModels import AircraftLease
+from Database.FleetModels import InsuranceStatus
 from Database.PolicyModels import Policy, Coverage
 from api_auth import authorize, SCOPE_INSURANCE_READ, SCOPE_INSURANCE_WRITE
 from Utils import success_response, warning_response, error_response
@@ -46,7 +47,6 @@ router = Router(prefix="/policy", tags=["Policy"])
 _POLICY_SORTS = {
     "period_from": Policy.period_from,
     "period_to": Policy.period_to,
-    "currency": Policy.currency,
     "hull_all_risks_deductible": Policy.hull_all_risks_deductible,
     "combined_single_limit": Policy.combined_single_limit,
     "hull_war_overall_limit": Policy.hull_war_overall_limit,
@@ -89,7 +89,6 @@ class PolicyIn(BaseModel):
 
     period_from: date
     period_to: Optional[date] = None
-    currency: str = Field(default="USD", min_length=3, max_length=3, description="USD, EUR or GBP.")
 
     hull_all_risks_deductible: Optional[Decimal] = Field(default=None, ge=0)
     spares_deductible: Optional[Decimal] = Field(default=None, ge=0)
@@ -123,7 +122,6 @@ class PolicyPatch(BaseModel):
     retrocedent: Optional[str] = Field(default=None, max_length=256)
     period_from: Optional[date] = None
     period_to: Optional[date] = None
-    currency: Optional[str] = Field(default=None, min_length=3, max_length=3)
     hull_all_risks_deductible: Optional[Decimal] = Field(default=None, ge=0)
     spares_deductible: Optional[Decimal] = Field(default=None, ge=0)
     hull_deductible_buy_down: Optional[Decimal] = Field(default=None, ge=0)
@@ -238,7 +236,6 @@ async def create_policy(request: Request, response: Response, body: PolicyIn,
             retrocedent = await get_or_create_party(session, body.retrocedent)
 
             fields = body.model_dump(exclude={"insured", "insured_id", "reinsured", "retrocedent"})
-            fields["currency"] = fields["currency"].upper()
             row = Policy(insured_id=insured.id,
                          reinsured_id=reinsured.id if reinsured else None,
                          retrocedent_id=retrocedent.id if retrocedent else None, **fields)
@@ -308,8 +305,6 @@ async def update_policy(request: Request, response: Response, policy_id: int, bo
                 if name in fields:
                     party = await get_or_create_party(session, fields.pop(name))
                     setattr(row, column, party.id if party else None)
-            if "currency" in fields and fields["currency"]:
-                fields["currency"] = fields["currency"].upper()
             for key, value in fields.items():
                 setattr(row, key, value)
             await session.flush()
@@ -373,9 +368,6 @@ async def renew_policy(request: Request, response: Response, policy_id: int, bod
                 if override:
                     party = await get_or_create_party(session, override)
                     values[column] = party.id if party else None
-            if values.get("currency"):
-                values["currency"] = values["currency"].upper()
-
             new = Policy(period_from=period_from, period_to=period_to, **values)
             session.add(new)
             await session.flush()
@@ -498,7 +490,8 @@ async def compare_cover(request: Request, response: Response,
         on = on_date or date.today()
         async with request.app.state.db_client.read_session(DB) as session:
             aircraft = (await session.execute(
-                select(Aircraft).order_by(Aircraft.registration, Aircraft.id))).scalars().all()
+                select(Aircraft).options(selectinload(Aircraft.service))
+                .order_by(Aircraft.registration, Aircraft.id))).scalars().all()
             leases = (await session.execute(
                 select(AircraftLease).where(AircraftLease.effective_date <= on)
                 .options(selectinload(AircraftLease.agreement))
@@ -528,19 +521,20 @@ async def compare_cover(request: Request, response: Response,
                     ok = required == provided
                     agree = agree and ok
                     fields[column] = {"required": required, "provided": provided, "match": ok}
-                # A lease that STATES the aircraft is uncovered is not a missing policy. It is an
-                # answer, so it counts as a match and carries the reason instead of a red flag.
+                # An aircraft whose service block STATES it is uncovered is not a missing policy.
+                # It is an answer, so it counts as a match and carries the reason, not a red flag.
+                service = a.service
                 declared_uncovered = (
-                    lease is not None
-                    and enum_value(lease.status) == InsuranceStatus.NOT_INSURED.value)
+                    service is not None
+                    and enum_value(service.status) == InsuranceStatus.NOT_INSURED.value)
                 row = {
                     "aircraft": aircraft_json(a, engines=False),
                     "has_lease": lease is not None,
                     "has_policy": policy is not None,
                     "policy_id": policy.id if policy else None,
                     "lease_id": lease.id if lease else None,
-                    "status": enum_value(lease.status) if lease else None,
-                    "usage_status": lease.usage_status if lease else None,
+                    "status": enum_value(service.status) if service else "insured",
+                    "usage_status": service.usage_status if service else None,
                     "match": declared_uncovered or (
                         agree and lease is not None and policy is not None),
                     "fields": fields,

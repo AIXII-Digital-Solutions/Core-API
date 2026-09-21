@@ -27,7 +27,7 @@ from sqlalchemy import select, func, or_, and_
 from Config import setup_logger
 from settings import Router
 from Database.AuditModels import ChangeLog
-from Database.FleetModels import Aircraft, AircraftEngine
+from Database.FleetModels import Aircraft, AircraftEngine, ServiceInfo
 from Database.LeasingModels import AircraftLease
 from Database.PolicyModels import Coverage
 from api_auth import authorize, SCOPE_INSURANCE_READ
@@ -44,10 +44,11 @@ _OK = {status.HTTP_200_OK, status.HTTP_400_BAD_REQUEST, status.HTTP_404_NOT_FOUN
        status.HTTP_500_INTERNAL_SERVER_ERROR}
 
 # The tables a caller may ask about, so a typo returns a 400 listing the real names rather than an
-# empty page that looks like "nothing ever happened".
+# empty page that looks like "nothing ever happened". KEEP THIS IN STEP WITH audit.AUDITED — a table
+# missing here is invisible through this endpoint even though the trigger is faithfully logging it.
 _TABLES = {
     "ref": {"airline", "party", "party_contact"},
-    "fleet": {"aircraft_type", "aircraft", "aircraft_engine"},
+    "fleet": {"aircraft_type", "engine_type", "aircraft", "aircraft_engine", "service_info"},
     "leasing": {"agreement", "aircraft_lease"},
     "policy": {"policy", "coverage"},
 }
@@ -130,8 +131,9 @@ async def list_history(
     path="/aircraft/{aircraft_id}",
     description=(
         "Everything that ever happened to one airframe, in one timeline: its own changes and those "
-        "of its engines, lease records and coverage rows. `include` narrows it to some of those "
-        "(comma-separated: aircraft, engines, leases, coverage). The ids of the related rows are "
+        "of its engines, its service block, lease records and coverage rows. `include` narrows it "
+        "to some of those (comma-separated: aircraft, engines, service, leases, coverage). The ids "
+        "of the related rows are "
         "resolved as they are TODAY, so a lease record deleted long ago still appears through the "
         "entry that deleted it."
     ),
@@ -139,16 +141,17 @@ async def list_history(
 )
 async def aircraft_history(
     request: Request, response: Response, aircraft_id: int,
-    include: str = Query("aircraft,engines,leases,coverage"),
+    include: str = Query("aircraft,engines,service,leases,coverage"),
     limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0),
 ):
     try:
         wanted = {p.strip().lower() for p in include.split(",") if p.strip()}
-        unknown = wanted - {"aircraft", "engines", "leases", "coverage"}
+        unknown = wanted - {"aircraft", "engines", "service", "leases", "coverage"}
         if unknown:
             return warning_response(
                 request=request, response=response,
-                msg=f"Unknown include {sorted(unknown)}. Allowed: aircraft, engines, leases, coverage")
+                msg=f"Unknown include {sorted(unknown)}. "
+                    "Allowed: aircraft, engines, service, leases, coverage")
 
         async with request.app.state.db_client.read_session(DB) as session:
             if await session.get(Aircraft, aircraft_id) is None:
@@ -167,6 +170,7 @@ async def aircraft_history(
             # through the aircraft_id inside the snapshot itself.
             for key, schema, table, model, column in (
                 ("engines", "fleet", "aircraft_engine", AircraftEngine, AircraftEngine.aircraft_id),
+                ("service", "fleet", "service_info", ServiceInfo, ServiceInfo.aircraft_id),
                 ("leases", "leasing", "aircraft_lease", AircraftLease, AircraftLease.aircraft_id),
                 ("coverage", "policy", "coverage", Coverage, Coverage.aircraft_id),
             ):

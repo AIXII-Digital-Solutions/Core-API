@@ -41,7 +41,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .config import PolicyBase as Base
 # A ForeignKey STRING is resolved inside the OWNING MetaData, which cannot see another
 # Base's tables, so every CROSS-SCHEMA link below is made with the Column object.
-from .RefModels import Party, currency_check
+from .RefModels import Party
 from .FleetModels import Aircraft
 
 
@@ -57,6 +57,10 @@ class Policy(Base):
     `hull_war_confiscation_limit_selected_country` is the (usually much lower) limit that applies
     to flights into the one territory named in `selected_country`, e.g. Russia. Both are limits on
     the same peril, which is why they sit side by side rather than in separate rows.
+
+    The policy's CURRENCY is not here: it moved to `fleet.service_info.policy_currency` with the
+    rest of the service block (revision `service_info_table`), so it is recorded per aircraft
+    rather than per contract — see that model for what the move gives up.
 
     `cut_through_clause` is the clause text itself — it is quoted in full in correspondence, and
     what matters is the wording, not a flag saying one exists.
@@ -77,7 +81,6 @@ class Policy(Base):
 
     period_from: Mapped[date] = mapped_column(Date, nullable=False)
     period_to: Mapped[Optional[date]] = mapped_column(Date, nullable=True, default=None)
-    currency: Mapped[str] = mapped_column(String(3), nullable=False, server_default=text("'USD'"))
 
     # --- deductibles
     hull_all_risks_deductible: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True, default=None)
@@ -114,8 +117,6 @@ class Policy(Base):
             postgresql_nulls_not_distinct=True,
         ),
         CheckConstraint("period_to IS NULL OR period_to >= period_from", name="ck_policy_period"),
-        CheckConstraint(currency_check(), name="ck_policy_currency"),
-        CheckConstraint("currency = upper(currency)", name="ck_policy_currency_upper"),
         CheckConstraint(
             "reinsured_amount IS NULL OR reinsured_amount BETWEEN 0 AND 100",
             name="ck_policy_reinsured_amount",

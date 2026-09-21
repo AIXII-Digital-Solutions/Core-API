@@ -23,7 +23,9 @@ from sqlalchemy.exc import IntegrityError
 
 from Database import ApiToken
 from Database.RefModels import Airline, Party, PartyContact
-from Database.FleetModels import Aircraft, AircraftType, AircraftEngine, EngineType
+from Database.FleetModels import (
+    Aircraft, AircraftType, AircraftEngine, EngineType, ServiceInfo,
+)
 from Database.LeasingModels import Agreement, AircraftLease
 from Database.PolicyModels import Policy, Coverage
 
@@ -391,6 +393,20 @@ def fitted_engine_ids(engines: Iterable[AircraftEngine]) -> set:
     return {e.id for e in newest.values()}
 
 
+def service_json(v: Optional[ServiceInfo]) -> dict:
+    """The service block. A missing row reads as the defaults rather than as nulls — the API
+    creates one with every aircraft, so an absent row means the aircraft predates that, not that
+    somebody cleared the fields."""
+    if v is None:
+        return {"id": None, "agreed_value_fixed": False, "source": "cirium", "status": "insured",
+                "usage_status": None, "lease_currency": "USD", "policy_currency": "USD",
+                "recorded": False}
+    return {"id": v.id, "agreed_value_fixed": v.agreed_value_fixed,
+            "source": enum_value(v.source), "status": enum_value(v.status),
+            "usage_status": v.usage_status, "lease_currency": v.lease_currency,
+            "policy_currency": v.policy_currency, "recorded": True}
+
+
 def aircraft_json(a: Optional[Aircraft], *, engines: bool = True) -> Optional[dict]:
     if a is None:
         return None
@@ -400,6 +416,7 @@ def aircraft_json(a: Optional[Aircraft], *, engines: bool = True) -> Optional[di
         "msn": a.msn,
         "aircraft_type": aircraft_type_json(a.aircraft_type),
         "airline": airline_json(a.airline),
+        "service": service_json(a.service),
     }
     if engines:
         fitted = fitted_engine_ids(a.engines)
@@ -417,17 +434,24 @@ def agreement_json(g: Optional[Agreement]) -> Optional[dict]:
         "lessor": party_json(g.lessor, contacts=False),
         "alternative_contract_party": g.alternative_contract_party,
         "other_contracts": g.other_contracts,
-        "currency": g.currency,
     }
 
 
 def lease_json(l: Optional[AircraftLease], *, on: Optional[date] = None,
-               aircraft: Optional[Aircraft] = None) -> Optional[dict]:
+               aircraft: Optional[Aircraft] = None,
+               service: Optional[ServiceInfo] = None) -> Optional[dict]:
     """`agreed_value_calculated` is the formula applied at `on` (today by default) beside the
-    figure the schedule stated, so a divergence is visible instead of silently resolved."""
+    figure the schedule stated, so a divergence is visible instead of silently resolved.
+
+    Two of its inputs live in the service block, not on the lease: whether the value depreciates at
+    all (`agreed_value_fixed`) and which currency the amounts are in. Pass the aircraft — its
+    `service` is eagerly loaded — or the row itself.
+    """
     if l is None:
         return None
     on = on or date.today()
+    if service is None and aircraft is not None:
+        service = aircraft.service
     return {
         "id": l.id,
         "aircraft": aircraft_json(aircraft, engines=False) if aircraft is not None else None,
@@ -438,18 +462,14 @@ def lease_json(l: Optional[AircraftLease], *, on: Optional[date] = None,
         "agreed_value_final": num(l.agreed_value_final),
         "agreed_value_calculated": agreed_value_at(
             l.agreed_value_preliminary, l.depreciation_ratio, l.depreciation_start_date,
-            l.agreed_value_fixed, on),
+            service.agreed_value_fixed if service is not None else False, on),
         "agreed_value_as_of": iso(on),
-        "agreed_value_fixed": l.agreed_value_fixed,
         "depreciation_ratio": num(l.depreciation_ratio),
         "depreciation_start_date": iso(l.depreciation_start_date),
         "combined_single_limit": num(l.combined_single_limit),
         "hull_spares_war_excess_liability": num(l.hull_spares_war_excess_liability),
         "hull_deductible_buy_down": num(l.hull_deductible_buy_down),
-        "currency": l.agreement.currency if l.agreement else None,
-        "source": enum_value(l.source),
-        "status": enum_value(l.status),
-        "usage_status": l.usage_status,
+        "currency": service.lease_currency if service is not None else None,
         "created_at": iso(l.created_at),
         "updated_at": iso(l.updated_at),
     }
@@ -466,7 +486,6 @@ def policy_json(p: Optional[Policy]) -> Optional[dict]:
         "period_from": iso(p.period_from),
         "period_to": iso(p.period_to),
         "period": f"{iso(p.period_from)}..{iso(p.period_to) or ''}",
-        "currency": p.currency,
         "hull_all_risks_deductible": num(p.hull_all_risks_deductible),
         "spares_deductible": num(p.spares_deductible),
         "hull_deductible_buy_down": num(p.hull_deductible_buy_down),

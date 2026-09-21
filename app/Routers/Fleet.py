@@ -11,6 +11,11 @@ by registration, so an aircraft entered before a re-registration is recognised a
 than duplicated. `registration` and `airline` are CURRENT state and are overwritten when they
 change; nothing is lost, because every change lands in `audit.change_log` with its date and actor.
 
+THE SERVICE BLOCK is one row per aircraft in `fleet.service_info` — source, insurance status, the
+airframe's usage status as Cirium words it, whether the agreed value depreciates, and the two
+contract currencies. It is created with the aircraft (defaults: source `cirium`, status `insured`)
+and changed at `/fleet/aircraft/{id}/service`. Bookkeeping metadata, not maintenance.
+
 ENGINES ARE INSTALLATIONS, not slots. Recording a swap is a POST of a new row at the same position
 with a later date — never a PATCH of the old one — so the position keeps its history and the fitted
 engine is simply the newest. Every engine the API returns carries `fitted: true|false`.
@@ -34,7 +39,8 @@ from Config import setup_logger
 from settings import Router
 from Database import ApiToken
 from Database.FleetModels import (
-    Aircraft, AircraftType, AircraftEngine, EngineType, MAX_ENGINES,
+    Aircraft, AircraftType, AircraftEngine, EngineType, ServiceInfo,
+    RecordSource, InsuranceStatus, MAX_ENGINES,
 )
 from Database.LeasingModels import AircraftLease
 from Database.PolicyModels import Coverage
@@ -44,7 +50,7 @@ from Utils.ResponsesFunc import build_responses
 from Utils.DomainCommon import (
     DB, norm_reg, set_actor, apply_sort, SortError, AmbiguousType, integrity_error, find_aircraft,
     get_or_create_airline, get_or_create_aircraft_type, get_or_create_engine_type,
-    aircraft_json, type_json, engine_json, fitted_engine_ids,
+    aircraft_json, type_json, engine_json, fitted_engine_ids, service_json,
     lease_json, coverage_json, lease_in_force, covers,
 )
 
@@ -72,6 +78,7 @@ _AIRCRAFT_LOAD = (
     selectinload(Aircraft.aircraft_type),
     selectinload(Aircraft.airline),
     selectinload(Aircraft.engines).selectinload(AircraftEngine.engine_type),
+    selectinload(Aircraft.service),
 )
 
 
@@ -136,6 +143,34 @@ class EnginePatch(BaseModel):
     details: Optional[str] = None
 
 
+class ServiceIn(BaseModel):
+    """The service block — bookkeeping metadata about the aircraft's record, not maintenance.
+    Every field has a default, so sending `{}` (or nothing at all) records the ordinary case."""
+    agreed_value_fixed: bool = Field(
+        default=False, description="True freezes the agreed value at the preliminary figure.")
+    source: RecordSource = Field(
+        default=RecordSource.CIRIUM, description="Where the record came from. Defaults to cirium.")
+    status: InsuranceStatus = Field(
+        default=InsuranceStatus.INSURED,
+        description="`not_insured` states a KNOWN gap, which the comparison report reads as "
+                    "deliberate rather than as a missing policy.")
+    usage_status: Optional[str] = Field(
+        default=None, max_length=64,
+        description="The airframe's operational status as Cirium states it — 'In Service', "
+                    "'Storage', 'Retired' ... Stored verbatim.")
+    lease_currency: str = Field(default="USD", min_length=3, max_length=3)
+    policy_currency: str = Field(default="USD", min_length=3, max_length=3)
+
+
+class ServicePatch(BaseModel):
+    agreed_value_fixed: Optional[bool] = None
+    source: Optional[RecordSource] = None
+    status: Optional[InsuranceStatus] = None
+    usage_status: Optional[str] = Field(default=None, max_length=64)
+    lease_currency: Optional[str] = Field(default=None, min_length=3, max_length=3)
+    policy_currency: Optional[str] = Field(default=None, min_length=3, max_length=3)
+
+
 class AircraftIn(BaseModel):
     """`aircraft_type` and `airline` are NAMES, found-or-created — the caller never deals with
     surrogate ids. Engines can be sent in the same call."""
@@ -146,6 +181,8 @@ class AircraftIn(BaseModel):
                                         description="Only used when the type has to be created.")
     airline: Optional[str] = Field(default=None, max_length=256)
     engines: list[EngineIn] = Field(default_factory=list)
+    service: ServiceIn = Field(default_factory=ServiceIn,
+                               description="The service block. Omit it for the defaults.")
 
 
 class AircraftPatch(BaseModel):
@@ -457,8 +494,15 @@ async def create_aircraft(request: Request, response: Response, body: AircraftIn
             for engine in body.engines:
                 session.add(AircraftEngine(aircraft_id=row.id,
                                            **await _engine_fields(session, engine)))
+            # every aircraft gets its service block; a re-post leaves an existing one alone rather
+            # than resetting fields somebody has since set
+            if created:
+                fields = body.service.model_dump()
+                fields["lease_currency"] = fields["lease_currency"].upper()
+                fields["policy_currency"] = fields["policy_currency"].upper()
+                session.add(ServiceInfo(aircraft_id=row.id, **fields))
             await session.flush()
-            await session.refresh(row, ["aircraft_type", "airline", "engines"])
+            await session.refresh(row, ["aircraft_type", "airline", "engines", "service"])
             data = aircraft_json(row)
         return success_response(
             request=request, response=response, data=data,
@@ -491,10 +535,10 @@ async def _aircraft_card(session, row: Aircraft, on: date, history: bool) -> dic
     current_cover = next((c for c in coverages if covers(c, on)), None)
     out = aircraft_json(row)
     out["as_of"] = on.isoformat()
-    out["lease"] = lease_json(current_lease, on=on)
+    out["lease"] = lease_json(current_lease, on=on, service=row.service)
     out["coverage"] = coverage_json(current_cover)
     if history:
-        out["lease_history"] = [lease_json(l, on=on) for l in leases]
+        out["lease_history"] = [lease_json(l, on=on, service=row.service) for l in leases]
         out["coverage_history"] = [coverage_json(c) for c in coverages]
     return out
 
@@ -522,7 +566,7 @@ async def get_aircraft_by_registration(
                 return warning_response(request=request, response=response,
                                         msg=f"No aircraft matches '{registration}'",
                                         status_code=status.HTTP_404_NOT_FOUND)
-            await session.refresh(row, ["aircraft_type", "airline", "engines"])
+            await session.refresh(row, ["aircraft_type", "airline", "engines", "service"])
             data = await _aircraft_card(session, row, on, history)
         return success_response(request=request, response=response, data=data)
     except Exception as _ex:
@@ -591,7 +635,7 @@ async def update_aircraft(request: Request, response: Response, aircraft_id: int
             for key, value in fields.items():
                 setattr(row, key, value.strip() if isinstance(value, str) else value)
             await session.flush()
-            await session.refresh(row, ["aircraft_type", "airline", "engines"])
+            await session.refresh(row, ["aircraft_type", "airline", "engines", "service"])
             data = aircraft_json(row)
         return success_response(request=request, response=response, data=data)
     except AmbiguousType as _ex:
@@ -640,6 +684,72 @@ async def delete_aircraft(request: Request, response: Response, aircraft_id: int
             await session.delete(row)
         return success_response(request=request, response=response, data=data,
                                 msg="Aircraft deleted")
+    except IntegrityError as _ex:
+        code, msg = integrity_error(_ex)
+        return warning_response(request=request, response=response, msg=msg, status_code=code)
+    except Exception as _ex:
+        return error_response(request=request, exc=_ex, response=response)
+
+
+# ==============================================================================================
+# the service block
+# ==============================================================================================
+
+@router.get(path="/aircraft/{aircraft_id}/service",
+            description="The aircraft's service block. Returns the defaults with "
+                        "`recorded: false` when no row has been written yet.",
+            responses=build_responses(include=_OK), dependencies=_READ)
+async def get_service(request: Request, response: Response, aircraft_id: int):
+    try:
+        async with request.app.state.db_client.read_session(DB) as session:
+            if await session.get(Aircraft, aircraft_id) is None:
+                return warning_response(request=request, response=response,
+                                        msg=f"Aircraft {aircraft_id} not found",
+                                        status_code=status.HTTP_404_NOT_FOUND)
+            row = (await session.execute(
+                select(ServiceInfo).where(ServiceInfo.aircraft_id == aircraft_id)
+            )).scalar_one_or_none()
+            data = service_json(row)
+        return success_response(request=request, response=response, data=data)
+    except Exception as _ex:
+        return error_response(request=request, exc=_ex, response=response)
+
+
+@router.patch(
+    path="/aircraft/{aircraft_id}/service",
+    description=(
+        "Change the service block. Only the fields sent are touched, and the row is created with "
+        "the defaults if the aircraft has none. Setting `status` to `not_insured` records a KNOWN "
+        "gap in cover, which /policy/coverage/compare then reads as deliberate."
+    ),
+    responses=build_responses(include=_OK),
+)
+async def update_service(request: Request, response: Response, aircraft_id: int,
+                         body: ServicePatch,
+                         token: Optional[ApiToken] = Depends(authorize(SCOPE_INSURANCE_WRITE))):
+    try:
+        fields = body.model_dump(exclude_unset=True)
+        for key in ("lease_currency", "policy_currency"):
+            if fields.get(key):
+                fields[key] = fields[key].upper()
+        async with request.app.state.db_client.session(DB) as session:
+            await set_actor(session, token)
+            if await session.get(Aircraft, aircraft_id) is None:
+                return warning_response(request=request, response=response,
+                                        msg=f"Aircraft {aircraft_id} not found",
+                                        status_code=status.HTTP_404_NOT_FOUND)
+            row = (await session.execute(
+                select(ServiceInfo).where(ServiceInfo.aircraft_id == aircraft_id)
+            )).scalar_one_or_none()
+            if row is None:
+                row = ServiceInfo(aircraft_id=aircraft_id, **fields)
+                session.add(row)
+            else:
+                for key, value in fields.items():
+                    setattr(row, key, value)
+            await session.flush()
+            data = service_json(row)
+        return success_response(request=request, response=response, data=data)
     except IntegrityError as _ex:
         code, msg = integrity_error(_ex)
         return warning_response(request=request, response=response, msg=msg, status_code=code)

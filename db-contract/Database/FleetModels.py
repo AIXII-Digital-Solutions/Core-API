@@ -17,10 +17,11 @@ Alembic reads THIS file (db-contract); `app/Database/FleetModels.py` is core-api
 import inspect
 import sys
 from datetime import date
+from enum import Enum as PyEnum
 from typing import Optional, List
 
 from sqlalchemy import (
-    String, Text, BigInteger, Integer, Date, ForeignKey, Computed,
+    String, Text, BigInteger, Integer, Date, Boolean, ForeignKey, Computed, Enum,
     UniqueConstraint, CheckConstraint, Index, text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -29,7 +30,7 @@ from .config import FleetBase as Base
 # ref.airline lives on RefBase, in another MetaData. A ForeignKey STRING ("ref.airline.id") is
 # resolved inside the OWNING metadata and cannot see another Base's table, so the cross-schema link
 # is made with the Column object and the relationship names the class.
-from .RefModels import Airline
+from .RefModels import Airline, CURRENCIES, CURRENCY_VALUES
 
 MAX_ENGINES = 4
 
@@ -141,10 +142,96 @@ class Aircraft(Base):
         order_by="(AircraftEngine.position, AircraftEngine.installed_on)",
         cascade="all, delete-orphan",
     )
+    # 1:1. The API creates it with the aircraft, so every airframe has one; a NULL here means the
+    # aircraft predates that and should be read as the defaults.
+    service: Mapped[Optional["ServiceInfo"]] = relationship(
+        "ServiceInfo", back_populates="aircraft", lazy="selectin", uselist=False,
+        cascade="all, delete-orphan",
+    )
 
     __table_args__ = (
         Index("ix_aircraft_registration_normalized", "registration_normalized"),
         Index("uq_aircraft_msn", "msn", unique=True, postgresql_where=text("msn IS NOT NULL")),
+    )
+
+
+# --- the service block -------------------------------------------------------------------------
+# `values_callable` stores the enum VALUE ('lease_agreement'), not the member name.
+
+class RecordSource(PyEnum):
+    """Where an aircraft's record came from."""
+    MANUAL = "manual"
+    LEASE_AGREEMENT = "lease_agreement"
+    CIRIUM = "cirium"
+
+
+class InsuranceStatus(PyEnum):
+    """Whether the aircraft is covered. `not_insured` states a KNOWN gap — somebody decided this
+    aircraft carries no cover — which is a different fact from an aircraft nobody has entered a
+    policy for yet, and the comparison report reads it as such."""
+    INSURED = "insured"
+    NOT_INSURED = "not_insured"
+
+
+_SOURCE_ENUM = Enum(RecordSource, name="record_source", schema="fleet",
+                    values_callable=lambda e: [m.value for m in e])
+_STATUS_ENUM = Enum(InsuranceStatus, name="insurance_status", schema="fleet",
+                    values_callable=lambda e: [m.value for m in e])
+
+
+class ServiceInfo(Base):
+    """The specification's SERVICE BLOCK, one row per aircraft — bookkeeping metadata, not
+    maintenance.
+
+    These six fields used to be scattered: `agreed_value_fixed`, `source`, `status` and
+    `usage_status` on the lease record, the lease currency on the agreement, the policy currency on
+    the policy. They are one block about one aircraft, so they live together, next to the airframe
+    they describe.
+
+    `source` DEFAULTS TO CIRIUM — most records arrive from the feed, and a default matching the
+    common case is one less field to fill in. `usage_status` is free text on purpose: Cirium owns
+    that vocabulary (In Service, Storage, Retired, Written off, Type swap, Reengineered, ...) and
+    adds to it, and an enum would turn each new value into a migration that blocks an import.
+
+    WHAT HOLDING THE CURRENCIES HERE GIVES UP. They are properties of a CONTRACT — one lease
+    agreement covers several aircraft in one currency, one policy likewise. Per aircraft, nothing
+    stops two aircraft on the same agreement recording different currencies for it; the schema can
+    no longer state that they must agree, so whoever writes them must. Moving `currency` back onto
+    `leasing.agreement` / `policy.policy` would restore that and leaves the rest of this table
+    alone.
+    """
+    __tablename__ = "service_info"
+
+    aircraft_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("fleet.aircraft.id", ondelete="CASCADE"), nullable=False,
+    )
+    agreed_value_fixed: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false"),
+    )
+    source: Mapped[RecordSource] = mapped_column(
+        _SOURCE_ENUM, nullable=False, server_default=text("'cirium'"), index=True,
+    )
+    status: Mapped[InsuranceStatus] = mapped_column(
+        _STATUS_ENUM, nullable=False, server_default=text("'insured'"), index=True,
+    )
+    usage_status: Mapped[Optional[str]] = mapped_column(String, nullable=True, default=None)
+    lease_currency: Mapped[str] = mapped_column(
+        String(3), nullable=False, server_default=text("'USD'"),
+    )
+    policy_currency: Mapped[str] = mapped_column(
+        String(3), nullable=False, server_default=text("'USD'"),
+    )
+
+    aircraft: Mapped["Aircraft"] = relationship("Aircraft", back_populates="service")
+
+    __table_args__ = (
+        UniqueConstraint("aircraft_id", name="uq_service_info_aircraft"),
+        CheckConstraint(
+            f"lease_currency IN ({CURRENCY_VALUES}) AND lease_currency = upper(lease_currency)",
+            name="ck_service_info_lease_currency"),
+        CheckConstraint(
+            f"policy_currency IN ({CURRENCY_VALUES}) AND policy_currency = upper(policy_currency)",
+            name="ck_service_info_policy_currency"),
     )
 
 

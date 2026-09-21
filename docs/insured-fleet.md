@@ -22,6 +22,7 @@ fleet     aircraft_type         manufacturer, master series, template drawing
           engine_type           manufacturer, master series — the same shape
           aircraft              the airframe — registration, MSN, -> type, -> ref.airline
           aircraft_engine       one row per installation, position 1..4, -> engine_type
+          service_info          1:1 with the aircraft — the specification's service block
 
 leasing   agreement             the lease contract — name, start, lessor, currency
           aircraft_lease        one aircraft under it: agreed values, depreciation, required cover
@@ -123,21 +124,25 @@ are not are the whole point.
 | Hull Deductible Buy Down | `hull_deductible_buy_down` |
 | Hull Deductible Aggregate | `hull_deductible_aggregate` |
 
-**5. Service fields** — the block that says how a record came to be rather than what it agrees.
-`agreed_value_fixed`, `source`, `status` and `usage_status` sit on `leasing.aircraft_lease`, the
-lease currency on `leasing.agreement`, the policy currency on `policy.policy`.
+**5. Service fields → `fleet.service_info`**, one row per aircraft. The six fields were scattered
+across three tables until revision `service_info_table`; they are one block about one aircraft, so
+they live together beside the airframe they describe.
 
-| spec | column |
-|---|---|
-| Agreed Value Fixed | `aircraft_lease.agreed_value_fixed` |
-| Source | `aircraft_lease.source` — manual / lease_agreement / cirium |
-| Status | `aircraft_lease.status` — `insured` / `not_insured`, **default `insured`** |
-| Usage Status | `aircraft_lease.usage_status` — Cirium's `Status`, verbatim |
-| Lease Agreement Currency | `agreement.currency` |
-| Policy Currency | `policy.currency` |
+| spec | column | default |
+|---|---|---|
+| Agreed Value Fixed | `agreed_value_fixed` | `false` |
+| Source | `source` — manual / lease_agreement / cirium | **`cirium`** |
+| Status | `status` — insured / not_insured | `insured` |
+| Usage Status | `usage_status` — Cirium's `Status`, verbatim | — |
+| Lease Agreement Currency | `lease_currency` | `USD` |
+| Policy Currency | `policy_currency` | `USD` |
 
-Both currencies are `CHAR(3)` with a CHECK of `USD` / `EUR` / `GBP`, not an enum: adding a currency
-is then one migration that touches no type shared by two schemas.
+`source` defaults to `cirium` because most records arrive from the feed. Both currencies are
+`VARCHAR(3)` with a CHECK of `USD` / `EUR` / `GBP`, not an enum: adding a currency is then one
+migration that touches no type shared by two schemas.
+
+The row is created with the aircraft, so every airframe has one. A missing row reads as these
+defaults with `recorded: false` rather than as a screen of nulls.
 
 **6. Aircraft type → `fleet.aircraft_type`** — `manufacturer`, `master_series`, `template_url`.
 The two names are unique TOGETHER (normalised), not the series alone — see below.
@@ -150,11 +155,18 @@ The two names are unique TOGETHER (normalised), not the series alone — see bel
 
 ## Decisions worth not re-litigating
 
+**Holding the currencies per aircraft gives something up, and it is worth knowing.** They are
+properties of a CONTRACT — one lease agreement covers several aircraft in one currency, one policy
+likewise. On `fleet.service_info` nothing stops two aircraft on the same agreement recording
+different currencies for it: the schema can no longer state that they must agree, so whoever writes
+them must. Putting `currency` back on `leasing.agreement` / `policy.policy` would restore it and
+leaves the rest of the block alone — the two are not entangled.
+
 **`status = not_insured` is an answer, not a gap.** It states that somebody decided this aircraft
 carries no cover over this record's period, which is a different fact from an aircraft nobody has
-entered a policy for yet. `GET /policy/coverage/compare` reads it: a declared gap counts as matched
-and carries its reason, so the report shows only the cases that are actually unexplained. The
-default is `insured`, so saying nothing means the ordinary case.
+entered a policy for yet. `GET /policy/coverage/compare` reads it off the aircraft's service block: a declared gap counts as
+matched and carries its reason, so the report shows only the cases that are actually unexplained.
+The default is `insured`, so saying nothing means the ordinary case.
 
 **`usage_status` is Cirium's word, stored verbatim — and it is TEXT, not an enum.** Cirium uses
 twelve values today (`In Service`, `Storage`, `On order`, `Retired`, `Written off`, `Cancelled`,
@@ -162,10 +174,9 @@ twelve values today (`In Service`, `Storage`, `On order`, `Retired`, `Written of
 vocabulary; `Type swap` and `Reengineered` are not a set anyone would have predicted. An enum would
 turn each new value into a migration that blocks an import.
 
-Note what it means to keep it on the lease record: it is a SNAPSHOT as of that record, because
-refreshing it would mean PATCHing a lease, and a lease PATCH is an audited contract change. If the
-business wants it to follow Cirium continuously, it belongs on `fleet.aircraft` with a sync job
-owning it — one column move, no redesign.
+It sits on the aircraft, not on a lease record, so keeping it current is an ordinary
+`PATCH /fleet/aircraft/{id}/service` and not an audited change to a contract. A sync job can own it
+without touching anything the lease says.
 
 **MSN is the identity, not the registration.** A tail number changes on re-registration and can be
 reissued to a different airframe; the manufacturer serial cannot. Hence `UNIQUE (msn) WHERE msn IS
@@ -314,6 +325,7 @@ All endpoints are under `/api/v1`. Reads need `insurance:read`, writes `insuranc
 /fleet/aircraft                   GET  POST  .  /{id} GET PATCH DELETE
 /fleet/aircraft/by-registration/{registration}   GET  (separator-insensitive, ?msn= disambiguates)
 /fleet/aircraft/{id}/engines      GET  POST  .  /fleet/engines/{id} PATCH DELETE
+/fleet/aircraft/{id}/service      GET  PATCH
 
 /leasing/agreements               GET  POST  .  /{id} GET PATCH DELETE
 /leasing/leases                   GET  POST  .  /{id} GET PATCH DELETE
@@ -384,7 +396,11 @@ policy, or the reverse. A lease whose `status` is `not_insured` counts as answer
 missing policy, and the row carries `status` and `usage_status` so the reason is visible.
 
 `GET /fleet/aircraft/{id}?on_date=2025-06-30` reads the lease terms and the policy that were in
-force on that day, with the full history beside them.
+force on that day, with the full history and the service block beside them.
+
+`PATCH /fleet/aircraft/{id}/service` is where the service block is maintained — the insurance
+status, what Cirium says the airframe is doing, whether the agreed value depreciates, and the two
+currencies. The row is created with the defaults if the aircraft has none.
 
 `GET /history/aircraft/{id}` gathers the airframe's own changes and those of its engines, lease
 records and coverage rows into one timeline. Each entry carries a field-level `changes` list with
@@ -393,7 +409,9 @@ foreign keys already resolved to names, plus the raw snapshots for anything the 
 ### Agreed value
 
 `agreed_value_final` is what the schedule STATES; `agreed_value_calculated` is the formula applied
-at `on_date`. Both are returned and neither overwrites the other. The formula exists twice — as
+at `on_date`. Both are returned and neither overwrites the other. Two of the formula's inputs live
+in the service block rather than on the lease — `agreed_value_fixed`, which switches depreciation
+off, and the currency — so a lease payload resolves them through the aircraft. The formula exists twice — as
 `leasing.agreed_value_at()` for reports and as `Utils/DomainCommon.agreed_value_at` for the API —
 and the two are verified equal over randomised inputs. **Change both or neither.**
 
