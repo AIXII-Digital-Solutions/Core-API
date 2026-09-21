@@ -9,7 +9,7 @@ which is a different job entirely.
 import inspect
 import sys
 
-from sqlalchemy import String
+from sqlalchemy import String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 from .config import ApiBase as Base
 
@@ -27,7 +27,16 @@ class Registration(Base):
     msn: Mapped[str] = mapped_column(String, index=True, nullable=True, default=None)  # Serial Number
     # Whose aircraft this is. A hand-listed tail is here BECAUSE no api.airlines name matched it, so
     # the matview has no airline to offer and powerbi.last_seen_fleet falls back to this.
-    airline: Mapped[str] = mapped_column(String, nullable=True, default=None)
+    airline: Mapped[str] = mapped_column(
+        Text, nullable=True, default=None,
+        comment="Whose aircraft this is, for a tail no api.airlines name matches. "
+                "powerbi.last_seen_fleet shows it as Airline Name when the matview has none.",
+    )
+
+    __table_args__ = (
+        {"comment": "Hand-typed registrations of insured aircraft to track. Feeds "
+                    "cirium.non_asg_insured_* \u2014 nothing rebuilds this table any more."},
+    )
 
 
 _current_module = sys.modules[__name__]

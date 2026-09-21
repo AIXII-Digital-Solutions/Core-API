@@ -73,6 +73,13 @@ class Airline(Base):
                 "on the page and a blob per row would drag megabytes through the connection.",
     )
 
+    __table_args__ = (
+        {"comment": "The airlines this business insures or tracks - a hand-kept reference, not a "
+                    "directory. Moved from api.airlines by revision airlines_to_ref. Operator "
+                    "strings from Cirium are matched against it by SUBSTRING, longest name first, "
+                    "so the names here stay short."},
+    )
+
 
 class Party(Base):
     """A counterparty: lessor, insured, reinsured, retrocedent — and whatever role comes next.

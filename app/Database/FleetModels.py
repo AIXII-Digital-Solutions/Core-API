@@ -98,6 +98,10 @@ class EngineType(Base):
             "manufacturer_normalized", "master_series_normalized",
             name="uq_engine_type_manufacturer_series", postgresql_nulls_not_distinct=True,
         ),
+        {"comment": "Engine models, keyed by manufacturer AND master series exactly as "
+                    "fleet.aircraft_type is. Holds Cirium's Engine Master Series level "
+                    "(V2500-A5, CFM56-5), the same granularity the airframe side uses. "
+                    "Loaded by _admin/load_types.py."},
     )
 
 
@@ -210,16 +214,33 @@ class ServiceInfo(Base):
     )
     source: Mapped[RecordSource] = mapped_column(
         _SOURCE_ENUM, nullable=False, server_default=text("'cirium'"), index=True,
+        comment="Where this aircraft's record came from. Defaults to cirium - most arrive from "
+                "the feed.",
     )
     status: Mapped[InsuranceStatus] = mapped_column(
         _STATUS_ENUM, nullable=False, server_default=text("'insured'"), index=True,
+        comment="Whether the aircraft is covered. not_insured states a KNOWN gap, which is "
+                "different from an aircraft nobody has entered a policy for - "
+                "/policy/coverage/compare reads it so a deliberate gap is not reported as a "
+                "mistake.",
     )
-    usage_status: Mapped[Optional[str]] = mapped_column(String, nullable=True, default=None)
+    usage_status: Mapped[Optional[str]] = mapped_column(
+        String, nullable=True, default=None,
+        comment="The airframe's operational status as Cirium states it (In Service, Storage, "
+                "Retired, Written off, Type swap, ...). Text, not an enum: Cirium owns the "
+                "vocabulary and adds to it.",
+    )
     lease_currency: Mapped[str] = mapped_column(
         String(3), nullable=False, server_default=text("'USD'"),
+        comment="The lease agreement's currency. Held per aircraft since revision "
+                "service_info_table, so nothing stops two aircraft on one agreement disagreeing - "
+                "whoever writes them must keep them consistent.",
     )
     policy_currency: Mapped[str] = mapped_column(
         String(3), nullable=False, server_default=text("'USD'"),
+        comment="The policy's currency. Held per aircraft since revision service_info_table, so "
+                "nothing stops two aircraft on one policy disagreeing - whoever writes them must "
+                "keep them consistent.",
     )
 
     aircraft: Mapped["Aircraft"] = relationship("Aircraft", back_populates="service")
@@ -232,6 +253,10 @@ class ServiceInfo(Base):
         CheckConstraint(
             f"policy_currency IN ({CURRENCY_VALUES}) AND policy_currency = upper(policy_currency)",
             name="ck_service_info_policy_currency"),
+        {"comment": "The specification's service block, one row per aircraft: how the record came "
+                    "to be (source), whether it is covered (status), what Cirium says the airframe "
+                    "is doing (usage_status), whether the agreed value depreciates, and the two "
+                    "contract currencies. Bookkeeping metadata, NOT maintenance."},
     )
 
 
