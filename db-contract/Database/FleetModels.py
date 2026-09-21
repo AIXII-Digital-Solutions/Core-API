@@ -35,7 +35,13 @@ MAX_ENGINES = 4
 
 
 class AircraftType(Base):
-    """A reusable aircraft type, e.g. Airbus / A320-232.
+    """A reusable aircraft type: MANUFACTURER AND MASTER SERIES together, e.g. Airbus / A320-232.
+
+    The pair is the key, not the series. Cirium carries 806 distinct pairs across Commercial and
+    Business & Helicopters but only 751 distinct series, because 48 series are built by more than
+    one manufacturer under licence — Kawasaki builds the BK117, Mitsubishi the CRJ family and the
+    UH-60, Harbin the ERJ-145, Viking Air the DHC-6. Same design, different build, two rows.
+    NULLS NOT DISTINCT so a series entered with no manufacturer still cannot be inserted twice.
 
     `template_url` points at the outline drawing the portal overlays damage on — a URL into the
     platform's image store, never the bytes themselves. Keeping binaries out of the row means a
@@ -44,6 +50,9 @@ class AircraftType(Base):
     __tablename__ = "aircraft_type"
 
     manufacturer: Mapped[Optional[str]] = mapped_column(String, nullable=True, default=None, index=True)
+    manufacturer_normalized: Mapped[Optional[str]] = mapped_column(
+        String, Computed("upper(btrim(manufacturer))", persisted=True), nullable=True,
+    )
     master_series: Mapped[str] = mapped_column(String, nullable=False)
     master_series_normalized: Mapped[str] = mapped_column(
         String, Computed("upper(btrim(master_series))", persisted=True), nullable=False,
@@ -51,7 +60,10 @@ class AircraftType(Base):
     template_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True, default=None)
 
     __table_args__ = (
-        UniqueConstraint("master_series_normalized", name="uq_aircraft_type_master_series"),
+        UniqueConstraint(
+            "manufacturer_normalized", "master_series_normalized",
+            name="uq_aircraft_type_manufacturer_series", postgresql_nulls_not_distinct=True,
+        ),
     )
 
 

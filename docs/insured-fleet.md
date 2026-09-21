@@ -127,8 +127,8 @@ are not are the whole point.
 currencies are `CHAR(3)` with a CHECK of `USD` / `EUR` / `GBP`, not an enum: adding a currency is
 then one migration that touches no type shared by two schemas.
 
-**6. Aircraft type → `fleet.aircraft_type`** — `manufacturer`, `master_series` (unique, normalised),
-`template_url`.
+**6. Aircraft type → `fleet.aircraft_type`** — `manufacturer`, `master_series`, `template_url`.
+The two names are unique TOGETHER (normalised), not the series alone — see below.
 
 **7. Airline → `ref.airline`** — `airline_name`, `icao`, `iata` and `is_asg` came with the table;
 `logo_url` is new.
@@ -152,6 +152,21 @@ stored twice and no flag can disagree with a link. The portal filters autocomple
 **Contacts are rows.** The source documents carry several `COMPANY / CONTACTS / EMAIL` blocks per
 entity (a group lists its subsidiaries), so they are rows in `ref.party_contact` and not a text blob:
 the portal renders a list and an address can be searched for.
+
+**An aircraft type is the manufacturer AND the master series.** Cirium carries 806 distinct pairs
+across Commercial and Business & Helicopters but only 751 distinct series: **48 series are built by
+more than one manufacturer** under licence — Kawasaki builds the BK117, Mitsubishi the CRJ family and
+the UH-60, Harbin the ERJ-145, Viking Air the DHC-6, Indonesia Aerospace the CN235. Same design,
+different build. `uq_aircraft_type_manufacturer_series` is therefore over the pair, declared NULLS
+NOT DISTINCT so a series entered without a manufacturer still cannot be inserted twice
+(revision `aircraft_type_manufacturer`).
+
+The consequence for the write path: looking a type up by series alone can match several rows.
+`get_or_create_aircraft_type` matches the pair when a manufacturer is given, and by series alone
+otherwise — but only when exactly ONE row matches. An ambiguous series with no manufacturer is
+rejected with a 400 listing the builders, because resolving it by guesswork would attach the
+aircraft to the wrong one. The catalogue itself is loaded by
+`_admin/load_aircraft_types.py`; `template_url` stays NULL, the drawings are not in Cirium.
 
 **Engine swaps are new rows, not edits.** There is no `installed_to` — a removal is implied by the
 next installation at that position. The fitted set is

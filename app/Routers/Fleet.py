@@ -33,7 +33,7 @@ from api_auth import authorize, SCOPE_INSURANCE_READ, SCOPE_INSURANCE_WRITE
 from Utils import success_response, warning_response, error_response
 from Utils.ResponsesFunc import build_responses
 from Utils.DomainCommon import (
-    DB, norm_reg, set_actor, apply_sort, SortError, integrity_error, find_aircraft,
+    DB, norm_reg, set_actor, apply_sort, SortError, AmbiguousType, integrity_error, find_aircraft,
     get_or_create_airline, get_or_create_aircraft_type,
     aircraft_json, aircraft_type_json, engine_json, fitted_engine_ids,
     lease_json, coverage_json, lease_in_force, covers,
@@ -71,6 +71,8 @@ _AIRCRAFT_LOAD = (
 # ==============================================================================================
 
 class TypeIn(BaseModel):
+    """A type is the manufacturer AND the master series together — 48 series in Cirium are built
+    by more than one manufacturer, so the series alone is not the identity."""
     master_series: str = Field(min_length=1, max_length=128, description="e.g. 'A320-232'.")
     manufacturer: Optional[str] = Field(default=None, max_length=128, description="e.g. 'Airbus'.")
     template_url: Optional[str] = Field(
@@ -128,11 +130,15 @@ class AircraftPatch(BaseModel):
 # ==============================================================================================
 
 @router.get(path="/types",
-            description="Aircraft types. `q` matches the master series or the manufacturer. "
+            description="Aircraft types — one row per manufacturer AND master series. `q` matches "
+                        "either; `manufacturer` pins a series that several builders make. "
                         "Returns `{items, total}`.",
             responses=build_responses(include=_OK), dependencies=_READ)
 async def list_types(request: Request, response: Response,
-                     q: str = Query(""), limit: int = Query(50, ge=1, le=200),
+                     q: str = Query(""),
+                     manufacturer: Optional[str] = Query(
+                         None, description="Exact manufacturer, for a series several of them build."),
+                     limit: int = Query(50, ge=1, le=200),
                      offset: int = Query(0, ge=0),
                      sort: Optional[str] = Query(None), order: Optional[str] = Query(None)):
     try:
@@ -141,6 +147,8 @@ async def list_types(request: Request, response: Response,
         if q:
             conds.append(or_(AircraftType.master_series.ilike(f"%{q}%"),
                              AircraftType.manufacturer.ilike(f"%{q}%")))
+        if manufacturer:
+            conds.append(AircraftType.manufacturer_normalized == manufacturer.strip().upper())
         stmt = apply_sort(select(AircraftType).where(*conds), sort=sort, order=order,
                           sortmap=_TYPE_SORTS,
                           tiebreak=(AircraftType.master_series, AircraftType.id))
@@ -327,6 +335,8 @@ async def create_aircraft(request: Request, response: Response, body: AircraftIn
             request=request, response=response, data=data,
             msg="Aircraft created" if created else "Aircraft already known — updated in place",
             status_code=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+    except AmbiguousType as _ex:
+        return warning_response(request=request, response=response, msg=str(_ex))
     except IntegrityError as _ex:
         code, msg = integrity_error(_ex)
         return warning_response(request=request, response=response, msg=msg, status_code=code)
@@ -455,6 +465,8 @@ async def update_aircraft(request: Request, response: Response, aircraft_id: int
             await session.refresh(row, ["aircraft_type", "airline", "engines"])
             data = aircraft_json(row)
         return success_response(request=request, response=response, data=data)
+    except AmbiguousType as _ex:
+        return warning_response(request=request, response=response, msg=str(_ex))
     except IntegrityError as _ex:
         code, msg = integrity_error(_ex)
         return warning_response(request=request, response=response, msg=msg, status_code=code)

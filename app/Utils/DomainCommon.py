@@ -80,20 +80,52 @@ async def get_or_create_party(session, name: Optional[str]) -> Optional[Party]:
     return row
 
 
+class AmbiguousType(ValueError):
+    """A master series that several manufacturers build, asked for without naming one. Carries the
+    message the router returns as a 400, listing the manufacturers so the caller can pick."""
+
+
 async def get_or_create_aircraft_type(session, master_series: Optional[str],
                                       manufacturer: Optional[str] = None) -> Optional[AircraftType]:
+    """Find the type, or create it. The KEY IS THE PAIR (see the model): 48 series in Cirium are
+    built by more than one manufacturer, so a series alone does not always identify a type.
+
+      * manufacturer given -> match the pair exactly, create it if absent;
+      * manufacturer omitted -> match by series alone, but only when ONE row matches. Several and
+        it raises `AmbiguousType` rather than picking one, because picking one would silently
+        attach an aircraft to the wrong builder.
+    """
     if not master_series or not master_series.strip():
         return None
-    row = (await session.execute(
-        select(AircraftType).where(AircraftType.master_series_normalized == norm(master_series))
-    )).scalar_one_or_none()
-    if row is None:
-        row = AircraftType(master_series=master_series.strip(),
-                           manufacturer=(manufacturer or None) and manufacturer.strip())
-        session.add(row)
-        await session.flush()
-    elif manufacturer and not row.manufacturer:
-        row.manufacturer = manufacturer.strip()     # fill a gap, never overwrite
+    series_key = norm(master_series)
+
+    if manufacturer and manufacturer.strip():
+        row = (await session.execute(
+            select(AircraftType).where(
+                AircraftType.manufacturer_normalized == norm(manufacturer),
+                AircraftType.master_series_normalized == series_key)
+        )).scalar_one_or_none()
+        if row is None:
+            row = AircraftType(master_series=master_series.strip(),
+                               manufacturer=manufacturer.strip())
+            session.add(row)
+            await session.flush()
+        return row
+
+    matches = (await session.execute(
+        select(AircraftType).where(AircraftType.master_series_normalized == series_key)
+        .order_by(AircraftType.id)
+    )).scalars().all()
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        builders = ", ".join(sorted(m.manufacturer or "(no manufacturer)" for m in matches))
+        raise AmbiguousType(
+            f"'{master_series.strip()}' is built by several manufacturers ({builders}). "
+            f"Send `manufacturer` as well to say which.")
+    row = AircraftType(master_series=master_series.strip())
+    session.add(row)
+    await session.flush()
     return row
 
 
@@ -204,8 +236,8 @@ _SQLSTATE_STATUS = {
 _CONSTRAINT_MESSAGES = {
     "uq_party_name_normalized":
         "A counterparty with that name already exists (names are compared trimmed and upper-cased).",
-    "uq_aircraft_type_master_series":
-        "That aircraft type already exists.",
+    "uq_aircraft_type_manufacturer_series":
+        "That manufacturer and master series already exist as a type.",
     "uq_aircraft_msn":
         "That MSN already belongs to a different aircraft.",
     "uq_aircraft_engine_installation":
