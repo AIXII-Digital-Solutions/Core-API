@@ -19,8 +19,9 @@ ref       airline               the airlines this business insures or tracks
           party_contact         one row per COMPANY / CONTACTS / EMAIL block
 
 fleet     aircraft_type         manufacturer, master series, template drawing
+          engine_type           manufacturer, master series — the same shape
           aircraft              the airframe — registration, MSN, -> type, -> ref.airline
-          aircraft_engine       one row per installation, position 1..4
+          aircraft_engine       one row per installation, position 1..4, -> engine_type
 
 leasing   agreement             the lease contract — name, start, lessor, currency
           aircraft_lease        one aircraft under it: agreed values, depreciation, required cover
@@ -78,7 +79,7 @@ are not are the whole point.
 
 | spec | column |
 |---|---|
-| Master Series | `master_series` (text) |
+| Master Series | `engine_type_id` → `fleet.engine_type` |
 | MSN | `msn` |
 | Position | `position`, CHECK 1..4 |
 | Installed | `installed_on` |
@@ -153,6 +154,18 @@ stored twice and no flag can disagree with a link. The portal filters autocomple
 entity (a group lists its subsidiaries), so they are rows in `ref.party_contact` and not a text blob:
 the portal renders a list and an address can be searched for.
 
+**An engine model is a reference too, keyed exactly like an airframe type.**
+`fleet.engine_type` holds the manufacturer and the master series, and `fleet.aircraft_engine`
+points at it instead of spelling the model out on every installation. What stays on the
+installation is what is true of THAT engine and no other: its serial, when it went on, the note.
+
+Cirium nests engine names four deep — Engine Type (V2500), Engine **Master Series** (V2500-A5),
+Engine Series (V2527), Engine Sub Series (V2527-A5); for CFM, CFM56 / CFM56-5 / CFM56-5B /
+CFM56-5B3/3. The catalogue holds the MASTER SERIES, the same granularity the airframe side holds,
+so both halves of the domain describe hardware at one level rather than two. A finer column is one
+migration away if a schedule ever needs the sub-series (464 pairs at series level, 952 at
+sub-series).
+
 **An aircraft type is the manufacturer AND the master series.** Cirium carries 806 distinct pairs
 across Commercial and Business & Helicopters but only 751 distinct series: **48 series are built by
 more than one manufacturer** under licence — Kawasaki builds the BK117, Mitsubishi the CRJ family and
@@ -165,8 +178,13 @@ The consequence for the write path: looking a type up by series alone can match 
 `get_or_create_aircraft_type` matches the pair when a manufacturer is given, and by series alone
 otherwise — but only when exactly ONE row matches. An ambiguous series with no manufacturer is
 rejected with a 400 listing the builders, because resolving it by guesswork would attach the
-aircraft to the wrong one. The catalogue itself is loaded by
-`_admin/load_aircraft_types.py`; `template_url` stays NULL, the drawings are not in Cirium.
+aircraft to the wrong one — and the same resolver serves engine models, so the rule is one rule.
+No engine master series currently collides; the key is still the pair so the first one that does
+needs no migration.
+
+Both catalogues are loaded by `_admin/load_types.py` from Cirium: **806 airframe types** over 191
+manufacturers, **365 engine models** over 54. `template_url` stays NULL — the drawings are not in
+Cirium.
 
 **Engine swaps are new rows, not edits.** There is no `installed_to` — a removal is implied by the
 next installation at that position. The fitted set is
@@ -263,7 +281,8 @@ All endpoints are under `/api/v1`. Reads need `insurance:read`, writes `insuranc
 /ref/parties                      GET (search)  POST  .  /{id} GET PATCH DELETE
 /ref/parties/{id}/contacts        POST          .  /ref/contacts/{id} PATCH DELETE
 
-/fleet/types                      GET  POST  .  /{id} PATCH DELETE
+/fleet/aircraft-types             GET  POST  .  /{id} PATCH DELETE
+/fleet/engine-types               GET  POST  .  /{id} PATCH DELETE
 /fleet/aircraft                   GET  POST  .  /{id} GET PATCH DELETE
 /fleet/aircraft/by-registration/{registration}   GET  (separator-insensitive, ?msn= disambiguates)
 /fleet/aircraft/{id}/engines      GET  POST  .  /fleet/engines/{id} PATCH DELETE
@@ -289,9 +308,16 @@ rather than the page — so a client can page without a second call to learn the
 router declares and an unknown one returns 400 listing what is allowed, so no caller string ever
 reaches ORDER BY. NULLs always sort last in both directions.
 
-**Writes take NAMES, not ids.** `airline`, `aircraft_type`, `lessor`, `insured`, `reinsured`,
-`retrocedent` and the lease agreement are found-or-created on the normalised name, so `AerCap` and
-`AERCAP ` cannot become two rows. Ids are accepted too wherever the caller already has one.
+**Writes take NAMES, not ids.** `airline`, `aircraft_type`, `engine_type`, `lessor`, `insured`,
+`reinsured`, `retrocedent` and the lease agreement are found-or-created on the normalised name, so
+`AerCap` and `AERCAP ` cannot become two rows. Ids are accepted too wherever the caller already has
+one.
+
+**The two type references are served identically.** An airframe type and an engine model are the
+same shape — a (manufacturer, master series) pair loaded from Cirium — so `/fleet/aircraft-types`
+and `/fleet/engine-types` take the same parameters and answer the same payload, and one portal
+component can drive both. Naming a series several manufacturers build, without saying which, is a
+400 that lists them rather than a guess.
 
 **The schema states the rules; the API translates the verdict.** Nothing re-checks a constraint in
 Python before writing — that would be two sources of truth with a race between them. The write goes

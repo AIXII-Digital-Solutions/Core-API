@@ -67,6 +67,39 @@ class AircraftType(Base):
     )
 
 
+class EngineType(Base):
+    """An engine model, keyed exactly as `AircraftType` is: MANUFACTURER AND MASTER SERIES.
+
+    WHICH LEVEL OF NAME. Cirium nests engine names four deep — Engine Type (V2500), Engine Master
+    Series (V2500-A5), Engine Series (V2527), Engine Sub Series (V2527-A5); for CFM that reads
+    CFM56, CFM56-5, CFM56-5B, CFM56-5B3/3. This table holds the MASTER SERIES, the same granularity
+    the airframe side uses, so both halves of the domain describe hardware at one level. Cirium has
+    365 such pairs, 464 at series level and 952 at sub-series level; a finer column is one migration
+    away if the business ever needs it.
+
+    No engine master series in Cirium is currently built by more than one manufacturer — unlike the
+    airframes, where 48 are. The key is still the pair: the reason it is a pair over there (licence
+    production) applies here too, and the first collision should not need a migration to survive.
+    """
+    __tablename__ = "engine_type"
+
+    manufacturer: Mapped[Optional[str]] = mapped_column(String, nullable=True, default=None, index=True)
+    manufacturer_normalized: Mapped[Optional[str]] = mapped_column(
+        String, Computed("upper(btrim(manufacturer))", persisted=True), nullable=True,
+    )
+    master_series: Mapped[str] = mapped_column(String, nullable=False)
+    master_series_normalized: Mapped[str] = mapped_column(
+        String, Computed("upper(btrim(master_series))", persisted=True), nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "manufacturer_normalized", "master_series_normalized",
+            name="uq_engine_type_manufacturer_series", postgresql_nulls_not_distinct=True,
+        ),
+    )
+
+
 class Aircraft(Base):
     """The airframe — the anchor the lease and the policy both hang off.
 
@@ -139,8 +172,9 @@ class AircraftEngine(Base):
         FROM fleet.aircraft_engine
         ORDER BY aircraft_id, position, installed_on DESC NULLS LAST, id DESC
 
-    `master_series` is the engine model as written, e.g. 'CFM56-5B4/3' — plain text rather than a
-    reference table, because the series is descriptive here and never joined on.
+    THE MODEL IS A REFERENCE, not text on the row: `engine_type_id` points at `fleet.engine_type`,
+    the same way an airframe points at `fleet.aircraft_type`. What stays on the installation is what
+    is true of THIS engine and no other — its serial, when it went on, and the note.
     """
     __tablename__ = "aircraft_engine"
 
@@ -148,12 +182,16 @@ class AircraftEngine(Base):
         BigInteger, ForeignKey("fleet.aircraft.id", ondelete="CASCADE"), nullable=False, index=True,
     )
     position: Mapped[int] = mapped_column(Integer, nullable=False)
-    master_series: Mapped[Optional[str]] = mapped_column(String, nullable=True, default=None)
+    engine_type_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("fleet.engine_type.id", ondelete="RESTRICT"),
+        index=True, nullable=True, default=None,
+    )
     msn: Mapped[Optional[str]] = mapped_column(String, nullable=True, default=None, index=True)
     installed_on: Mapped[Optional[date]] = mapped_column(Date, nullable=True, default=None)
     details: Mapped[Optional[str]] = mapped_column(Text, nullable=True, default=None)
 
     aircraft: Mapped["Aircraft"] = relationship("Aircraft", back_populates="engines")
+    engine_type: Mapped[Optional["EngineType"]] = relationship("EngineType", lazy="selectin")
 
     __table_args__ = (
         CheckConstraint(f"position BETWEEN 1 AND {MAX_ENGINES}", name="ck_aircraft_engine_position"),

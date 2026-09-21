@@ -23,7 +23,7 @@ from sqlalchemy.exc import IntegrityError
 
 from Database import ApiToken
 from Database.RefModels import Airline, Party, PartyContact
-from Database.FleetModels import Aircraft, AircraftType, AircraftEngine
+from Database.FleetModels import Aircraft, AircraftType, AircraftEngine, EngineType
 from Database.LeasingModels import Agreement, AircraftLease
 from Database.PolicyModels import Policy, Coverage
 
@@ -85,15 +85,15 @@ class AmbiguousType(ValueError):
     message the router returns as a 400, listing the manufacturers so the caller can pick."""
 
 
-async def get_or_create_aircraft_type(session, master_series: Optional[str],
-                                      manufacturer: Optional[str] = None) -> Optional[AircraftType]:
-    """Find the type, or create it. The KEY IS THE PAIR (see the model): 48 series in Cirium are
-    built by more than one manufacturer, so a series alone does not always identify a type.
+async def _get_or_create_type(session, model, master_series: Optional[str],
+                              manufacturer: Optional[str], label: str):
+    """Find a type row, or create it. Shared by airframes and engines, which are keyed identically:
+    the PAIR of manufacturer and master series (see the models).
 
       * manufacturer given -> match the pair exactly, create it if absent;
       * manufacturer omitted -> match by series alone, but only when ONE row matches. Several and
         it raises `AmbiguousType` rather than picking one, because picking one would silently
-        attach an aircraft to the wrong builder.
+        attach the aircraft to the wrong builder.
     """
     if not master_series or not master_series.strip():
         return None
@@ -101,32 +101,41 @@ async def get_or_create_aircraft_type(session, master_series: Optional[str],
 
     if manufacturer and manufacturer.strip():
         row = (await session.execute(
-            select(AircraftType).where(
-                AircraftType.manufacturer_normalized == norm(manufacturer),
-                AircraftType.master_series_normalized == series_key)
+            select(model).where(model.manufacturer_normalized == norm(manufacturer),
+                                model.master_series_normalized == series_key)
         )).scalar_one_or_none()
         if row is None:
-            row = AircraftType(master_series=master_series.strip(),
-                               manufacturer=manufacturer.strip())
+            row = model(master_series=master_series.strip(), manufacturer=manufacturer.strip())
             session.add(row)
             await session.flush()
         return row
 
     matches = (await session.execute(
-        select(AircraftType).where(AircraftType.master_series_normalized == series_key)
-        .order_by(AircraftType.id)
+        select(model).where(model.master_series_normalized == series_key).order_by(model.id)
     )).scalars().all()
     if len(matches) == 1:
         return matches[0]
     if len(matches) > 1:
         builders = ", ".join(sorted(m.manufacturer or "(no manufacturer)" for m in matches))
         raise AmbiguousType(
-            f"'{master_series.strip()}' is built by several manufacturers ({builders}). "
+            f"{label} '{master_series.strip()}' is built by several manufacturers ({builders}). "
             f"Send `manufacturer` as well to say which.")
-    row = AircraftType(master_series=master_series.strip())
+    row = model(master_series=master_series.strip())
     session.add(row)
     await session.flush()
     return row
+
+
+async def get_or_create_aircraft_type(session, master_series: Optional[str],
+                                      manufacturer: Optional[str] = None) -> Optional[AircraftType]:
+    return await _get_or_create_type(session, AircraftType, master_series, manufacturer,
+                                     "Aircraft type")
+
+
+async def get_or_create_engine_type(session, master_series: Optional[str],
+                                    manufacturer: Optional[str] = None) -> Optional[EngineType]:
+    return await _get_or_create_type(session, EngineType, master_series, manufacturer,
+                                     "Engine type")
 
 
 async def find_aircraft(session, *, registration: Optional[str] = None,
@@ -237,7 +246,9 @@ _CONSTRAINT_MESSAGES = {
     "uq_party_name_normalized":
         "A counterparty with that name already exists (names are compared trimmed and upper-cased).",
     "uq_aircraft_type_manufacturer_series":
-        "That manufacturer and master series already exist as a type.",
+        "That manufacturer and master series already exist as an aircraft type.",
+    "uq_engine_type_manufacturer_series":
+        "That manufacturer and master series already exist as an engine type.",
     "uq_aircraft_msn":
         "That MSN already belongs to a different aircraft.",
     "uq_aircraft_engine_installation":
@@ -345,15 +356,23 @@ def airline_json(a: Optional[Airline]) -> Optional[dict]:
 
 
 def aircraft_type_json(t: Optional[AircraftType]) -> Optional[dict]:
+    return type_json(t)
+
+
+def type_json(t) -> Optional[dict]:
+    """An aircraft type or an engine type — they are the same shape."""
     if t is None:
         return None
-    return {"id": t.id, "manufacturer": t.manufacturer, "master_series": t.master_series,
-            "template_url": t.template_url}
+    out = {"id": t.id, "manufacturer": t.manufacturer, "master_series": t.master_series}
+    if hasattr(t, "template_url"):
+        out["template_url"] = t.template_url
+    return out
 
 
 def engine_json(e: AircraftEngine, *, fitted: bool = False) -> dict:
-    return {"id": e.id, "position": e.position, "master_series": e.master_series, "msn": e.msn,
-            "installed_on": iso(e.installed_on), "details": e.details, "fitted": fitted}
+    return {"id": e.id, "position": e.position, "engine_type": type_json(e.engine_type),
+            "msn": e.msn, "installed_on": iso(e.installed_on), "details": e.details,
+            "fitted": fitted}
 
 
 def fitted_engine_ids(engines: Iterable[AircraftEngine]) -> set:
@@ -501,6 +520,7 @@ FK_LABELS = {
     "airline_id": ("airline", "airline"),
     "aircraft_id": ("aircraft", "aircraft"),
     "aircraft_type_id": ("aircraft_type", "aircraft_type"),
+    "engine_type_id": ("engine_type", "engine_type"),
     "party_id": ("party", "party"),
     "lessor_id": ("party", "lessor"),
     "insured_id": ("party", "insured"),
@@ -546,11 +566,17 @@ async def resolve_fk_labels(session, rows: Iterable[Optional[dict]]) -> dict:
         )).all():
             labels[("aircraft", aid)] = f"{reg} (MSN {msn})" if msn else reg
     if wanted.get("aircraft_type"):
-        for tid, series in (await session.execute(
-            select(AircraftType.id, AircraftType.master_series)
+        for tid, manuf, series in (await session.execute(
+            select(AircraftType.id, AircraftType.manufacturer, AircraftType.master_series)
             .where(AircraftType.id.in_(wanted["aircraft_type"]))
         )).all():
-            labels[("aircraft_type", tid)] = series
+            labels[("aircraft_type", tid)] = f"{manuf} {series}" if manuf else series
+    if wanted.get("engine_type"):
+        for eid, manuf, series in (await session.execute(
+            select(EngineType.id, EngineType.manufacturer, EngineType.master_series)
+            .where(EngineType.id.in_(wanted["engine_type"]))
+        )).all():
+            labels[("engine_type", eid)] = f"{manuf} {series}" if manuf else series
     if wanted.get("agreement"):
         for gid, name, start in (await session.execute(
             select(Agreement.id, Agreement.name, Agreement.start_date)
