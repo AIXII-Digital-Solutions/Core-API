@@ -123,10 +123,21 @@ are not are the whole point.
 | Hull Deductible Buy Down | `hull_deductible_buy_down` |
 | Hull Deductible Aggregate | `hull_deductible_aggregate` |
 
-**5. Service fields** — `agreed_value_fixed`, `source` and the lease currency sit on the lease
-(`leasing.aircraft_lease` / `leasing.agreement`); the policy currency on `policy.policy`. Both
-currencies are `CHAR(3)` with a CHECK of `USD` / `EUR` / `GBP`, not an enum: adding a currency is
-then one migration that touches no type shared by two schemas.
+**5. Service fields** — the block that says how a record came to be rather than what it agrees.
+`agreed_value_fixed`, `source`, `status` and `usage_status` sit on `leasing.aircraft_lease`, the
+lease currency on `leasing.agreement`, the policy currency on `policy.policy`.
+
+| spec | column |
+|---|---|
+| Agreed Value Fixed | `aircraft_lease.agreed_value_fixed` |
+| Source | `aircraft_lease.source` — manual / lease_agreement / cirium |
+| Status | `aircraft_lease.status` — `insured` / `not_insured`, **default `insured`** |
+| Usage Status | `aircraft_lease.usage_status` — Cirium's `Status`, verbatim |
+| Lease Agreement Currency | `agreement.currency` |
+| Policy Currency | `policy.currency` |
+
+Both currencies are `CHAR(3)` with a CHECK of `USD` / `EUR` / `GBP`, not an enum: adding a currency
+is then one migration that touches no type shared by two schemas.
 
 **6. Aircraft type → `fleet.aircraft_type`** — `manufacturer`, `master_series`, `template_url`.
 The two names are unique TOGETHER (normalised), not the series alone — see below.
@@ -138,6 +149,23 @@ The two names are unique TOGETHER (normalised), not the series alone — see bel
 `details`, and one contact row per block.
 
 ## Decisions worth not re-litigating
+
+**`status = not_insured` is an answer, not a gap.** It states that somebody decided this aircraft
+carries no cover over this record's period, which is a different fact from an aircraft nobody has
+entered a policy for yet. `GET /policy/coverage/compare` reads it: a declared gap counts as matched
+and carries its reason, so the report shows only the cases that are actually unexplained. The
+default is `insured`, so saying nothing means the ordinary case.
+
+**`usage_status` is Cirium's word, stored verbatim — and it is TEXT, not an enum.** Cirium uses
+twelve values today (`In Service`, `Storage`, `On order`, `Retired`, `Written off`, `Cancelled`,
+`Type swap`, `LOI to Order`, `LOI to Option`, `On option`, `Reengineered`, `Unknown`) and owns that
+vocabulary; `Type swap` and `Reengineered` are not a set anyone would have predicted. An enum would
+turn each new value into a migration that blocks an import.
+
+Note what it means to keep it on the lease record: it is a SNAPSHOT as of that record, because
+refreshing it would mean PATCHing a lease, and a lease PATCH is an audited contract change. If the
+business wants it to follow Cirium continuously, it belongs on `fleet.aircraft` with a sync job
+owning it — one column move, no redesign.
 
 **MSN is the identity, not the registration.** A tail number changes on re-registration and can be
 reissued to a different airframe; the manufacturer serial cannot. Hence `UNIQUE (msn) WHERE msn IS
@@ -326,6 +354,12 @@ message naming the actual rule. Note where the constraint name lives: SQLAlchemy
 re-raises the driver error as its own `IntegrityError` carrying only `sqlstate`; the real asyncpg
 exception, the one with `constraint_name`, hangs off it as `__cause__`.
 
+**A serializer that reads `updated_at` needs the row refreshed after an UPDATE.** The column's
+`onupdate` is a SQL expression, so SQLAlchemy expires the attribute once the flush has run; reading
+it lazily issues IO, and outside the greenlet the async session runs in that raises
+`MissingGreenlet` — turning a working PATCH into a 500. `lease_json` and `policy_json` are the two
+that expose timestamps, and their handlers refresh `updated_at` explicitly.
+
 **Every write sets the actor.** `set_actor(session, token)` issues
 `set_config('app.actor', …, true)` inside the transaction, which is what
 `audit.change_log.changed_by` records. A write path that forgets it logs the database login,
@@ -346,7 +380,8 @@ That is what makes an aircraft's insurance readable years later.
 `GET /policy/coverage/compare` is the report the two-sided schema exists for: the three limits the
 lease stipulates beside the same three on the policy in force, per aircraft, with
 `mismatches_only=true` to see just the disagreements — including an aircraft that has a lease and no
-policy, or the reverse.
+policy, or the reverse. A lease whose `status` is `not_insured` counts as answered rather than as a
+missing policy, and the row carries `status` and `usage_status` so the reason is visible.
 
 `GET /fleet/aircraft/{id}?on_date=2025-06-30` reads the lease terms and the policy that were in
 force on that day, with the full history beside them.

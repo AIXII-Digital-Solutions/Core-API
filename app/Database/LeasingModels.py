@@ -36,6 +36,15 @@ from .RefModels import Party, currency_check
 from .FleetModels import Aircraft
 
 
+class InsuranceStatus(PyEnum):
+    """Whether the aircraft is covered over the record's period. `not_insured` states a KNOWN gap —
+    somebody decided this aircraft carries no cover for this period — which is a different fact
+    from an aircraft nobody has entered a policy for yet, and the comparison report reads it as
+    such."""
+    INSURED = "insured"
+    NOT_INSURED = "not_insured"
+
+
 class LeaseSource(PyEnum):
     """Where the terms on a lease row came from. `values_callable` on the Enum below stores the
     VALUE ('lease_agreement'), not the member name."""
@@ -46,6 +55,10 @@ class LeaseSource(PyEnum):
 
 _SOURCE_ENUM = Enum(
     LeaseSource, name="lease_source", schema="leasing",
+    values_callable=lambda e: [m.value for m in e],
+)
+_STATUS_ENUM = Enum(
+    InsuranceStatus, name="insurance_status", schema="leasing",
     values_callable=lambda e: [m.value for m in e],
 )
 
@@ -116,6 +129,10 @@ class AircraftLease(Base):
     off entirely: the agreed value stays at the preliminary figure for the whole term.
 
     The three limit columns mirror `policy.policy` exactly (see this module's docstring).
+
+    `status` is the one field here that is about insurance rather than the lease: `not_insured`
+    records a known gap in cover, and `/policy/coverage/compare` reads it so that a deliberate gap
+    is not reported as a missing policy.
     """
     __tablename__ = "aircraft_lease"
 
@@ -139,9 +156,19 @@ class AircraftLease(Base):
     hull_spares_war_excess_liability: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True, default=None)
     hull_deductible_buy_down: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True, default=None)
 
+    # --- the service block: how this record came to be, rather than what it agrees
     source: Mapped[LeaseSource] = mapped_column(
         _SOURCE_ENUM, nullable=False, server_default=text("'manual'"),
     )
+    status: Mapped[InsuranceStatus] = mapped_column(
+        _STATUS_ENUM, nullable=False, server_default=text("'insured'"), index=True,
+    )
+    # The airframe's operational status AS CIRIUM STATES IT — 'In Service', 'Storage', 'Retired',
+    # 'Written off', 'Type swap', 'Reengineered' ... Text and not an enum on purpose: Cirium owns
+    # that vocabulary and adds to it, and an enum would turn each new value into a migration that
+    # blocks an import. A snapshot as of this record; if it must track Cirium continuously it
+    # belongs on fleet.aircraft with a sync job owning it.
+    usage_status: Mapped[Optional[str]] = mapped_column(String, nullable=True, default=None)
 
     agreement: Mapped["Agreement"] = relationship(
         "Agreement", back_populates="aircraft_leases", lazy="selectin",

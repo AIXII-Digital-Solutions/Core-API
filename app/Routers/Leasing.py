@@ -10,6 +10,12 @@ terms in force on a day are the newest row not later than it. So `GET /leasing/l
 the terms in force TODAY (`current_only=true`) and `current_only=false` shows the whole sequence.
 PATCH is for correcting a row that was written wrongly — not for a renegotiation, which is a POST.
 
+THE SERVICE BLOCK — `source`, `agreed_value_fixed`, `status`, `usage_status` — says how a record
+came to be rather than what it agrees. `status` is `insured` unless somebody states otherwise;
+`not_insured` records a KNOWN gap in cover, which `/policy/coverage/compare` reads as deliberate
+instead of reporting it as a missing policy. `usage_status` is the airframe's operational status as
+Cirium states it, stored verbatim.
+
 AGREED VALUE. `agreed_value_final` is what the schedule STATES. `agreed_value_calculated` is the
 same figure derived from `agreed_value_preliminary`, `depreciation_ratio` and
 `depreciation_start_date` — compounding on whole years — as of `on_date`. Both are returned and
@@ -30,7 +36,7 @@ from settings import Router
 from Database import ApiToken
 from Database.RefModels import Party
 from Database.FleetModels import Aircraft
-from Database.LeasingModels import Agreement, AircraftLease, LeaseSource
+from Database.LeasingModels import Agreement, AircraftLease, LeaseSource, InsuranceStatus
 from api_auth import authorize, SCOPE_INSURANCE_READ, SCOPE_INSURANCE_WRITE
 from Utils import success_response, warning_response, error_response
 from Utils.ResponsesFunc import build_responses
@@ -57,6 +63,8 @@ _LEASE_SORTS = {
     "combined_single_limit": AircraftLease.combined_single_limit,
     "hull_deductible_buy_down": AircraftLease.hull_deductible_buy_down,
     "source": AircraftLease.source,
+    "status": AircraftLease.status,
+    "usage_status": AircraftLease.usage_status,
     "created_at": AircraftLease.created_at,
     "updated_at": AircraftLease.updated_at,
 }
@@ -118,6 +126,14 @@ class LeaseIn(BaseModel):
     hull_spares_war_excess_liability: Optional[Decimal] = Field(default=None, ge=0)
     hull_deductible_buy_down: Optional[Decimal] = Field(default=None, ge=0)
     source: LeaseSource = LeaseSource.MANUAL
+    status: InsuranceStatus = Field(
+        default=InsuranceStatus.INSURED,
+        description="`not_insured` records a KNOWN gap in cover, and the comparison report reads "
+                    "it as deliberate rather than as a missing policy.")
+    usage_status: Optional[str] = Field(
+        default=None, max_length=64,
+        description="The airframe's operational status as Cirium states it — 'In Service', "
+                    "'Storage', 'Retired', 'Written off' ... Stored verbatim.")
 
     @model_validator(mode="after")
     def _check(self):
@@ -139,6 +155,8 @@ class LeasePatch(BaseModel):
     hull_spares_war_excess_liability: Optional[Decimal] = Field(default=None, ge=0)
     hull_deductible_buy_down: Optional[Decimal] = Field(default=None, ge=0)
     source: Optional[LeaseSource] = None
+    status: Optional[InsuranceStatus] = None
+    usage_status: Optional[str] = Field(default=None, max_length=64)
 
 
 # ==============================================================================================
@@ -326,6 +344,8 @@ async def delete_agreement(request: Request, response: Response, agreement_id: i
 async def list_leases(
     request: Request, response: Response,
     aircraft_id: Optional[int] = Query(None), agreement_id: Optional[int] = Query(None),
+    status: Optional[InsuranceStatus] = Query(
+        None, description="insured | not_insured — filters the records, not the aircraft."),
     on_date: Optional[date] = Query(None, description="Which day the terms are read for."),
     current_only: bool = Query(True, description="One row per aircraft, in force on on_date."),
     limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0),
@@ -338,6 +358,8 @@ async def list_leases(
             conds.append(AircraftLease.aircraft_id == aircraft_id)
         if agreement_id is not None:
             conds.append(AircraftLease.agreement_id == agreement_id)
+        if status is not None:
+            conds.append(AircraftLease.status == status)
         if current_only:
             conds.append(AircraftLease.effective_date <= on)
 
@@ -429,7 +451,7 @@ async def create_lease(request: Request, response: Response, body: LeaseIn,
                 combined_single_limit=body.combined_single_limit,
                 hull_spares_war_excess_liability=body.hull_spares_war_excess_liability,
                 hull_deductible_buy_down=body.hull_deductible_buy_down,
-                source=body.source,
+                source=body.source, status=body.status, usage_status=body.usage_status,
             )
             session.add(row)
             await session.flush()
@@ -491,6 +513,10 @@ async def update_lease(request: Request, response: Response, lease_id: int, body
             for key, value in fields.items():
                 setattr(row, key, value)
             await session.flush()
+            # `updated_at` is computed by the database on UPDATE, so SQLAlchemy expires it
+            # after the flush. Read it here, inside the session, or serializing the row
+            # later triggers lazy IO outside the greenlet context and the request 500s.
+            await session.refresh(row, ["updated_at"])
             aircraft = await session.get(Aircraft, row.aircraft_id)
             data = lease_json(row, aircraft=aircraft)
         return success_response(request=request, response=response, data=data)

@@ -321,6 +321,11 @@ def integrity_error(ex: IntegrityError) -> tuple[int, str]:
 # ==============================================================================================
 # serialization
 # ==============================================================================================
+# A SERIALIZER THAT READS `updated_at` NEEDS THE ROW REFRESHED AFTER AN UPDATE. The column's
+# onupdate is a SQL expression, so SQLAlchemy expires the attribute once the flush has run and
+# reading it lazily issues IO — which, outside the greenlet the async session runs in, raises
+# MissingGreenlet and turns a working PATCH into a 500. `lease_json` and `policy_json` are the two
+# that expose timestamps; their handlers call `session.refresh(row, [..., "updated_at"])`.
 
 def num(v: Optional[Decimal]) -> Optional[float]:
     return None if v is None else float(v)
@@ -443,6 +448,8 @@ def lease_json(l: Optional[AircraftLease], *, on: Optional[date] = None,
         "hull_deductible_buy_down": num(l.hull_deductible_buy_down),
         "currency": l.agreement.currency if l.agreement else None,
         "source": enum_value(l.source),
+        "status": enum_value(l.status),
+        "usage_status": l.usage_status,
         "created_at": iso(l.created_at),
         "updated_at": iso(l.updated_at),
     }

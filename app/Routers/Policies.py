@@ -29,14 +29,14 @@ from settings import Router
 from Database import ApiToken
 from Database.RefModels import Party
 from Database.FleetModels import Aircraft
-from Database.LeasingModels import AircraftLease
+from Database.LeasingModels import AircraftLease, InsuranceStatus
 from Database.PolicyModels import Policy, Coverage
 from api_auth import authorize, SCOPE_INSURANCE_READ, SCOPE_INSURANCE_WRITE
 from Utils import success_response, warning_response, error_response
 from Utils.ResponsesFunc import build_responses
 from Utils.DomainCommon import (
     DB, set_actor, apply_sort, SortError, integrity_error, find_aircraft, get_or_create_party,
-    policy_json, coverage_json, aircraft_json, lease_in_force, num,
+    policy_json, coverage_json, aircraft_json, lease_in_force, num, enum_value,
 )
 
 logger = setup_logger("policy_api")
@@ -313,7 +313,10 @@ async def update_policy(request: Request, response: Response, policy_id: int, bo
             for key, value in fields.items():
                 setattr(row, key, value)
             await session.flush()
-            await session.refresh(row, ["insured", "reinsured", "retrocedent"])
+            # `updated_at` is computed by the database on UPDATE, so SQLAlchemy expires it after
+            # the flush. Read it here, inside the session, or serializing the row later triggers
+            # lazy IO outside the greenlet context and the request 500s.
+            await session.refresh(row, ["insured", "reinsured", "retrocedent", "updated_at"])
             data = policy_json(row)
         return success_response(request=request, response=response, data=data)
     except IntegrityError as _ex:
@@ -525,13 +528,21 @@ async def compare_cover(request: Request, response: Response,
                     ok = required == provided
                     agree = agree and ok
                     fields[column] = {"required": required, "provided": provided, "match": ok}
+                # A lease that STATES the aircraft is uncovered is not a missing policy. It is an
+                # answer, so it counts as a match and carries the reason instead of a red flag.
+                declared_uncovered = (
+                    lease is not None
+                    and enum_value(lease.status) == InsuranceStatus.NOT_INSURED.value)
                 row = {
                     "aircraft": aircraft_json(a, engines=False),
                     "has_lease": lease is not None,
                     "has_policy": policy is not None,
                     "policy_id": policy.id if policy else None,
                     "lease_id": lease.id if lease else None,
-                    "match": agree and lease is not None and policy is not None,
+                    "status": enum_value(lease.status) if lease else None,
+                    "usage_status": lease.usage_status if lease else None,
+                    "match": declared_uncovered or (
+                        agree and lease is not None and policy is not None),
                     "fields": fields,
                 }
                 if not mismatches_only or not row["match"]:
