@@ -24,5 +24,10 @@ Documentation for the three-service platform (core-api + external-worker + file-
   work, and the API over all of it (`/ref/*`, `/fleet/*`, `/leasing/*`, `/policy/*`, `/history/*`,
   scopes `insurance:read` / `insurance:write`). Replaced the single `insurance` schema, which was
   dropped empty together with its claims tables.
+- **[insured-fleet-portal-brief.md](insured-fleet-portal-brief.md)** — the integration brief for
+  whoever builds the portal screens over that domain: auth and scopes, the response envelope and
+  status codes, every endpoint with its real payloads, the workflows (add an aircraft, record an
+  engine swap, renew a policy, read the history) and the seven rules that are easy to get wrong.
+  Written to be read once, front to back, before the first request.
 
 For agent/Claude-Code guidance see `../CLAUDE.md`. The schema source of truth is `../db-contract/`.

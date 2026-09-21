@@ -320,6 +320,10 @@ schema_name | table_name | row_id | operation | changed_at | changed_by | old_ro
 
 ## API
 
+> Building a client? Read **[insured-fleet-portal-brief.md](insured-fleet-portal-brief.md)**
+> instead — the same API written as an integration contract, with real payloads and the rules that
+> are easy to get wrong. What follows is the summary for somebody working on the service itself.
+
 All endpoints are under `/api/v1`. Reads need `insurance:read`, writes `insurance:write`; the master
 `X-Service-Token` satisfies both.
 
