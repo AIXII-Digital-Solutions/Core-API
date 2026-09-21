@@ -1,29 +1,17 @@
 """API-owned reference data — schema `api` in the aixii database.
 
-Two tables only, and they are NOT the insurance domain: that lives in its own `insurance` schema
-(db-contract/Database/InsuranceModels.py) since revision `insurance_schema_move`.
+ONE table now. `api.airlines` left for `ref.airline` in revision `airlines_to_ref`, once the
+insured-aircraft domain was rebuilt around the airline; what stays here is the tracking list,
+which is a different job entirely.
 
-  api.airlines      the airlines the platform's own domains name. Stays here because it is not an
-                    insurance table: the cirium asg sync resolves against it, api.registration
-                    points at it, and grp_aviation_write reads it during matview refreshes. The
-                    insurance tables link to it across schemas.
-  api.registration  a projection of cirium.asg, rebuilt wholesale after every asg refresh.
+  api.registration  the hand-kept registrations to poll FlightRadar for.
 """
 import inspect
 import sys
 
-from sqlalchemy import String, BigInteger, ForeignKey, Boolean, text
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy import String, Text
+from sqlalchemy.orm import Mapped, mapped_column
 from .config import ApiBase as Base
-
-
-class Airlines(Base):
-    airline_name: Mapped[str] = mapped_column(String, index=True)
-    icao: Mapped[str] = mapped_column(String, index=True, nullable=True, default=None)
-    iata: Mapped[str] = mapped_column(String, index=True, nullable=True, default=None)
-    # Which fleet the airline belongs to, and therefore which matview picks its aircraft up:
-    # TRUE -> cirium.asg_*, FALSE -> cirium.non_asg_insured_* (insured, not ASG).
-    is_asg: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
 
 
 # HAND-KEPT list of registrations to track: insured aircraft whose operator is not in api.airlines
@@ -39,7 +27,16 @@ class Registration(Base):
     msn: Mapped[str] = mapped_column(String, index=True, nullable=True, default=None)  # Serial Number
     # Whose aircraft this is. A hand-listed tail is here BECAUSE no api.airlines name matched it, so
     # the matview has no airline to offer and powerbi.last_seen_fleet falls back to this.
-    airline: Mapped[str] = mapped_column(String, nullable=True, default=None)
+    airline: Mapped[str] = mapped_column(
+        Text, nullable=True, default=None,
+        comment="Whose aircraft this is, for a tail no api.airlines name matches. "
+                "powerbi.last_seen_fleet shows it as Airline Name when the matview has none.",
+    )
+
+    __table_args__ = (
+        {"comment": "Hand-typed registrations of insured aircraft to track. Feeds "
+                    "cirium.non_asg_insured_* \u2014 nothing rebuilds this table any more."},
+    )
 
 
 _current_module = sys.modules[__name__]

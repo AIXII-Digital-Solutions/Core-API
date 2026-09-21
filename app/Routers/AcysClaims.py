@@ -4,9 +4,9 @@ One row is "this airline had N claims worth X in this calendar year under this s
 which Y is still outstanding". It is loaded as stated (a broker's claims-experience summary), NOT
 derived from individual loss events.
 
-NOT to be confused with /insurance/claims (insurance.insurance_claims), which registers ONE loss against a
-specific aircraft and policy, with a full change history. This router is the summary table that feeds
-reporting; that one is the operational record.
+NOT a per-aircraft loss record. The `insurance` schema that held those was dropped whole in
+revision `insured_fleet_rebuild`, and this router never depended on it: `/forecast/claims` serves a
+reporting input for the forecast model, nothing operational.
 
 The grain is
     airline x calendar_year x currency x policy_type

@@ -32,7 +32,7 @@ as the `postgres` superuser.
 |---|---|---|
 | `grp_aixii_read` | `USAGE` + `SELECT` | **all** `aixii` schemas (sources + `api` + any read-exposed schema like `forecast`) |
 | `grp_aviation_write` | `USAGE` + DML (`SELECT/INSERT/UPDATE/DELETE`) + sequence usage | the source schemas: `flightradar`, `aviationedge`, `cirium`, `airlabs`, `icao` |
-| `grp_api_write` | `USAGE` + DML + sequence usage | `api` and `insurance`, plus the single table `forecast.acys_claims` (see note below) |
+| `grp_api_write` | `USAGE` + DML + sequence usage | `api`, `ref`, `fleet`, `leasing`, `policy`, plus the single table `forecast.acys_claims` (see note below). SELECT only on `audit` — that schema is written by a SECURITY DEFINER trigger |
 | `grp_service_write` | `USAGE` + DML + sequence usage | `public` schema of the **`service`** DB |
 
 ### Login users (what actually connects) + their group membership
@@ -42,7 +42,7 @@ as the `postgres` superuser.
 | `bi_reader` | PowerBI / BI read-only | `grp_aixii_read` | SELECT on all read-exposed `aixii` schemas. **No** CONNECT to `service`. |
 | `svc_external_worker` | external-worker service | `grp_aviation_write`, `grp_service_write` | DML on sources + `service`; SELECT on `api` (granted directly, see setup script). |
 | `svc_file_worker` | file-processor service | `grp_aviation_write`, `grp_service_write` | DML on sources + `service`. |
-| `svc_api` | Core-API runtime | `grp_aixii_read`, `grp_api_write`, `grp_service_write` | SELECT everywhere in `aixii` + DML on `api` and `insurance` + DML on `service` + DML on `forecast.acys_claims`. |
+| `svc_api` | Core-API runtime | `grp_aixii_read`, `grp_api_write`, `grp_service_write` | SELECT everywhere in `aixii` + DML on `api` and the insured-aircraft schemas (`ref`/`fleet`/`leasing`/`policy`) + DML on `service` + DML on `forecast.acys_claims`. `audit.change_log` is readable but not writable by it. |
 | `developer` | owner / migrator (SUPERUSER) | — (owns everything) | Everything. Alembic runs as this role. |
 
 > **The one exception to "`grp_api_write` = schema `api`":** `forecast.acys_claims` is written by
@@ -316,3 +316,38 @@ SELECT has_table_privilege('bi_reader', 'forecast.final_1', 'SELECT');   -- expe
 
 If a later migration adds a **matview** in `forecast`, re-run the middle line (§6):
 `GRANT SELECT ON ALL TABLES IN SCHEMA forecast TO grp_aixii_read;`
+
+## `powerbi` — the report schema, and the trap it sprang
+
+`bi_reader` reads the PowerBI objects through `grp_aixii_read`, like every other read in this
+database. Adding somebody to that group is the whole of "give this person BI access"; nothing is
+granted to a user directly.
+
+**The trap, fixed by revision `powerbi_read_grants` (2026-09-21).** A grant lives on the OBJECT, so
+`DROP VIEW` + `CREATE VIEW` — which is how every report view is revised — brings the view back with
+no ACL. Every other schema in this database has an entry in `pg_default_acl`, so a rebuilt object
+is readable again the moment it exists. `powerbi` was the one schema that did not, and
+`powerbi.last_seen_fleet` had been rebuilt five times and was, as a result, the single object in
+the database `bi_reader` could not read. Its neighbours kept their grants only because nothing had
+dropped them since.
+
+So the schema now carries default privileges:
+
+```sql
+GRANT USAGE ON SCHEMA powerbi TO grp_aixii_read, grp_aviation_write;
+GRANT SELECT ON ALL TABLES IN SCHEMA powerbi TO grp_aixii_read, grp_aviation_write;
+ALTER DEFAULT PRIVILEGES IN SCHEMA powerbi
+    GRANT SELECT ON TABLES TO grp_aixii_read, grp_aviation_write;
+```
+
+**A view needs nothing granted on what it reads.** PostgreSQL checks the underlying tables against
+the VIEW OWNER, not the caller, so `bi_reader` holding SELECT on `powerbi.last_seen_fleet` is enough
+— it needs no rights on `cirium`, `flightradar` or `ref`. Check the real thing rather than the
+catalogue: `has_table_privilege` answers a different question than a query does.
+
+```sql
+BEGIN;
+SET LOCAL ROLE bi_reader;
+SELECT count(*) FROM powerbi.last_seen_fleet;   -- 125
+ROLLBACK;
+```
