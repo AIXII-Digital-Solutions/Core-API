@@ -14,6 +14,10 @@ from .Forecast import router as forecast
 from .Registrations import router as registrations
 from .Capacity import router as capacity
 
-# The insured-aircraft routers were removed with the `insurance` schema
-# (revision `insured_fleet_rebuild`). The new ref/fleet/leasing/policy API is
-# the next step; nothing serves that domain until it lands.
+# The insured-fleet domain. Ref first so its /ref/* literals are registered before anything else
+# that might grow a wildcard in the same space; the rest are independent prefixes.
+from .Ref import router as ref
+from .Fleet import router as fleet
+from .Leasing import router as leasing
+from .Policies import router as policy
+from .History import router as history

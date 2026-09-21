@@ -21,7 +21,8 @@ Documentation for the three-service platform (core-api + external-worker + file-
   `leasing` / `policy` schemas plus the `audit` change log: which column holds which field of
   the source specification, why leasing and policy each carry the same three limits (required
   vs provided cover), how a yearly policy renewal is modelled, and how the two kinds of history
-  work. Replaced the single `insurance` schema, which was dropped empty together with its
-  claims tables and routers — **no API serves this domain yet.**
+  work, and the API over all of it (`/ref/*`, `/fleet/*`, `/leasing/*`, `/policy/*`, `/history/*`,
+  scopes `insurance:read` / `insurance:write`). Replaced the single `insurance` schema, which was
+  dropped empty together with its claims tables.
 
 For agent/Claude-Code guidance see `../CLAUDE.md`. The schema source of truth is `../db-contract/`.

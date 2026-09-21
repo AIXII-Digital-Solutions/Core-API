@@ -1,9 +1,11 @@
 # The insured aircraft — schemas, columns and why they are where they are
 
 Owner: core-api. Schemas: **`ref`**, **`fleet`**, **`leasing`**, **`policy`**, **`audit`** (all in the
-`aixii` database). Migration: `insured_fleet_rebuild`. Models: `db-contract/Database/RefModels.py`,
-`FleetModels.py`, `LeasingModels.py`, `PolicyModels.py`, `AuditModels.py` (runtime copies under
-`app/Database/`).
+`aixii` database). Migrations: `insured_fleet_rebuild`, `airlines_to_ref`. Models:
+`db-contract/Database/RefModels.py`, `FleetModels.py`, `LeasingModels.py`, `PolicyModels.py`,
+`AuditModels.py` (runtime copies under `app/Database/`). Routers: `app/Routers/Ref.py`, `Fleet.py`,
+`Leasing.py`, `Policies.py`, `History.py`, with the shared plumbing in `app/Utils/DomainCommon.py`.
+Scopes: `insurance:read`, `insurance:write`.
 
 This replaces the single `insurance` schema, which was **dropped** — with its claims tables, its two
 audit trails, its three enums and the routers that served them. Nothing was migrated because nothing
@@ -12,11 +14,12 @@ was in it: all eleven tables were empty.
 ## The shape
 
 ```
-ref       party                 every counterparty: lessor, insured, reinsured, retrocedent
+ref       airline               the airlines this business insures or tracks
+          party                 every counterparty: lessor, insured, reinsured, retrocedent
           party_contact         one row per COMPANY / CONTACTS / EMAIL block
 
 fleet     aircraft_type         manufacturer, master series, template drawing
-          aircraft              the airframe — registration, MSN, -> type, -> api.airlines
+          aircraft              the airframe — registration, MSN, -> type, -> ref.airline
           aircraft_engine       one row per installation, position 1..4
 
 leasing   agreement             the lease contract — name, start, lessor, currency
@@ -29,9 +32,16 @@ policy    policy                the insurance contract — insured/reinsured/ret
 audit     change_log            one row per INSERT/UPDATE/DELETE on any of the above
 ```
 
-`api.airlines` is **not** part of this domain and stays in `api`: the cirium asg sync resolves
-against it, `api.registration` and the fleet matviews read it. `fleet.aircraft` links to it across
-schemas, which is ordinary in PostgreSQL.
+**The airline moved in.** It was `api.airlines`; revision `airlines_to_ref` made it `ref.airline`
+once the domain had been rebuilt around it. The move was a catalogue update — no data copied, ids
+and the sequence untouched, grants carried along — and the four cirium matviews that resolve
+operator strings against it kept working without being rebuilt, because PostgreSQL records a view's
+dependencies by OID rather than by name. What is left in `api` is `api.registration`, the hand-kept
+list of tails to poll FlightRadar for, which is a different job.
+
+`ref.airline` is deliberately NOT merged into `ref.party`: an airline carries ICAO and IATA codes
+and is matched on them, a counterparty is matched on its name, and the two are distinct in every
+source the platform reads.
 
 ## Why four schemas and not one
 
@@ -62,7 +72,7 @@ are not are the whole point.
 | Registration | `registration` (+ `registration_normalized`, generated) |
 | MSN | `msn` — UNIQUE where not null |
 | Type | `aircraft_type_id` → `fleet.aircraft_type` |
-| Airline | `airline_id` → `api.airlines` |
+| Airline | `airline_id` → `ref.airline` |
 
 **2. Engines → `fleet.aircraft_engine`**
 
@@ -120,8 +130,8 @@ then one migration that touches no type shared by two schemas.
 **6. Aircraft type → `fleet.aircraft_type`** — `manufacturer`, `master_series` (unique, normalised),
 `template_url`.
 
-**7. Airline → `api.airlines`** — `airline_name`, `icao`, `iata` were already there; `logo_url` is
-new.
+**7. Airline → `ref.airline`** — `airline_name`, `icao`, `iata` and `is_asg` came with the table;
+`logo_url` is new.
 
 **8. Reusable entities → `ref.party` + `ref.party_contact`** — `name` (unique, normalised),
 `details`, and one contact row per block.
@@ -190,7 +200,7 @@ the old schema used a fraction for depreciation, the spec and the portal use per
 does too. Negative amounts are rejected by a `LEAST(...) >= 0` check, which ignores NULLs and so lets
 unknown figures through.
 
-**Images are URLs, never bytes.** `fleet.aircraft_type.template_url` and `api.airlines.logo_url`
+**Images are URLs, never bytes.** `fleet.aircraft_type.template_url` and `ref.airline.logo_url`
 point into the platform's image store. A grid reads every row on the page; a blob per row would drag
 megabytes through the connection for nothing.
 
@@ -205,7 +215,7 @@ this aircraft in 2025" is a period query, not an audit query. A change of lease 
 pattern in `leasing.aircraft_lease`.
 
 **Technical history** is `audit.change_log`: one row per INSERT / UPDATE / DELETE on every table in
-`ref`, `fleet`, `leasing`, `policy` and on `api.airlines`, written by one trigger function,
+`ref`, `fleet`, `leasing` and `policy`, written by one trigger function,
 `audit.log_change()`.
 
 ```
@@ -230,10 +240,86 @@ schema_name | table_name | row_id | operation | changed_at | changed_by | old_ro
 
 ## API
 
-**There is none yet.** `Routers/Insurance.py`, `Routers/Claims.py`, `Routers/InsuranceRefs.py` and
-`Utils/InsuranceCommon.py` were deleted with the schema they served — they referenced tables that no
-longer exist, and leaving them would have stopped the service from starting. The scopes
-`insurance:read` / `insurance:write` are still defined in `app/api_auth.py` for the replacement.
+All endpoints are under `/api/v1`. Reads need `insurance:read`, writes `insurance:write`; the master
+`X-Service-Token` satisfies both.
+
+```
+/ref/airlines                     GET (search)  POST  .  /{id} GET PATCH DELETE
+/ref/parties                      GET (search)  POST  .  /{id} GET PATCH DELETE
+/ref/parties/{id}/contacts        POST          .  /ref/contacts/{id} PATCH DELETE
+
+/fleet/types                      GET  POST  .  /{id} PATCH DELETE
+/fleet/aircraft                   GET  POST  .  /{id} GET PATCH DELETE
+/fleet/aircraft/by-registration/{registration}   GET  (separator-insensitive, ?msn= disambiguates)
+/fleet/aircraft/{id}/engines      GET  POST  .  /fleet/engines/{id} PATCH DELETE
+
+/leasing/agreements               GET  POST  .  /{id} GET PATCH DELETE
+/leasing/leases                   GET  POST  .  /{id} GET PATCH DELETE
+
+/policy/policies                  GET  POST  .  /{id} GET PATCH DELETE
+/policy/policies/{id}/renew       POST
+/policy/coverage                  GET  POST  .  /{id} PATCH DELETE
+/policy/coverage/compare          GET    required vs provided, per aircraft
+
+/history                          GET    the change log, filtered
+/history/aircraft/{id}            GET    one airframe's whole timeline
+```
+
+### Conventions
+
+**Every grid returns `{items, total}`**, never a bare array, and `total` is the whole filtered set
+rather than the page — so a client can page without a second call to learn the size.
+
+**Sorting is whitelist-driven.** `sort=<field>&order=asc|desc`; the field is looked up in a map the
+router declares and an unknown one returns 400 listing what is allowed, so no caller string ever
+reaches ORDER BY. NULLs always sort last in both directions.
+
+**Writes take NAMES, not ids.** `airline`, `aircraft_type`, `lessor`, `insured`, `reinsured`,
+`retrocedent` and the lease agreement are found-or-created on the normalised name, so `AerCap` and
+`AERCAP ` cannot become two rows. Ids are accepted too wherever the caller already has one.
+
+**The schema states the rules; the API translates the verdict.** Nothing re-checks a constraint in
+Python before writing — that would be two sources of truth with a race between them. The write goes
+ahead and `Utils/DomainCommon.integrity_error` turns the violation into the right status and a
+message naming the actual rule. Note where the constraint name lives: SQLAlchemy's asyncpg adapter
+re-raises the driver error as its own `IntegrityError` carrying only `sqlstate`; the real asyncpg
+exception, the one with `constraint_name`, hangs off it as `__cause__`.
+
+**Every write sets the actor.** `set_actor(session, token)` issues
+`set_config('app.actor', …, true)` inside the transaction, which is what
+`audit.change_log.changed_by` records. A write path that forgets it logs the database login,
+`svc_api`, and nothing useful.
+
+### The calls that carry the domain
+
+`POST /fleet/aircraft` looks an airframe up by MSN first and only then by registration, so
+re-posting a re-registered aircraft UPDATES it instead of creating a twin; the response says which
+happened. Recording an engine SWAP is a POST of a new installation at the same position with a later
+date — never a PATCH of the old row, which would rewrite history instead of adding to it.
+
+`POST /policy/policies/{id}/renew` is the yearly path: it creates next year's contract with the same
+terms (`period_from` defaults to the day after the current one ends, `overrides` replaces any copied
+value) and carries the aircraft onto it, leaving the expiring policy and its coverage rows alone.
+That is what makes an aircraft's insurance readable years later.
+
+`GET /policy/coverage/compare` is the report the two-sided schema exists for: the three limits the
+lease stipulates beside the same three on the policy in force, per aircraft, with
+`mismatches_only=true` to see just the disagreements — including an aircraft that has a lease and no
+policy, or the reverse.
+
+`GET /fleet/aircraft/{id}?on_date=2025-06-30` reads the lease terms and the policy that were in
+force on that day, with the full history beside them.
+
+`GET /history/aircraft/{id}` gathers the airframe's own changes and those of its engines, lease
+records and coverage rows into one timeline. Each entry carries a field-level `changes` list with
+foreign keys already resolved to names, plus the raw snapshots for anything the diff skips.
+
+### Agreed value
+
+`agreed_value_final` is what the schedule STATES; `agreed_value_calculated` is the formula applied
+at `on_date`. Both are returned and neither overwrites the other. The formula exists twice — as
+`leasing.agreed_value_at()` for reports and as `Utils/DomainCommon.agreed_value_at` for the API —
+and the two are verified equal over randomised inputs. **Change both or neither.**
 
 ## Claims
 
