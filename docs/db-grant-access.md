@@ -316,3 +316,38 @@ SELECT has_table_privilege('bi_reader', 'forecast.final_1', 'SELECT');   -- expe
 
 If a later migration adds a **matview** in `forecast`, re-run the middle line (§6):
 `GRANT SELECT ON ALL TABLES IN SCHEMA forecast TO grp_aixii_read;`
+
+## `powerbi` — the report schema, and the trap it sprang
+
+`bi_reader` reads the PowerBI objects through `grp_aixii_read`, like every other read in this
+database. Adding somebody to that group is the whole of "give this person BI access"; nothing is
+granted to a user directly.
+
+**The trap, fixed by revision `powerbi_read_grants` (2026-09-21).** A grant lives on the OBJECT, so
+`DROP VIEW` + `CREATE VIEW` — which is how every report view is revised — brings the view back with
+no ACL. Every other schema in this database has an entry in `pg_default_acl`, so a rebuilt object
+is readable again the moment it exists. `powerbi` was the one schema that did not, and
+`powerbi.last_seen_fleet` had been rebuilt five times and was, as a result, the single object in
+the database `bi_reader` could not read. Its neighbours kept their grants only because nothing had
+dropped them since.
+
+So the schema now carries default privileges:
+
+```sql
+GRANT USAGE ON SCHEMA powerbi TO grp_aixii_read, grp_aviation_write;
+GRANT SELECT ON ALL TABLES IN SCHEMA powerbi TO grp_aixii_read, grp_aviation_write;
+ALTER DEFAULT PRIVILEGES IN SCHEMA powerbi
+    GRANT SELECT ON TABLES TO grp_aixii_read, grp_aviation_write;
+```
+
+**A view needs nothing granted on what it reads.** PostgreSQL checks the underlying tables against
+the VIEW OWNER, not the caller, so `bi_reader` holding SELECT on `powerbi.last_seen_fleet` is enough
+— it needs no rights on `cirium`, `flightradar` or `ref`. Check the real thing rather than the
+catalogue: `has_table_privilege` answers a different question than a query does.
+
+```sql
+BEGIN;
+SET LOCAL ROLE bi_reader;
+SELECT count(*) FROM powerbi.last_seen_fleet;   -- 125
+ROLLBACK;
+```
