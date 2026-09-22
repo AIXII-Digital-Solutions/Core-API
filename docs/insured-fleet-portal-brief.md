@@ -399,8 +399,9 @@ An aircraft is damaged in two states and each needs its own outline — gear up 
 and doors open on the stand. Three things follow, and you can rely on all of them:
 
 * **Both keys are always present on a read**, null where there is no drawing. You never branch on
-  `template_url` being null; you check the view you are about to show. 206 of 1355 types have
-  drawings, so `null` is the common case and the card must render without one.
+  `template_url` being null; you check the view you are about to show. 208 of 1355 types have
+  drawings — every aircraft currently on file has one, but most of the catalogue does not, so the
+  card must render without one.
 * **`PATCH` merges per view.** `{"template_url": {"on_the_ground": "https://..."}}` sets the ground
   drawing and leaves the airborne one alone — you do not have to fetch and resend a URL you were
   not changing. This is the only field in the domain that behaves this way.
@@ -597,7 +598,7 @@ The log is **read-only**: there is no endpoint that writes or deletes it, by des
 | `fleet.aircraft` | 149 (134 passenger · 15 cargo) |
 | `fleet.service_info` | 149 |
 | `fleet.aircraft_engine` | 300 |
-| `fleet.aircraft_type` | 1355 (558 passenger · 130 cargo · 667 other); 206 with drawings |
+| `fleet.aircraft_type` | 1355 (558 passenger · 130 cargo · 667 other); 208 with drawings |
 | `fleet.engine_type` | 365 |
 | `ref.party` | 97 |
 | `ref.airline` | 22 |
@@ -620,9 +621,9 @@ and the comparison report's most common row is "no lease, no policy".
   experience per airline and year, feeding the forecast model, not per-aircraft losses.
 * **Image upload.** `logo_url` (airline) is a URL into an image store the platform does not have
   yet — a plain text field the user pastes a link into. `template_url` (aircraft type) is the same
-  idea but a PAIR; see §6.6. 206 of 1355 types carry drawings today, covering 146 of the 149
-  aircraft on file. The two gaps are Dassault Falcon 900 Passenger and Boeing 737-400 Cargo, so
-  **the card must render without a drawing** rather than assuming one.
+  idea but a PAIR; see §6.6. 208 of 1355 types carry drawings, and **every aircraft on file
+  resolves to one** — but most of the catalogue does not, so a card must still render without a
+  drawing rather than assuming one.
 * **Bulk import.** There is no file-upload endpoint for this domain; a schedule is loaded row by
   row through `POST`.
 * **Engine serials from Cirium.** Every engine currently has `msn: null` and `installed_on: null`
