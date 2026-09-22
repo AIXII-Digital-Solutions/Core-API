@@ -28,7 +28,7 @@ from fastapi import Request, Response, Depends, Query, status
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select, func, or_
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import joinedload
 
 from Config import setup_logger
 from settings import Router
@@ -69,7 +69,8 @@ _READ = [Depends(authorize(SCOPE_INSURANCE_READ))]
 _OK = {status.HTTP_200_OK, status.HTTP_400_BAD_REQUEST, status.HTTP_404_NOT_FOUND,
        status.HTTP_409_CONFLICT, status.HTTP_500_INTERNAL_SERVER_ERROR}
 
-_LEASE_LOAD = (selectinload(AircraftLease.agreement).selectinload(Agreement.lessor),)
+# agreement -> lessor is to-one twice over: one JOIN, not two extra round trips
+_LEASE_LOAD = (joinedload(AircraftLease.agreement).joinedload(Agreement.lessor),)
 
 
 # ==============================================================================================
@@ -159,7 +160,7 @@ async def list_agreements(request: Request, response: Response,
             ))
         if lessor_id is not None:
             conds.append(Agreement.lessor_id == lessor_id)
-        stmt = apply_sort(select(Agreement).where(*conds).options(selectinload(Agreement.lessor)),
+        stmt = apply_sort(select(Agreement).where(*conds).options(joinedload(Agreement.lessor)),
                           sort=sort, order=order, sortmap=_AGREEMENT_SORTS,
                           tiebreak=(Agreement.name, Agreement.id))
         async with request.app.state.db_client.read_session(DB) as session:
@@ -215,7 +216,7 @@ async def get_agreement(request: Request, response: Response, agreement_id: int,
         async with request.app.state.db_client.read_session(DB) as session:
             row = (await session.execute(
                 select(Agreement).where(Agreement.id == agreement_id)
-                .options(selectinload(Agreement.lessor))
+                .options(joinedload(Agreement.lessor))
             )).scalar_one_or_none()
             if row is None:
                 return warning_response(request=request, response=response,
@@ -225,7 +226,7 @@ async def get_agreement(request: Request, response: Response, agreement_id: int,
                 select(AircraftLease, Aircraft)
                 .join(Aircraft, Aircraft.id == AircraftLease.aircraft_id)
                 .where(AircraftLease.agreement_id == agreement_id)
-                .options(*_LEASE_LOAD, selectinload(AircraftLease.agreement))
+                .options(*_LEASE_LOAD)
                 .order_by(Aircraft.registration, AircraftLease.effective_date.desc())
             )).all()
             data = agreement_json(row)
@@ -246,7 +247,7 @@ async def update_agreement(request: Request, response: Response, agreement_id: i
             await set_actor(session, token)
             row = (await session.execute(
                 select(Agreement).where(Agreement.id == agreement_id)
-                .options(selectinload(Agreement.lessor))
+                .options(joinedload(Agreement.lessor))
             )).scalar_one_or_none()
             if row is None:
                 return warning_response(request=request, response=response,
@@ -280,7 +281,7 @@ async def delete_agreement(request: Request, response: Response, agreement_id: i
             await set_actor(session, token)
             row = (await session.execute(
                 select(Agreement).where(Agreement.id == agreement_id)
-                .options(selectinload(Agreement.lessor))
+                .options(joinedload(Agreement.lessor))
             )).scalar_one_or_none()
             if row is None:
                 return warning_response(request=request, response=response,

@@ -73,6 +73,16 @@ success or not, so a client can log it without parsing the body.
 Responses also carry `Server-Timing: app;dur=<ms>` — time spent inside the API, so a slow call
 can be attributed to the service or to the network without guessing.
 
+**Read that header before reporting a slow endpoint.** Most of what a browser measures against
+production is not this service: a request crosses the client's link to the proxy and then a proxy
+hop that is ~340 ms on its own, empty. `app;dur` is the part core-api owns. If a card takes 1.2 s
+and `app;dur` says 90, the API is not the thing to fix, and no amount of query tuning will move it.
+
+The card itself costs three database round trips — identity, leases, coverages — and stays at three
+no matter how many leases, coverages, engines or parties the aircraft has. `history=false` makes
+the payload smaller, not the request faster; use it to avoid shipping a decade of coverages into a
+list view, not as a speed switch.
+
 ### Status codes
 
 | code | means | what the UI should do |

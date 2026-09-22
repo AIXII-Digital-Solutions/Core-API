@@ -22,7 +22,7 @@ from fastapi import Request, Response, Depends, Query, status
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select, func
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import joinedload, raiseload
 
 from Config import setup_logger
 from settings import Router
@@ -65,11 +65,12 @@ _READ = [Depends(authorize(SCOPE_INSURANCE_READ))]
 _OK = {status.HTTP_200_OK, status.HTTP_400_BAD_REQUEST, status.HTTP_404_NOT_FOUND,
        status.HTTP_409_CONFLICT, status.HTTP_500_INTERNAL_SERVER_ERROR}
 
-_POLICY_LOAD = (selectinload(Policy.insured), selectinload(Policy.reinsured),
-                selectinload(Policy.retrocedent))
-_COVERAGE_LOAD = (selectinload(Coverage.policy).selectinload(Policy.insured),
-                  selectinload(Coverage.policy).selectinload(Policy.reinsured),
-                  selectinload(Coverage.policy).selectinload(Policy.retrocedent))
+# three to-one parties — three round trips as selectin, none as a join
+_POLICY_LOAD = (joinedload(Policy.insured), joinedload(Policy.reinsured),
+                joinedload(Policy.retrocedent))
+_COVERAGE_LOAD = (joinedload(Coverage.policy).joinedload(Policy.insured),
+                  joinedload(Coverage.policy).joinedload(Policy.reinsured),
+                  joinedload(Coverage.policy).joinedload(Policy.retrocedent))
 
 # The three columns that exist on BOTH the lease and the policy, so required and provided cover can
 # be compared. Kept in one place so /coverage/compare and the docs cannot drift apart.
@@ -494,17 +495,28 @@ async def compare_cover(request: Request, response: Response,
         on = on_date or date.today()
         async with request.app.state.db_client.read_session(DB) as session:
             aircraft = (await session.execute(
-                select(Aircraft).options(selectinload(Aircraft.service))
+                # aircraft_json() reads the type and the airline, and the model default would
+                # fetch each with its own SELECT. Joined, the whole fleet arrives in one.
+                #
+                # The engines are rendered with `engines=False` here, but `lazy="selectin"` does
+                # not care whether the code reads them — it loads them, and their models, for all
+                # 149 airframes anyway. `raiseload` refuses instead, which costs two round trips
+                # less and turns a later `engines=True` into a loud error rather than a silent
+                # pair of extra queries.
+                select(Aircraft).options(joinedload(Aircraft.service),
+                                         joinedload(Aircraft.aircraft_type),
+                                         joinedload(Aircraft.airline),
+                                         raiseload(Aircraft.engines))
                 .order_by(Aircraft.registration, Aircraft.id))).scalars().all()
             leases = (await session.execute(
                 select(AircraftLease).where(AircraftLease.effective_date <= on)
-                .options(selectinload(AircraftLease.agreement))
+                .options(joinedload(AircraftLease.agreement))
             )).scalars().all()
             covers = (await session.execute(
                 select(Coverage).where(
                     Coverage.covered_from <= on,
                     (Coverage.covered_to.is_(None)) | (Coverage.covered_to >= on))
-                .options(selectinload(Coverage.policy))
+                .options(joinedload(Coverage.policy))
             )).scalars().all()
 
             by_aircraft_lease: dict[int, list] = {}
