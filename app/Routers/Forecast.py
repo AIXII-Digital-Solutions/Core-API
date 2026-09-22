@@ -212,6 +212,61 @@ def _snapshot_out(row) -> dict:
     }
 
 
+# ── ONE FORECAST AT A TIME ─────────────────────────────────────────────────────────────────────
+# A run TRUNCATEs and rebuilds forecast.acys_summary_by_day, a SINGLE-RUN staging table. Two runs
+# overlapping interleave: the second TRUNCATE lands before the first INSERT and both datasets end
+# up in the table. That happened on 2026-09-18, was frozen into a snapshot, and surfaced days later
+# as a refresh failing on a unique index.
+#
+# external-worker now refuses the second run with an advisory lock, which is the guarantee. This is
+# the COURTESY: refusing here means the caller gets an immediate 409 naming the run already in
+# flight, instead of a request that is accepted, queued, started, and only then fails.
+#
+# A restore counts: it TRUNCATEs and refills the same table.
+_BUSY_REFS = (_REF, _RESTORE_REF)
+_TERMINAL_STATES = ("success", "error", "skipped", "cancelled")   # == worker status.py
+
+# A row left behind by a worker that died without publishing a terminal state must not block every
+# forecast for ever. A live run republishes its progress continuously, so a row this stale is not
+# running any more. If the window is ever too short the worker's lock still refuses the overlap —
+# this only decides how early the caller hears about it.
+_BUSY_STALE_AFTER_MINUTES = 15
+
+_ACTIVE_FORECAST_SQL = """
+SELECT job_id, ref, state, message, progress, updated_at
+FROM job_statuses
+WHERE ref = ANY(:refs)
+  AND state <> ALL(:terminal)
+  AND updated_at > now() - make_interval(mins => :stale)
+ORDER BY updated_at DESC
+LIMIT 1
+"""
+
+
+async def _forecast_in_flight(request: Request):
+    """The forecast job already queued or running, or None. Reads the SERVICE database, which is
+    where job_statuses lives."""
+    async with request.app.state.db_client.read_session("service") as session:
+        return (await session.execute(text(_ACTIVE_FORECAST_SQL), {
+            "refs": list(_BUSY_REFS),
+            "terminal": list(_TERMINAL_STATES),
+            "stale": _BUSY_STALE_AFTER_MINUTES,
+        })).mappings().first()
+
+
+def _busy_response(busy, request: Request, response: Response):
+    """409 naming the run in flight and how to get out of the way."""
+    what = "restoring a saved run" if busy["ref"] == _RESTORE_REF else "building a forecast"
+    detail = f" — {busy['message']}" if busy["message"] else ""
+    return warning_response(
+        request=request, response=response,
+        msg=(f"A forecast is already in progress ({what}, job {busy['job_id']}, "
+             f"state {busy['state']}{detail}). Only one runs at a time, because they share one "
+             f"staging table. Wait for it to finish, or cancel it with "
+             f"POST /status/{busy['job_id']}/cancel."),
+        status_code=status.HTTP_409_CONFLICT)
+
+
 async def _start_restore(snapshot_id: int, request: Request, response: Response):
     """POST /forecast/ with a snapshot_id: enqueue `forecast_restore` instead of the panel.
 
@@ -228,6 +283,10 @@ async def _start_restore(snapshot_id: int, request: Request, response: Response)
             msg=f"Saved forecast run {snapshot_id} not found — it may have passed the "
                 f"{_SNAPSHOT_WINDOW_DAYS}-day retention window",
             status_code=status.HTTP_404_NOT_FOUND)
+
+    busy = await _forecast_in_flight(request)
+    if busy is not None:
+        return _busy_response(busy, request, response)
 
     snapshot = _snapshot_out(row)
     job_id = uuid.uuid4().hex
@@ -259,10 +318,12 @@ async def _start_restore(snapshot_id: int, request: Request, response: Response)
                 "Send `snapshot_id` INSTEAD of a scope to re-show a saved run (GET /forecast/snapshots): "
                 "nothing is fetched or forecast — the saved dataset is poured back into the report table "
                 "and the report matviews are refreshed. Both forms return a job_id and report progress "
-                "the same way.",
+                "the same way. ONE AT A TIME: asked while a forecast is already queued or running, this "
+                "returns 409 naming that job rather than enqueuing a second one — both forms rebuild the "
+                "same single-run staging table, so two of them overlapping would corrupt it.",
     status_code=status.HTTP_202_ACCEPTED,
     responses=build_responses(include={
-        status.HTTP_202_ACCEPTED, status.HTTP_404_NOT_FOUND,
+        status.HTTP_202_ACCEPTED, status.HTTP_404_NOT_FOUND, status.HTTP_409_CONFLICT,
         status.HTTP_422_UNPROCESSABLE_ENTITY, status.HTTP_500_INTERNAL_SERVER_ERROR,
     }),
     dependencies=[Depends(authorize(SCOPE_PREDICTIVE_WRITE))],
@@ -297,6 +358,10 @@ async def start_forecast(body: ForecastRequest, request: Request, response: Resp
         label = " + ".join(([f"{len(operators)} operator(s)"] if operators else [])
                            + ([f"{len(registrations)} registration(s)"] if registrations else []))
         as_of = body.date.isoformat() if body.date else None
+
+        busy = await _forecast_in_flight(request)
+        if busy is not None:
+            return _busy_response(busy, request, response)
 
         # own job_id so the queued row is written BEFORE the worker's first publish (no upsert race)
         job_id = uuid.uuid4().hex
