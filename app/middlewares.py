@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -16,6 +17,7 @@ from Database import DatabaseClient
 from Queue import get_redis_settings
 from Schemas import DefaultResponse, DetailField
 from Utils import DBProxy
+from Utils import RequestMetrics
 
 logger = setup_logger(
     'fastapi_app',
@@ -112,6 +114,7 @@ class RequestContextMiddleware:
             return
 
         started = time.perf_counter()
+        cost = RequestMetrics.begin()
         correlation_id = str(uuid.uuid4())
         app_state = self.fastapi_app.state
         db_proxy = DBProxy(app_state.redis)
@@ -138,11 +141,38 @@ class RequestContextMiddleware:
         try:
             await self.app(scope, receive, send_with_context)
         finally:
-            # Lazy %-formatting: with logging going through a queue, the message is only built by the
-            # listener thread, never on the event loop.
-            logger.info("%s %s completed_in=%.3fs | status_code=%s | correlation_id=%s",
-                        scope.get("method"), scope.get("path"), time.perf_counter() - started,
-                        status_code, correlation_id)
+            elapsed = time.perf_counter() - started
+            # The query string belongs in the line: `/fleet/aircraft` and
+            # `/fleet/aircraft?limit=500&q=...` are different requests with very different costs,
+            # and without it they are the same line twice.
+            query = scope.get("query_string") or b""
+            path = scope.get("path", "")
+            if query:
+                path = f"{path}?{query.decode('latin-1')[:200]}"
+
+            # Three levels, decided by what is wrong rather than by what happened: a failure, a
+            # request that took too long, or one that asked the database too many times. The last
+            # is the one that matters most and shows up least - it is a shape that is merely slow
+            # here and much worse over a longer wire.
+            if status_code >= 500:
+                level = logging.ERROR
+            elif elapsed * 1000 >= settings.SLOW_REQUEST_MS or status_code >= 400:
+                level = logging.WARNING
+            elif cost.queries >= settings.BUSY_REQUEST_QUERIES:
+                level = logging.WARNING
+            else:
+                level = logging.INFO
+
+            # Lazy %-formatting: with logging going through a queue, the message is only built by
+            # the listener thread, never on the event loop.
+            logger.log(level, "%s %s completed_in=%.3fs | status_code=%s | %s | correlation_id=%s",
+                       scope.get("method"), path, elapsed, status_code, cost.summary(),
+                       correlation_id)
+            # Name the query only when the request was worth complaining about. Logging every
+            # statement of every request is how a log becomes something nobody reads.
+            if level >= logging.WARNING and cost.slowest_statement:
+                logger.log(level, "  slowest statement of %s: %.1fms  %s",
+                           correlation_id, cost.slowest_seconds * 1000, cost.slowest_statement)
             await db_proxy.close_all()
 
 
