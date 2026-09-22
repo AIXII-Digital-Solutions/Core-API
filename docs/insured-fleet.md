@@ -384,6 +384,29 @@ it lazily issues IO, and outside the greenlet the async session runs in that rai
 `MissingGreenlet` — turning a working PATCH into a 500. `lease_json` and `policy_json` are the two
 that expose timestamps, and their handlers refresh `updated_at` explicitly.
 
+**The reference listings are cached; nothing else is.** `/ref/airlines`, `/ref/parties`,
+`/fleet/aircraft-types` and `/fleet/engine-types` are read by every typeahead keystroke, are large
+(806 airframe types, 365 engine models) and change a handful of times a year, so they are served
+from Redis. An aircraft, a lease, a policy, the coverage comparison and the change log are NOT
+cached: they are read immediately after somebody writes them, and showing a portal user a stale
+copy of their own change is worse than the query it saved.
+
+Correctness comes from explicit invalidation, not from the TTL. Each entity has a GENERATION
+counter in Redis and the payload key contains it, so a write bumps the counter and every cached
+listing of that entity becomes unreachable at once — one `INCR`, no `SCAN`. That matters because
+this Redis also carries the FlightRadar polling set and the status channel; scanning the keyspace
+on every write would walk data that has nothing to do with this domain. `INSURED_FLEET_CACHE_SECONDS`
+(default 300) is only a backstop for an invalidation that failed to land.
+
+The trap when adding a cached listing is the third step, not the first two: read it through
+`cached()`, and invalidate its entity from EVERY write that can touch it — **including the
+find-or-create paths**, where `POST /fleet/aircraft` quietly creates an airline, an aircraft type
+and an engine model, and so invalidates all three. `Utils/DomainCache` refuses an entity name it
+does not know, so a typo cannot silently become a listing that never invalidates.
+
+Everything fails open: a Redis error falls through to the database. A cache that can take the
+endpoint down with it is a worse bug than the latency it saves.
+
 **Every write sets the actor.** `set_actor(session, token)` issues
 `set_config('app.actor', …, true)` inside the transaction, which is what
 `audit.change_log.changed_by` records. A write path that forgets it logs the database login,

@@ -120,6 +120,17 @@ Name matching is **case- and whitespace-insensitive**: `AerCap`, `AERCAP ` and `
 same counterparty. You cannot create a near-duplicate by accident, and you will get a 409 if you
 try.
 
+**The four reference listings are cached** — `/ref/airlines`, `/ref/parties`,
+`/fleet/aircraft-types`, `/fleet/engine-types`. Type as fast as you like into a typeahead; those
+answers come from Redis, keyed on the exact query you sent.
+
+**You do not have to do anything about it, and you must not work around it.** Every write that can
+change one of those listings invalidates it, including the ones you would not think of: creating an
+aircraft can create an airline and two types as a side effect, and all three listings update. A row
+you just wrote is in the next read. Nothing else in the domain is cached — an aircraft, a lease, a
+policy, the comparison and the history are always read fresh, because they are read right after
+somebody changes them.
+
 **Dates** are `YYYY-MM-DD`. **Timestamps** are ISO-8601 with an offset (`2026-09-21T19:05:49.343046+00:00`).
 **Money** is a plain JSON number, two decimals, and the currency lives in the aircraft's service
 block. **`depreciation_ratio` and `reinsured_amount` are PERCENT** — send `5` for 5 %/year and

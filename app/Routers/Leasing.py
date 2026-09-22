@@ -39,6 +39,7 @@ from Database.LeasingModels import Agreement, AircraftLease
 from api_auth import authorize, SCOPE_INSURANCE_READ, SCOPE_INSURANCE_WRITE
 from Utils import success_response, warning_response, error_response
 from Utils.ResponsesFunc import build_responses
+from Utils.DomainCache import PARTY, invalidate
 from Utils.DomainCommon import (
     DB, norm, set_actor, apply_sort, SortError, integrity_error, find_aircraft,
     get_or_create_party, agreement_json, lease_json,
@@ -194,6 +195,7 @@ async def create_agreement(request: Request, response: Response, body: Agreement
             await session.flush()
             await session.refresh(row, ["lessor"])
             data = agreement_json(row)
+        await invalidate(request, PARTY)   # a counterparty may have been created
         return success_response(request=request, response=response, data=data,
                                 status_code=status.HTTP_201_CREATED)
     except IntegrityError as _ex:
@@ -258,6 +260,7 @@ async def update_agreement(request: Request, response: Response, agreement_id: i
             await session.flush()
             await session.refresh(row, ["lessor"])
             data = agreement_json(row)
+        await invalidate(request, PARTY)   # a counterparty may have been created
         return success_response(request=request, response=response, data=data)
     except IntegrityError as _ex:
         code, msg = integrity_error(_ex)
@@ -426,6 +429,7 @@ async def create_lease(request: Request, response: Response, body: LeaseIn,
             await session.refresh(row, ["agreement"])
             await session.refresh(agreement, ["lessor"])
             data = lease_json(row, aircraft=aircraft)
+        await invalidate(request, PARTY)   # a counterparty may have been created
         return success_response(request=request, response=response, data=data,
                                 status_code=status.HTTP_201_CREATED)
     except IntegrityError as _ex:

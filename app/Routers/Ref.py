@@ -32,6 +32,7 @@ from Database.PolicyModels import Policy
 from api_auth import authorize, SCOPE_INSURANCE_READ, SCOPE_INSURANCE_WRITE
 from Utils import success_response, warning_response, error_response
 from Utils.ResponsesFunc import build_responses
+from Utils.DomainCache import AIRLINE, PARTY, cached, invalidate
 from Utils.DomainCommon import (
     DB, set_actor, apply_sort, typeahead_order, SortError, integrity_error,
     airline_json, party_json, contact_json,
@@ -147,12 +148,17 @@ async def list_airlines(
         else:
             stmt = apply_sort(stmt, sort=sort, order=order, sortmap=_AIRLINE_SORTS,
                               tiebreak=(Airline.airline_name, Airline.id))
-        async with request.app.state.db_client.read_session(DB) as session:
-            total = (await session.execute(
-                select(func.count()).select_from(Airline).where(*conds))).scalar_one()
-            rows = (await session.execute(stmt.limit(limit).offset(offset))).scalars().all()
-        return success_response(request=request, response=response,
-                                data={"items": [airline_json(a) for a in rows], "total": total})
+        async def load():
+            async with request.app.state.db_client.read_session(DB) as session:
+                total = (await session.execute(
+                    select(func.count()).select_from(Airline).where(*conds))).scalar_one()
+                rows = (await session.execute(stmt.limit(limit).offset(offset))).scalars().all()
+                return {"items": [airline_json(a) for a in rows], "total": total}
+
+        data = await cached(request, AIRLINE,
+                            {"q": q, "is_asg": is_asg, "limit": limit, "offset": offset,
+                             "sort": sort, "order": order}, load)
+        return success_response(request=request, response=response, data=data)
     except SortError as _ex:
         return warning_response(request=request, response=response, msg=str(_ex))
     except Exception as _ex:
@@ -185,6 +191,7 @@ async def create_airline(request: Request, response: Response, body: AirlineIn,
             session.add(row)
             await session.flush()
             data = airline_json(row)
+        await invalidate(request, AIRLINE)
         return success_response(request=request, response=response, data=data,
                                 msg="Airline created. Refresh the fleet matviews for it to be "
                                     "tracked.", status_code=status.HTTP_201_CREATED)
@@ -236,6 +243,7 @@ async def update_airline(request: Request, response: Response, airline_id: int, 
                 setattr(row, key, value.strip() if key == "airline_name" and value else value)
             await session.flush()
             data = airline_json(row)
+        await invalidate(request, AIRLINE)
         msg = ("Airline updated. `is_asg` changed — refresh the fleet matviews for the polling "
                "list to follow." if moved else "Airline updated")
         return success_response(request=request, response=response, data=data, msg=msg)
@@ -274,6 +282,7 @@ async def delete_airline(request: Request, response: Response, airline_id: int,
                     status_code=status.HTTP_409_CONFLICT)
             data = airline_json(row)
             await session.delete(row)
+        await invalidate(request, AIRLINE)
         return success_response(request=request, response=response, data=data, msg="Airline deleted")
     except IntegrityError as _ex:
         code, msg = integrity_error(_ex)
@@ -326,11 +335,16 @@ async def list_parties(
         else:
             stmt = apply_sort(stmt, sort=sort, order=order, sortmap=_PARTY_SORTS,
                               tiebreak=(Party.name, Party.id))
-        async with request.app.state.db_client.read_session(DB) as session:
-            total = (await session.execute(
-                select(func.count()).select_from(Party).where(*conds))).scalar_one()
-            rows = (await session.execute(stmt.limit(limit).offset(offset))).scalars().all()
-            data = {"items": [party_json(p) for p in rows], "total": total}
+        async def load():
+            async with request.app.state.db_client.read_session(DB) as session:
+                total = (await session.execute(
+                    select(func.count()).select_from(Party).where(*conds))).scalar_one()
+                rows = (await session.execute(stmt.limit(limit).offset(offset))).scalars().all()
+                return {"items": [party_json(p) for p in rows], "total": total}
+
+        data = await cached(request, PARTY,
+                            {"q": q, "role": role, "limit": limit, "offset": offset,
+                             "sort": sort, "order": order}, load)
         return success_response(request=request, response=response, data=data)
     except SortError as _ex:
         return warning_response(request=request, response=response, msg=str(_ex))
@@ -356,6 +370,7 @@ async def create_party(request: Request, response: Response, body: PartyIn,
             session.add(row)
             await session.flush()
             data = party_json(row)
+        await invalidate(request, PARTY)
         return success_response(request=request, response=response, data=data,
                                 status_code=status.HTTP_201_CREATED)
     except IntegrityError as _ex:
@@ -404,6 +419,7 @@ async def update_party(request: Request, response: Response, party_id: int, body
                 setattr(row, key, value.strip() if key == "name" and value else value)
             await session.flush()
             data = party_json(row)
+        await invalidate(request, PARTY)
         return success_response(request=request, response=response, data=data)
     except IntegrityError as _ex:
         code, msg = integrity_error(_ex)
@@ -434,6 +450,7 @@ async def delete_party(request: Request, response: Response, party_id: int,
                                         status_code=status.HTTP_404_NOT_FOUND)
             data = party_json(row)
             await session.delete(row)
+        await invalidate(request, PARTY)
         return success_response(request=request, response=response, data=data, msg="Party deleted")
     except IntegrityError as _ex:
         code, msg = integrity_error(_ex)
@@ -463,6 +480,7 @@ async def add_contact(request: Request, response: Response, party_id: int, body:
             session.add(row)
             await session.flush()
             data = contact_json(row)
+        await invalidate(request, PARTY)
         return success_response(request=request, response=response, data=data,
                                 status_code=status.HTTP_201_CREATED)
     except IntegrityError as _ex:
@@ -489,6 +507,7 @@ async def update_contact(request: Request, response: Response, contact_id: int, 
                 setattr(row, key, value)
             await session.flush()
             data = contact_json(row)
+        await invalidate(request, PARTY)
         return success_response(request=request, response=response, data=data)
     except Exception as _ex:
         return error_response(request=request, exc=_ex, response=response)
@@ -508,6 +527,7 @@ async def delete_contact(request: Request, response: Response, contact_id: int,
                                         status_code=status.HTTP_404_NOT_FOUND)
             data = contact_json(row)
             await session.delete(row)
+        await invalidate(request, PARTY)
         return success_response(request=request, response=response, data=data, msg="Contact deleted")
     except Exception as _ex:
         return error_response(request=request, exc=_ex, response=response)

@@ -47,6 +47,7 @@ from Database.PolicyModels import Coverage
 from api_auth import authorize, SCOPE_INSURANCE_READ, SCOPE_INSURANCE_WRITE
 from Utils import success_response, warning_response, error_response
 from Utils.ResponsesFunc import build_responses
+from Utils.DomainCache import AIRCRAFT_TYPE, AIRLINE, ENGINE_TYPE, cached, invalidate
 from Utils.DomainCommon import (
     DB, norm_reg, set_actor, apply_sort, SortError, AmbiguousType, integrity_error, find_aircraft,
     get_or_create_airline, get_or_create_aircraft_type, get_or_create_engine_type,
@@ -204,7 +205,7 @@ def _type_sortmap(model):
             "created_at": model.created_at}
 
 
-async def _list_types(request, response, model, to_json, q, manufacturer, limit, offset,
+async def _list_types(request, response, model, to_json, entity, q, manufacturer, limit, offset,
                       sort, order):
     conds = []
     q = (q or "").strip()
@@ -214,15 +215,23 @@ async def _list_types(request, response, model, to_json, q, manufacturer, limit,
         conds.append(model.manufacturer_normalized == manufacturer.strip().upper())
     stmt = apply_sort(select(model).where(*conds), sort=sort, order=order,
                       sortmap=_type_sortmap(model), tiebreak=(model.master_series, model.id))
-    async with request.app.state.db_client.read_session(DB) as session:
-        total = (await session.execute(
-            select(func.count()).select_from(model).where(*conds))).scalar_one()
-        rows = (await session.execute(stmt.limit(limit).offset(offset))).scalars().all()
-    return success_response(request=request, response=response,
-                            data={"items": [to_json(t) for t in rows], "total": total})
+
+    # 806 airframe types and 365 engine models, read by every typeahead keystroke and written a
+    # handful of times a year — the one read in this domain where a cache pays for itself.
+    async def load():
+        async with request.app.state.db_client.read_session(DB) as session:
+            total = (await session.execute(
+                select(func.count()).select_from(model).where(*conds))).scalar_one()
+            rows = (await session.execute(stmt.limit(limit).offset(offset))).scalars().all()
+            return {"items": [to_json(t) for t in rows], "total": total}
+
+    data = await cached(request, entity,
+                        {"q": q, "manufacturer": manufacturer, "limit": limit, "offset": offset,
+                         "sort": sort, "order": order}, load)
+    return success_response(request=request, response=response, data=data)
 
 
-async def _create_type(request, response, model, to_json, body, token, extra: dict):
+async def _create_type(request, response, model, to_json, entity, body, token, extra: dict):
     async with request.app.state.db_client.session(DB) as session:
         await set_actor(session, token)
         row = model(master_series=body.master_series.strip(), manufacturer=body.manufacturer,
@@ -230,11 +239,12 @@ async def _create_type(request, response, model, to_json, body, token, extra: di
         session.add(row)
         await session.flush()
         data = to_json(row)
+    await invalidate(request, entity)
     return success_response(request=request, response=response, data=data,
                             status_code=status.HTTP_201_CREATED)
 
 
-async def _update_type(request, response, model, to_json, type_id, fields, token, subject):
+async def _update_type(request, response, model, to_json, entity, type_id, fields, token, subject):
     async with request.app.state.db_client.session(DB) as session:
         await set_actor(session, token)
         row = await session.get(model, type_id)
@@ -246,10 +256,11 @@ async def _update_type(request, response, model, to_json, type_id, fields, token
             setattr(row, key, value.strip() if key == "master_series" and value else value)
         await session.flush()
         data = to_json(row)
+    await invalidate(request, entity)
     return success_response(request=request, response=response, data=data)
 
 
-async def _delete_type(request, response, model, to_json, type_id, token, subject,
+async def _delete_type(request, response, model, to_json, entity, type_id, token, subject,
                        user_model, user_column):
     async with request.app.state.db_client.session(DB) as session:
         await set_actor(session, token)
@@ -268,6 +279,7 @@ async def _delete_type(request, response, model, to_json, type_id, token, subjec
                 status_code=status.HTTP_409_CONFLICT)
         data = to_json(row)
         await session.delete(row)
+    await invalidate(request, entity)
     return success_response(request=request, response=response, data=data,
                             msg=f"{subject} deleted")
 
@@ -289,8 +301,8 @@ async def list_aircraft_types(
     sort: Optional[str] = Query(None), order: Optional[str] = Query(None),
 ):
     try:
-        return await _list_types(request, response, AircraftType, type_json, q, manufacturer,
-                                 limit, offset, sort, order)
+        return await _list_types(request, response, AircraftType, type_json, AIRCRAFT_TYPE,
+                                 q, manufacturer, limit, offset, sort, order)
     except SortError as _ex:
         return warning_response(request=request, response=response, msg=str(_ex))
     except Exception as _ex:
@@ -304,8 +316,8 @@ async def list_aircraft_types(
 async def create_aircraft_type(request: Request, response: Response, body: TypeIn,
                                token: Optional[ApiToken] = Depends(authorize(SCOPE_INSURANCE_WRITE))):
     try:
-        return await _create_type(request, response, AircraftType, type_json, body, token,
-                                  {"template_url": body.template_url})
+        return await _create_type(request, response, AircraftType, type_json, AIRCRAFT_TYPE, body,
+                                  token, {"template_url": body.template_url})
     except IntegrityError as _ex:
         code, msg = integrity_error(_ex)
         return warning_response(request=request, response=response, msg=msg, status_code=code)
@@ -318,7 +330,7 @@ async def create_aircraft_type(request: Request, response: Response, body: TypeI
 async def update_aircraft_type(request: Request, response: Response, type_id: int, body: TypePatch,
                                token: Optional[ApiToken] = Depends(authorize(SCOPE_INSURANCE_WRITE))):
     try:
-        return await _update_type(request, response, AircraftType, type_json, type_id,
+        return await _update_type(request, response, AircraftType, type_json, AIRCRAFT_TYPE, type_id,
                                   body.model_dump(exclude_unset=True), token, "Aircraft type")
     except IntegrityError as _ex:
         code, msg = integrity_error(_ex)
@@ -333,8 +345,8 @@ async def update_aircraft_type(request: Request, response: Response, type_id: in
 async def delete_aircraft_type(request: Request, response: Response, type_id: int,
                                token: Optional[ApiToken] = Depends(authorize(SCOPE_INSURANCE_WRITE))):
     try:
-        return await _delete_type(request, response, AircraftType, type_json, type_id, token,
-                                  "Aircraft type", Aircraft, Aircraft.aircraft_type_id)
+        return await _delete_type(request, response, AircraftType, type_json, AIRCRAFT_TYPE, type_id,
+                                  token, "Aircraft type", Aircraft, Aircraft.aircraft_type_id)
     except IntegrityError as _ex:
         code, msg = integrity_error(_ex)
         return warning_response(request=request, response=response, msg=msg, status_code=code)
@@ -355,8 +367,8 @@ async def list_engine_types(
     sort: Optional[str] = Query(None), order: Optional[str] = Query(None),
 ):
     try:
-        return await _list_types(request, response, EngineType, type_json, q, manufacturer,
-                                 limit, offset, sort, order)
+        return await _list_types(request, response, EngineType, type_json, ENGINE_TYPE,
+                                 q, manufacturer, limit, offset, sort, order)
     except SortError as _ex:
         return warning_response(request=request, response=response, msg=str(_ex))
     except Exception as _ex:
@@ -370,7 +382,8 @@ async def list_engine_types(
 async def create_engine_type(request: Request, response: Response, body: EngineTypeIn,
                              token: Optional[ApiToken] = Depends(authorize(SCOPE_INSURANCE_WRITE))):
     try:
-        return await _create_type(request, response, EngineType, type_json, body, token, {})
+        return await _create_type(request, response, EngineType, type_json, ENGINE_TYPE, body,
+                                  token, {})
     except IntegrityError as _ex:
         code, msg = integrity_error(_ex)
         return warning_response(request=request, response=response, msg=msg, status_code=code)
@@ -384,7 +397,7 @@ async def update_engine_type(request: Request, response: Response, type_id: int,
                              body: EngineTypePatch,
                              token: Optional[ApiToken] = Depends(authorize(SCOPE_INSURANCE_WRITE))):
     try:
-        return await _update_type(request, response, EngineType, type_json, type_id,
+        return await _update_type(request, response, EngineType, type_json, ENGINE_TYPE, type_id,
                                   body.model_dump(exclude_unset=True), token, "Engine type")
     except IntegrityError as _ex:
         code, msg = integrity_error(_ex)
@@ -399,8 +412,8 @@ async def update_engine_type(request: Request, response: Response, type_id: int,
 async def delete_engine_type(request: Request, response: Response, type_id: int,
                              token: Optional[ApiToken] = Depends(authorize(SCOPE_INSURANCE_WRITE))):
     try:
-        return await _delete_type(request, response, EngineType, type_json, type_id, token,
-                                  "Engine type", AircraftEngine, AircraftEngine.engine_type_id)
+        return await _delete_type(request, response, EngineType, type_json, ENGINE_TYPE, type_id,
+                                  token, "Engine type", AircraftEngine, AircraftEngine.engine_type_id)
     except IntegrityError as _ex:
         code, msg = integrity_error(_ex)
         return warning_response(request=request, response=response, msg=msg, status_code=code)
@@ -504,6 +517,9 @@ async def create_aircraft(request: Request, response: Response, body: AircraftIn
             await session.flush()
             await session.refresh(row, ["aircraft_type", "airline", "engines", "service"])
             data = aircraft_json(row)
+        # creating an aircraft can find-or-create its type, its engines' model and its
+        # airline, so all three listings may have changed
+        await invalidate(request, AIRCRAFT_TYPE, ENGINE_TYPE, AIRLINE)
         return success_response(
             request=request, response=response, data=data,
             msg="Aircraft created" if created else "Aircraft already known — updated in place",
@@ -637,6 +653,7 @@ async def update_aircraft(request: Request, response: Response, aircraft_id: int
             await session.flush()
             await session.refresh(row, ["aircraft_type", "airline", "engines", "service"])
             data = aircraft_json(row)
+        await invalidate(request, AIRCRAFT_TYPE, AIRLINE)
         return success_response(request=request, response=response, data=data)
     except AmbiguousType as _ex:
         return warning_response(request=request, response=response, msg=str(_ex))
@@ -829,6 +846,7 @@ async def add_engine(request: Request, response: Response, aircraft_id: int, bod
             await session.flush()
             await session.refresh(row, ["engine_type"])
             data = engine_json(row, fitted=True)
+        await invalidate(request, ENGINE_TYPE)   # the model may have been created here
         return success_response(request=request, response=response, data=data,
                                 status_code=status.HTTP_201_CREATED)
     except AmbiguousType as _ex:
@@ -860,6 +878,7 @@ async def update_engine(request: Request, response: Response, engine_id: int, bo
             await session.flush()
             await session.refresh(row, ["engine_type"])
             data = engine_json(row)
+        await invalidate(request, ENGINE_TYPE)
         return success_response(request=request, response=response, data=data)
     except AmbiguousType as _ex:
         return warning_response(request=request, response=response, msg=str(_ex))
