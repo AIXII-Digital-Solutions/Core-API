@@ -335,9 +335,15 @@ far as the CHECK is concerned, so **every type created without drawings would be
 `_admin/load_template_urls.py` loads them from a CSV of `aircraft_type,category,url_airborne,
 url_on_the_ground`, matching on the LABEL the API itself renders rather than parsing the label
 apart — nothing in "Textron Aviation (Cessna) Cessna 208B Caravan Passenger" says where the
-manufacturer ends. 206 of 1355 types carry drawings today, covering 146 of the 149 insured
-aircraft; the gaps are Dassault Falcon 900 Passenger and Boeing 737-400 Cargo, which have rows in
-the asset set but no images yet.
+manufacturer ends.
+
+**208 of 1355 types carry drawings, and all 149 insured aircraft resolve to one.** 206 came from
+the asset set; the last two BORROW a donor's, via `_admin/borrow_template_urls.py` — the Falcon 900
+uses the Falcon 50's drawings and the 737-400 freighter uses the 737-400 passenger ones, because a
+close enough outline beats a blank card. Worth knowing when reading the column: those two rows
+store a URL that **names the donor**, so a Falcon 900 loads `Dassault Falcon 50 Passenger.png`.
+That is intended, not a mistake to tidy; when a real drawing arrives, load it over the top with
+`load_template_urls.py --overwrite`.
 
 ## History
 
