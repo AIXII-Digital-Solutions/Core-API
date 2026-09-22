@@ -389,7 +389,10 @@ class AircraftEngine(Base):
     __tablename__ = "aircraft_engine"
 
     aircraft_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("fleet.aircraft.id", ondelete="CASCADE"), nullable=False, index=True,
+        BigInteger, ForeignKey("fleet.aircraft.id", ondelete="CASCADE"), nullable=False,
+        # No index of its own: uq_aircraft_engine_installation leads with this column, and a bare
+        # prefix index answers nothing the composite cannot while costing every write.
+        index=False,
     )
     position: Mapped[int] = mapped_column(Integer, nullable=False)
     engine_type_id: Mapped[Optional[int]] = mapped_column(

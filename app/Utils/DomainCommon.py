@@ -223,6 +223,36 @@ async def find_aircraft(session, *, registration: Optional[str] = None,
     return None
 
 
+async def page_with_total(session, stmt, *, limit: int, offset: int, count_stmt):
+    """A page of rows AND the size of the whole set, in ONE round trip.
+
+    Every grid here returns `{items, total}`, which used to mean two statements: a COUNT and then
+    the page. `count(*) OVER ()` rides along with the page instead — the database has already
+    identified the matching set to answer the LIMIT, so counting it costs nothing extra, while a
+    second statement costs another wait on the network.
+
+    THE ONE CASE IT CANNOT ANSWER is an empty page, because a window function over no rows returns
+    no rows: "nothing matched" and "you asked for page 9 of 3" look identical. So an empty result
+    at a non-zero offset — and only that — falls back to the COUNT. A pager that overshoots pays
+    one extra round trip; every other request saves one.
+
+    Safe here because no grid joins a COLLECTION: a joined collection would duplicate the parent
+    rows, and the window would count the duplicates. The grids use `selectinload` for those, which
+    is what keeps LIMIT/OFFSET honest in the first place.
+
+    Returns `(rows, total)` — entities when the select names one, tuples when it names several,
+    exactly as `.scalars().all()` / `.all()` would have.
+    """
+    windowed = stmt.add_columns(func.count().over().label("_total"))
+    rows = (await session.execute(windowed.limit(limit).offset(offset))).unique().all()
+    if not rows:
+        total = 0 if not offset else (await session.execute(count_stmt)).scalar_one()
+        return [], total
+    total = rows[0][-1]
+    single = len(rows[0]) == 2
+    return [(r[0] if single else tuple(r[:-1])) for r in rows], total
+
+
 async def reload_with(session, model, pk, *options):
     """Re-read a row and its relationships in ONE round trip, after a write.
 

@@ -33,7 +33,7 @@ from Database.PolicyModels import Coverage
 from api_auth import authorize, SCOPE_INSURANCE_READ
 from Utils import success_response, warning_response, error_response
 from Utils.ResponsesFunc import build_responses
-from Utils.DomainCommon import DB, resolve_fk_labels, audit_entry
+from Utils.DomainCommon import DB, resolve_fk_labels, audit_entry, page_with_total
 
 logger = setup_logger("history_api")
 
@@ -113,13 +113,12 @@ async def list_history(
             conds.append(ChangeLog.changed_at <= until)
 
         async with request.app.state.db_client.read_session(DB) as session:
-            total = (await session.execute(
-                select(func.count()).select_from(ChangeLog).where(*conds))).scalar_one()
-            rows = (await session.execute(
+            rows, total = await page_with_total(
+                session,
                 select(ChangeLog).where(*conds)
-                .order_by(ChangeLog.changed_at.desc(), ChangeLog.id.desc())
-                .limit(limit).offset(offset)
-            )).scalars().all()
+                .order_by(ChangeLog.changed_at.desc(), ChangeLog.id.desc()),
+                limit=limit, offset=offset,
+                count_stmt=select(func.count()).select_from(ChangeLog).where(*conds))
             items = await _render(session, rows)
         return success_response(request=request, response=response,
                                 data={"items": items, "total": total})

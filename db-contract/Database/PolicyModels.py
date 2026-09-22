@@ -68,7 +68,8 @@ class Policy(Base):
     __tablename__ = "policy"
 
     insured_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey(Party.__table__.c.id, ondelete="RESTRICT"), nullable=False, index=True,
+        BigInteger, ForeignKey(Party.__table__.c.id, ondelete="RESTRICT"), nullable=False,
+        index=False,   # uq_policy_insured_period leads with it
     )
     reinsured_id: Mapped[Optional[int]] = mapped_column(
         BigInteger, ForeignKey(Party.__table__.c.id, ondelete="RESTRICT"),
@@ -157,7 +158,8 @@ class Coverage(Base):
     __tablename__ = "coverage"
 
     aircraft_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey(Aircraft.__table__.c.id, ondelete="RESTRICT"), nullable=False, index=True,
+        BigInteger, ForeignKey(Aircraft.__table__.c.id, ondelete="RESTRICT"), nullable=False,
+        index=False,   # uq_coverage_aircraft_policy leads with it
     )
     policy_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("policy.policy.id", ondelete="RESTRICT"), nullable=False, index=True,

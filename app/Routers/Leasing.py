@@ -41,7 +41,7 @@ from Utils import success_response, warning_response, error_response
 from Utils.ResponsesFunc import build_responses
 from Utils.DomainCache import PARTY, invalidate
 from Utils.DomainCommon import (
-    reload_with, AIRCRAFT_BRIEF,
+    reload_with, AIRCRAFT_BRIEF, page_with_total,
     DB, norm, set_actor, apply_sort, SortError, integrity_error, find_aircraft,
     get_or_create_party, agreement_json, lease_json,
 )
@@ -165,9 +165,9 @@ async def list_agreements(request: Request, response: Response,
                           sort=sort, order=order, sortmap=_AGREEMENT_SORTS,
                           tiebreak=(Agreement.name, Agreement.id))
         async with request.app.state.db_client.read_session(DB) as session:
-            total = (await session.execute(
-                select(func.count()).select_from(Agreement).where(*conds))).scalar_one()
-            rows = (await session.execute(stmt.limit(limit).offset(offset))).scalars().all()
+            rows, total = await page_with_total(
+                session, stmt, limit=limit, offset=offset,
+                count_stmt=select(func.count()).select_from(Agreement).where(*conds))
             data = {"items": [agreement_json(g) for g in rows], "total": total}
         return success_response(request=request, response=response, data=data)
     except SortError as _ex:
@@ -358,9 +358,9 @@ async def list_leases(
             else:
                 stmt = apply_sort(stmt, sort=sort, order=order, sortmap=_LEASE_SORTS,
                                   tiebreak=(AircraftLease.effective_date.desc(), AircraftLease.id))
-                total = (await session.execute(
-                    select(func.count()).select_from(AircraftLease).where(*conds))).scalar_one()
-                rows = (await session.execute(stmt.limit(limit).offset(offset))).all()
+                rows, total = await page_with_total(
+                    session, stmt, limit=limit, offset=offset,
+                    count_stmt=select(func.count()).select_from(AircraftLease).where(*conds))
             data = {"items": [lease_json(l, on=on, aircraft=a) for l, a in rows], "total": total}
         return success_response(request=request, response=response, data=data)
     except SortError as _ex:

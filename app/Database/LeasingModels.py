@@ -107,7 +107,10 @@ class AircraftLease(Base):
     __tablename__ = "aircraft_lease"
 
     aircraft_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey(Aircraft.__table__.c.id, ondelete="RESTRICT"), nullable=False, index=True,
+        BigInteger, ForeignKey(Aircraft.__table__.c.id, ondelete="RESTRICT"), nullable=False,
+        # Two composites already lead with it (uq_aircraft_lease_effective and
+        # ix_aircraft_lease_aircraft_effective); a third, narrower copy earns nothing.
+        index=False,
     )
     agreement_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("leasing.agreement.id", ondelete="RESTRICT"), nullable=False, index=True,

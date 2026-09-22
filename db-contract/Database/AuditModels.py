@@ -31,7 +31,7 @@ import sys
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import String, BigInteger, DateTime, Index, func
+from sqlalchemy import text, String, BigInteger, DateTime, Index, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -63,8 +63,21 @@ class ChangeLog(Base):
         # the history of one object, newest first — the only access path the portal needs
         Index("ix_change_log_subject", "schema_name", "table_name", "row_id",
               "changed_at", postgresql_using="btree"),
-        Index("ix_change_log_changed_at", "changed_at"),
+        # The default listing is ORDER BY changed_at DESC, id DESC. Indexed in that exact order
+        # it is a plain backwards index scan; on `changed_at` alone the planner has to re-sort
+        # each group of equal timestamps, which it does, visibly, as an Incremental Sort.
+        Index("ix_change_log_changed_at", changed_at.desc(), id.desc()),
         Index("ix_change_log_changed_by", "changed_by"),
+        # "Everything that happened to aircraft 13" has to reach the child tables, and the log
+        # stores the CHILD's id — the aircraft is only named inside the snapshot. Without these
+        # the query reads every engine and coverage entry ever written to throw almost all of
+        # them away; the audit log is the one table here that grows without bound, so it is the
+        # one place that has to be indexed for the size it will be, not the size it is.
+        # Partial, because only rows about a child of an aircraft carry the key at all.
+        Index("ix_change_log_new_aircraft", text("(new_row ->> 'aircraft_id')"),
+              postgresql_where=text("new_row ->> 'aircraft_id' IS NOT NULL")),
+        Index("ix_change_log_old_aircraft", text("(old_row ->> 'aircraft_id')"),
+              postgresql_where=text("old_row ->> 'aircraft_id' IS NOT NULL")),
     )
 
 

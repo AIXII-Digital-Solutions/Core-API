@@ -49,7 +49,7 @@ from Utils import success_response, warning_response, error_response
 from Utils.ResponsesFunc import build_responses
 from Utils.DomainCache import AIRCRAFT_TYPE, AIRLINE, ENGINE_TYPE, cached, invalidate
 from Utils.DomainCommon import (
-    normalize_template_urls, merge_template_urls, reload_with,
+    normalize_template_urls, merge_template_urls, reload_with, page_with_total,
     AIRCRAFT_GRID, AIRCRAFT_ONE, AIRCRAFT_BRIEF, ENGINE_LOAD,
     DB, norm_reg, set_actor, apply_sort, SortError, AmbiguousType, integrity_error, find_aircraft,
     get_or_create_airline, get_or_create_aircraft_type, get_or_create_engine_type,
@@ -259,9 +259,9 @@ async def _list_types(request, response, model, to_json, entity, q, manufacturer
     # handful of times a year — the one read in this domain where a cache pays for itself.
     async def load():
         async with request.app.state.db_client.read_session(DB) as session:
-            total = (await session.execute(
-                select(func.count()).select_from(model).where(*conds))).scalar_one()
-            rows = (await session.execute(stmt.limit(limit).offset(offset))).scalars().all()
+            rows, total = await page_with_total(
+                session, stmt, limit=limit, offset=offset,
+                count_stmt=select(func.count()).select_from(model).where(*conds))
             return {"items": [to_json(t) for t in rows], "total": total}
 
     data = await cached(request, entity,
@@ -518,9 +518,9 @@ async def list_aircraft(
                           sort=sort, order=order, sortmap=_AIRCRAFT_SORTS,
                           tiebreak=(Aircraft.registration, Aircraft.id))
         async with request.app.state.db_client.read_session(DB) as session:
-            total = (await session.execute(
-                select(func.count()).select_from(Aircraft).where(*conds))).scalar_one()
-            rows = (await session.execute(stmt.limit(limit).offset(offset))).scalars().all()
+            rows, total = await page_with_total(
+                session, stmt, limit=limit, offset=offset,
+                count_stmt=select(func.count()).select_from(Aircraft).where(*conds))
             data = {"items": [aircraft_json(a) for a in rows], "total": total}
         return success_response(request=request, response=response, data=data)
     except SortError as _ex:

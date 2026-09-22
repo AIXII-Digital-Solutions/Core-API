@@ -43,18 +43,49 @@ ENTITIES = frozenset({AIRLINE, PARTY, AIRCRAFT_TYPE, ENGINE_TYPE})
 
 _PREFIX = "insfleet"
 
+# ONE round trip to read, not two.
+#
+# The payload's key contains the generation, so a plain client has to GET the generation and then
+# GET the payload — and Redis is across the same network as the database, so that is two waits for
+# an answer that is supposed to be the fast path. This does both hops inside Redis and returns the
+# generation alongside whatever it found, so a cache hit costs one round trip and a miss costs one
+# too (the generation comes back either way, and the write that follows needs it).
+#
+# Deliberately not `redis.call('GET', ...)` on a missing generation key: Lua turns a nil reply into
+# `false`, so the default is spelled out rather than relied upon.
+_READ_LUA = """
+local generation = redis.call('GET', KEYS[1])
+if not generation then generation = '0' end
+local payload = redis.call('GET', ARGV[1] .. ':' .. generation .. ':' .. ARGV[2])
+if not payload then payload = '' end
+return {generation, payload}
+"""
+_read_script = None
+
+
+def _script(redis):
+    """Register the reader once per process. `register_script` sends the body only when Redis has
+    not seen its hash, so the usual case is EVALSHA with the digest and nothing else."""
+    global _read_script
+    if _read_script is None:
+        _read_script = redis.register_script(_READ_LUA)
+    return _read_script
+
 
 def _gen_key(entity: str) -> str:
     return f"{_PREFIX}:gen:{entity}"
 
 
-def _payload_key(entity: str, generation: str, signature: dict) -> str:
+def _digest(signature: dict) -> str:
     # The signature is every parameter that changes the answer — filters, paging and sort. Hashed
     # rather than spelled out so a long `q` cannot produce an unbounded key, and sorted so two
     # equivalent requests share one entry.
     blob = json.dumps(signature, sort_keys=True, default=str)
-    digest = hashlib.sha1(blob.encode("utf-8")).hexdigest()[:16]
-    return f"{_PREFIX}:{entity}:{generation}:{digest}"
+    return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:16]
+
+
+def _payload_key(entity: str, generation: str, signature: dict) -> str:
+    return f"{_PREFIX}:{entity}:{generation}:{_digest(signature)}"
 
 
 async def _generation(redis, entity: str) -> str:
@@ -79,10 +110,14 @@ async def cached(request: Request, entity: str, signature: dict,
 
     key = None
     try:
-        key = _payload_key(entity, await _generation(redis, entity), signature)
-        hit = await redis.get(key)
-        if hit is not None:
-            return json.loads(hit)
+        generation, payload = await _script(redis)(
+            keys=[_gen_key(entity)], args=[f"{_PREFIX}:{entity}", _digest(signature)])
+        if payload:
+            return json.loads(payload)
+        # The generation that MISSED is the one to write under. Re-reading it here would race
+        # with a write that lands in between and leave the new answer filed under the old number,
+        # where the next reader would not look for it.
+        key = _payload_key(entity, generation, signature)
     except Exception:
         logger.debug("cache read failed for %s — serving from the database", entity, exc_info=True)
         return await loader()
@@ -105,14 +140,19 @@ async def invalidate(request: Request, *entities: str) -> None:
     Never raises: a cache that refuses to be invalidated must not also refuse the write that
     succeeded. The TTL bounds how long a miss here can be visible.
     """
-    redis = getattr(request.app.state, "redis", None)
-    if redis is None:
-        return
     for entity in entities:
         if entity not in ENTITIES:
             raise ValueError(f"unknown cache entity {entity!r}; add it to ENTITIES")
-        try:
-            await redis.incr(_gen_key(entity))
-        except Exception:
-            logger.warning("could not invalidate the %s cache; entries stand until their TTL "
-                           "(%ss)", entity, INSURED_FLEET_CACHE_SECONDS, exc_info=True)
+    redis = getattr(request.app.state, "redis", None)
+    if redis is None or not entities:
+        return
+    try:
+        # One round trip however many entities. Creating an aircraft can create an airline, an
+        # aircraft type and an engine model, so three is the ordinary case, not the extreme one.
+        pipe = redis.pipeline(transaction=False)
+        for entity in entities:
+            pipe.incr(_gen_key(entity))
+        await pipe.execute()
+    except Exception:
+        logger.warning("could not invalidate the %s cache; entries stand until their TTL (%ss)",
+                       ", ".join(entities), INSURED_FLEET_CACHE_SECONDS, exc_info=True)

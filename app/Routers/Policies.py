@@ -37,7 +37,7 @@ from Utils import success_response, warning_response, error_response
 from Utils.ResponsesFunc import build_responses
 from Utils.DomainCache import PARTY, invalidate
 from Utils.DomainCommon import (
-    reload_with, AIRCRAFT_BRIEF,
+    reload_with, AIRCRAFT_BRIEF, page_with_total,
     DB, set_actor, apply_sort, SortError, integrity_error, find_aircraft, get_or_create_party,
     policy_json, coverage_json, aircraft_json, lease_in_force, num, enum_value,
 )
@@ -202,9 +202,9 @@ async def list_policies(request: Request, response: Response,
                           sort=sort, order=order, sortmap=_POLICY_SORTS,
                           tiebreak=(Policy.period_from.desc(), Policy.id))
         async with request.app.state.db_client.read_session(DB) as session:
-            total = (await session.execute(
-                select(func.count()).select_from(Policy).where(*conds))).scalar_one()
-            rows = (await session.execute(stmt.limit(limit).offset(offset))).scalars().all()
+            rows, total = await page_with_total(
+                session, stmt, limit=limit, offset=offset,
+                count_stmt=select(func.count()).select_from(Policy).where(*conds))
             data = {"items": [policy_json(p) for p in rows], "total": total}
         return success_response(request=request, response=response, data=data)
     except SortError as _ex:
@@ -467,9 +467,9 @@ async def list_coverage(request: Request, response: Response,
             sort=sort, order=order, sortmap=_COVERAGE_SORTS,
             tiebreak=(Coverage.covered_from.desc(), Coverage.id))
         async with request.app.state.db_client.read_session(DB) as session:
-            total = (await session.execute(
-                select(func.count()).select_from(Coverage).where(*conds))).scalar_one()
-            rows = (await session.execute(stmt.limit(limit).offset(offset))).all()
+            rows, total = await page_with_total(
+                session, stmt, limit=limit, offset=offset,
+                count_stmt=select(func.count()).select_from(Coverage).where(*conds))
             data = {"items": [coverage_json(c, aircraft=a) for c, a in rows], "total": total}
         return success_response(request=request, response=response, data=data)
     except SortError as _ex:
