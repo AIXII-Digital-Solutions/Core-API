@@ -35,12 +35,41 @@ from .RefModels import Airline, CURRENCIES, CURRENCY_VALUES
 MAX_ENGINES = 4
 
 
+class AircraftCategory(PyEnum):
+    """What the airframe is FOR. Three values, no fourth, no NULL.
+
+    Derived from Cirium's `Primary Usage`, which is far finer (49 values) and per-AIRFRAME rather
+    than per-type. The collapse is deliberate:
+
+      * `passenger` — airline passengers AND business aviation, which the business treats the
+        same way: `Passenger`, both `Business - *` roles, `Private Use`, `VIP / Head of State`,
+        `Sightseeing / Tourist`, `Government - Liaison`. Anything that carries people for a living.
+      * `cargo` — `Freight / Cargo`, plus the convertibles (`Combi / Mixed`,
+        `Quick-Change/Convertible`): a cargo deck is exactly what distinguishes those from an
+        ordinary passenger aircraft, so they are matched against cargo cover, not passenger cover.
+      * `other` — everything that is neither, and it is a LOT: military, training, agriculture,
+        EMS, police, survey, firefighting, experimental. Not a dumping ground for unknowns but a
+        statement that this type carries neither passengers nor freight for hire.
+
+    The category is part of the TYPE's identity, not a property of the airframe, because an
+    Airbus A300-600 freighter and an A300-600 in passenger configuration are different things to
+    insure. Both rows exist; `fleet.aircraft` points at the one matching its own airframe.
+    """
+    PASSENGER = "passenger"
+    CARGO = "cargo"
+    OTHER = "other"
+
+
+_CATEGORY_ENUM = Enum(AircraftCategory, name="aircraft_category", schema="fleet",
+                      values_callable=lambda e: [m.value for m in e])
+
+
 class AircraftType(Base):
     """A reusable aircraft type: MANUFACTURER AND MASTER SERIES together, e.g. Airbus / A320-232.
 
-    The pair is the key, not the series. Cirium carries 806 distinct pairs across Commercial and
-    Business & Helicopters but only 751 distinct series, because 48 series are built by more than
-    one manufacturer under licence — Kawasaki builds the BK117, Mitsubishi the CRJ family and the
+    The key is the TRIPLE — manufacturer, master series and category. Cirium carries 806 distinct
+    manufacturer/series pairs across Commercial and Business & Helicopters but only 751 distinct
+    series, because 48 series are built by more than one manufacturer under licence — Kawasaki builds the BK117, Mitsubishi the CRJ family and the
     UH-60, Harbin the ERJ-145, Viking Air the DHC-6. Same design, different build, two rows.
     NULLS NOT DISTINCT so a series entered with no manufacturer still cannot be inserted twice.
 
@@ -58,11 +87,21 @@ class AircraftType(Base):
     master_series_normalized: Mapped[str] = mapped_column(
         String, Computed("upper(btrim(master_series))", persisted=True), nullable=False,
     )
+    category: Mapped[AircraftCategory] = mapped_column(
+        _CATEGORY_ENUM, nullable=False, server_default=text("'other'"), index=True,
+        comment="What the airframe is for: passenger (airline AND business aviation), cargo "
+                "(freight and the convertibles), or other (military, training, EMS, utility - "
+                "neither of the first two). Part of the type's identity: an A300-600 freighter "
+                "and an A300-600 in passenger layout are separate rows.",
+    )
     template_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True, default=None)
 
     __table_args__ = (
+        # The CATEGORY is part of the key. Without it 'Airbus A300-600' is one row that has to be
+        # either a freighter or a passenger aircraft and is wrong for half the fleet; with it the
+        # pair is two rows and every aircraft points at the true one.
         UniqueConstraint(
-            "manufacturer_normalized", "master_series_normalized",
+            "manufacturer_normalized", "master_series_normalized", "category",
             name="uq_aircraft_type_manufacturer_series", postgresql_nulls_not_distinct=True,
         ),
     )

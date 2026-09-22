@@ -186,7 +186,7 @@ REFERENCE
   POST   /ref/parties/{id}/contacts        · PATCH|DELETE /ref/contacts/{id}
 
 CATALOGUES  (identical shape — one component can drive both)
-  GET    /fleet/aircraft-types             ?q= &manufacturer=
+  GET    /fleet/aircraft-types             ?q= &manufacturer= &category=
   POST   /fleet/aircraft-types             · PATCH|DELETE /fleet/aircraft-types/{id}
   GET    /fleet/engine-types               ?q= &manufacturer=
   POST   /fleet/engine-types               · PATCH|DELETE /fleet/engine-types/{id}
@@ -232,7 +232,9 @@ Each row is complete: type, airline, service block and every engine. **No per-ro
 ```json
 {
   "id": 14, "registration": "4R-EXR", "msn": "3183",
-  "aircraft_type": { "id": 18, "manufacturer": "Airbus", "master_series": "A320", "template_url": null },
+  "aircraft_type": { "id": 18, "manufacturer": "Airbus", "master_series": "A320",
+                     "category": "passenger", "label": "Airbus A320 Passenger",
+                     "template_url": null },
   "airline": { "id": 31, "airline_name": "FitsAir", "icao": "EXV", "iata": "8D",
                "is_asg": false, "logo_url": null },
   "service": { "id": 5, "agreed_value_fixed": false, "source": "cirium", "status": "insured",
@@ -345,21 +347,50 @@ known values as suggestions; do not make it a closed dropdown.
 
 ### 6.6 Type catalogues — `/fleet/aircraft-types`, `/fleet/engine-types`
 
-Identical shape, so one component drives both: `{id, manufacturer, master_series}` (aircraft types
-also carry `template_url`).
+Near-identical shape, so one component drives both: `{id, manufacturer, master_series}`, and an
+**airframe** type adds `category`, a ready-made `label` and `template_url`.
 
-**A type is the manufacturer AND the master series together.** 48 airframe series are built by more
-than one manufacturer under licence — Kawasaki builds the BK117, Mitsubishi the CRJ family and the
-UH-60, Harbin the ERJ-145, Viking Air the DHC-6. So `?q=CRJ900` legitimately returns two rows, and
-`?manufacturer=Mitsubishi` pins one.
+```json
+{ "id": 812, "manufacturer": "Airbus", "master_series": "A300-600",
+  "category": "cargo", "label": "Airbus A300-600 Cargo", "template_url": null }
+```
 
-This has a consequence you must handle: **sending only `aircraft_type` for an ambiguous series is a
-400** that lists the builders —
+**An airframe type is the manufacturer, the master series AND the category together** — three
+parts, one identity. Two separate things make it so:
+
+* **48 series are built by more than one manufacturer** under licence: Kawasaki builds the BK117,
+  Mitsubishi the CRJ family and the UH-60, Harbin the ERJ-145, Viking Air the DHC-6. `?q=CRJ900`
+  legitimately returns two rows and `?manufacturer=Mitsubishi` pins one.
+* **The same series flown in a different role is a different row.** An A300-600 freighter and an
+  A300-600 in passenger layout are not the same thing to insure, so both exist. 1355 rows over 782
+  series: 366 series appear in two categories, 82 in all three.
+
+`category` is one of exactly three values and is never null:
+
+| value | what it covers |
+|---|---|
+| `passenger` | airline passengers **and business aviation** — including private, VIP, air taxi, sightseeing |
+| `cargo` | freight, plus combi and quick-change convertibles |
+| `other` | everything else: military, training, EMS, agriculture, police, survey, experimental |
+
+`?category=cargo` narrows the listing. **Show `label` in the dropdown**, not `master_series` alone —
+"A300-600" on its own does not tell the user which of the two rows they are about to pick, and
+they will pick the wrong one.
+
+**Two ambiguity errors you must handle**, both 400s that name what is missing:
 
 > `Aircraft type 'CRJ900' is built by several manufacturers (Bombardier (Canadair), Mitsubishi). Send `manufacturer` as well to say which.`
 
-Catch it and prompt for the manufacturer rather than surfacing it as a generic error. The same rule
-and the same message apply to `engine_type` / `engine_manufacturer`.
+> `Aircraft type 'A300-600' exists as cargo, passenger. Send `aircraft_category` as well to say which — a freighter and a passenger aircraft of the same series are different rows.`
+
+Catch both and prompt for the missing part rather than surfacing a generic error. The manufacturer
+rule and its message apply to `engine_type` / `engine_manufacturer` too; the category does not —
+engine models have none.
+
+**Recording a conversion.** When a passenger aircraft becomes a freighter, `PATCH
+/fleet/aircraft/{id}` with `{"aircraft_category": "cargo"}` and nothing else moves it to the cargo
+row of the same series. You do not re-send the series, and you do not create a type. The change log
+records it with both roles spelled out — `Airbus A321 Passenger → Airbus A321 Cargo`.
 
 ### 6.7 Counterparties — `/ref/parties`
 
@@ -542,10 +573,10 @@ The log is **read-only**: there is no endpoint that writes or deletes it, by des
 
 | | rows |
 |---|---|
-| `fleet.aircraft` | 149 |
+| `fleet.aircraft` | 149 (134 passenger · 15 cargo) |
 | `fleet.service_info` | 149 |
 | `fleet.aircraft_engine` | 300 |
-| `fleet.aircraft_type` | 806 |
+| `fleet.aircraft_type` | 1355 (558 passenger · 130 cargo · 667 other) |
 | `fleet.engine_type` | 365 |
 | `ref.party` | 97 |
 | `ref.airline` | 22 |

@@ -24,7 +24,7 @@ from sqlalchemy.exc import IntegrityError
 from Database import ApiToken
 from Database.RefModels import Airline, Party, PartyContact
 from Database.FleetModels import (
-    Aircraft, AircraftType, AircraftEngine, EngineType, ServiceInfo,
+    Aircraft, AircraftType, AircraftEngine, EngineType, ServiceInfo, AircraftCategory,
 )
 from Database.LeasingModels import Agreement, AircraftLease
 from Database.PolicyModels import Policy, Coverage
@@ -88,50 +88,70 @@ class AmbiguousType(ValueError):
 
 
 async def _get_or_create_type(session, model, master_series: Optional[str],
-                              manufacturer: Optional[str], label: str):
-    """Find a type row, or create it. Shared by airframes and engines, which are keyed identically:
-    the PAIR of manufacturer and master series (see the models).
+                              manufacturer: Optional[str], label: str,
+                              category: Optional[str] = None):
+    """Find a type row, or create it. Shared by airframes and engines.
 
-      * manufacturer given -> match the pair exactly, create it if absent;
-      * manufacturer omitted -> match by series alone, but only when ONE row matches. Several and
-        it raises `AmbiguousType` rather than picking one, because picking one would silently
-        attach the aircraft to the wrong builder.
+    An ENGINE model is keyed by the PAIR of manufacturer and master series. An AIRFRAME type is
+    keyed by that pair AND its category, so 'Airbus A300-600' names two rows — the freighter and
+    the passenger aircraft — and picking between them is the caller's business, not a coin toss.
+
+    Each name that is left out widens the search, and an ambiguous search is an error rather than
+    a guess, because guessing files the aircraft under the wrong builder or the wrong role and
+    nothing downstream would notice:
+
+      * everything given          -> match exactly, create if absent;
+      * manufacturer omitted      -> match on the rest; several builders -> AmbiguousType;
+      * category omitted (airframes) -> match on the rest; several categories -> AmbiguousType;
+      * nothing matches           -> create, defaulting the category to `passenger`, which is
+                                     what a fleet of insured aircraft is made of.
     """
     if not master_series or not master_series.strip():
         return None
-    series_key = norm(master_series)
-
+    conds = [model.master_series_normalized == norm(master_series)]
     if manufacturer and manufacturer.strip():
-        row = (await session.execute(
-            select(model).where(model.manufacturer_normalized == norm(manufacturer),
-                                model.master_series_normalized == series_key)
-        )).scalar_one_or_none()
-        if row is None:
-            row = model(master_series=master_series.strip(), manufacturer=manufacturer.strip())
-            session.add(row)
-            await session.flush()
-        return row
+        conds.append(model.manufacturer_normalized == norm(manufacturer))
+    has_category = hasattr(model, "category")
+    if has_category and category:
+        conds.append(model.category == category)
 
     matches = (await session.execute(
-        select(model).where(model.master_series_normalized == series_key).order_by(model.id)
-    )).scalars().all()
+        select(model).where(*conds).order_by(model.id))).scalars().all()
     if len(matches) == 1:
         return matches[0]
     if len(matches) > 1:
-        builders = ", ".join(sorted(m.manufacturer or "(no manufacturer)" for m in matches))
-        raise AmbiguousType(
-            f"{label} '{master_series.strip()}' is built by several manufacturers ({builders}). "
-            f"Send `manufacturer` as well to say which.")
-    row = model(master_series=master_series.strip())
+        if not (manufacturer and manufacturer.strip()):
+            builders = sorted({m.manufacturer or "(no manufacturer)" for m in matches})
+            if len(builders) > 1:
+                raise AmbiguousType(
+                    f"{label} '{master_series.strip()}' is built by several manufacturers "
+                    f"({', '.join(builders)}). Send `manufacturer` as well to say which.")
+        roles = sorted({enum_value(m.category) for m in matches}) if has_category else []
+        if len(roles) > 1:
+            raise AmbiguousType(
+                f"{label} '{master_series.strip()}' exists as {', '.join(roles)}. Send "
+                f"`aircraft_category` as well to say which — a freighter and a passenger "
+                f"aircraft of the same series are different rows.")
+        return matches[0]
+
+    # Nothing matched: create it. Only an exact request can create, because creating from a
+    # partial name is how a second 'A320' with no manufacturer appears beside the real one.
+    fields = {"master_series": master_series.strip()}
+    if manufacturer and manufacturer.strip():
+        fields["manufacturer"] = manufacturer.strip()
+    if has_category:
+        fields["category"] = category or AircraftCategory.PASSENGER
+    row = model(**fields)
     session.add(row)
     await session.flush()
     return row
 
 
 async def get_or_create_aircraft_type(session, master_series: Optional[str],
-                                      manufacturer: Optional[str] = None) -> Optional[AircraftType]:
+                                      manufacturer: Optional[str] = None,
+                                      category: Optional[str] = None) -> Optional[AircraftType]:
     return await _get_or_create_type(session, AircraftType, master_series, manufacturer,
-                                     "Aircraft type")
+                                     "Aircraft type", category)
 
 
 async def get_or_create_engine_type(session, master_series: Optional[str],
@@ -372,10 +392,17 @@ def aircraft_type_json(t: Optional[AircraftType]) -> Optional[dict]:
 
 
 def type_json(t) -> Optional[dict]:
-    """An aircraft type or an engine type — they are the same shape."""
+    """An aircraft type or an engine type — nearly the same shape. An AIRFRAME type also carries
+    its category, which is part of its identity: 'Airbus A300-600' alone does not say whether the
+    row is the freighter or the passenger aircraft, and `label` spells the whole thing out so a
+    dropdown does not have to assemble it."""
     if t is None:
         return None
     out = {"id": t.id, "manufacturer": t.manufacturer, "master_series": t.master_series}
+    if hasattr(t, "category"):
+        out["category"] = enum_value(t.category)
+        out["label"] = " ".join(x for x in (
+            t.manufacturer, t.master_series, enum_value(t.category).capitalize()) if x)
     if hasattr(t, "template_url"):
         out["template_url"] = t.template_url
     return out
@@ -597,11 +624,16 @@ async def resolve_fk_labels(session, rows: Iterable[Optional[dict]]) -> dict:
         )).all():
             labels[("aircraft", aid)] = f"{reg} (MSN {msn})" if msn else reg
     if wanted.get("aircraft_type"):
-        for tid, manuf, series in (await session.execute(
-            select(AircraftType.id, AircraftType.manufacturer, AircraftType.master_series)
+        # The CATEGORY belongs in the label. Without it, re-pointing an aircraft from the
+        # passenger A320 to the cargo A320 renders as "Airbus A320 -> Airbus A320": a real change
+        # that reads as no change at all, which is the one thing a change log must never do.
+        for tid, manuf, series, category in (await session.execute(
+            select(AircraftType.id, AircraftType.manufacturer, AircraftType.master_series,
+                   AircraftType.category)
             .where(AircraftType.id.in_(wanted["aircraft_type"]))
         )).all():
-            labels[("aircraft_type", tid)] = f"{manuf} {series}" if manuf else series
+            labels[("aircraft_type", tid)] = " ".join(
+                x for x in (manuf, series, enum_value(category).capitalize()) if x)
     if wanted.get("engine_type"):
         for eid, manuf, series in (await session.execute(
             select(EngineType.id, EngineType.manufacturer, EngineType.master_series)
