@@ -24,6 +24,7 @@ from sqlalchemy import (
     String, Text, BigInteger, Integer, Date, Boolean, ForeignKey, Computed, Enum,
     UniqueConstraint, CheckConstraint, Index, text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .config import FleetBase as Base
@@ -33,6 +34,26 @@ from .config import FleetBase as Base
 from .RefModels import Airline, CURRENCIES, CURRENCY_VALUES
 
 MAX_ENGINES = 4
+
+# The two drawings a type can have. An aircraft is damaged in the air and on the ground and the
+# portal overlays each on the matching outline, so one URL was never going to be enough.
+TEMPLATE_VIEWS = ("airborne", "on_the_ground")
+
+# Exactly those two keys, values a URL or null, and never an object where both are null — that
+# state is `template_url IS NULL`, so "nothing recorded" has ONE representation and a reader never
+# has to test for two. `->` is used rather than `?&` because a missing key gives SQL NULL while a
+# key holding JSON null does not, which is precisely the distinction needed here.
+TEMPLATE_URL_CHECK = (
+    "template_url IS NULL OR ("
+    "jsonb_typeof(template_url) = 'object'"
+    " AND template_url -> 'airborne' IS NOT NULL"
+    " AND template_url -> 'on_the_ground' IS NOT NULL"
+    " AND template_url - 'airborne' - 'on_the_ground' = '{}'::jsonb"
+    " AND jsonb_typeof(template_url -> 'airborne') IN ('string', 'null')"
+    " AND jsonb_typeof(template_url -> 'on_the_ground') IN ('string', 'null')"
+    " AND (template_url ->> 'airborne' IS NOT NULL"
+    "      OR template_url ->> 'on_the_ground' IS NOT NULL))"
+)
 
 
 class AircraftCategory(PyEnum):
@@ -73,9 +94,14 @@ class AircraftType(Base):
     UH-60, Harbin the ERJ-145, Viking Air the DHC-6. Same design, different build, two rows.
     NULLS NOT DISTINCT so a series entered with no manufacturer still cannot be inserted twice.
 
-    `template_url` points at the outline drawing the portal overlays damage on — a URL into the
-    platform's image store, never the bytes themselves. Keeping binaries out of the row means a
-    grid can read a hundred types without dragging a hundred images through the connection.
+    `template_url` holds the outline drawings the portal overlays damage on: an object
+    `{"airborne": ..., "on_the_ground": ...}`, because an aircraft is damaged in two states and
+    each needs its own outline — gear up in the air, gear down and doors open on the stand.
+
+    They are URLs into the platform's image store, never the bytes themselves. Keeping binaries out
+    of the row means a grid can read a hundred types without dragging a hundred images through the
+    connection. A CHECK enforces the shape (see `TEMPLATE_URL_CHECK`), so the column cannot quietly
+    collect a third key or a number where a URL belongs.
     """
     __tablename__ = "aircraft_type"
 
@@ -94,7 +120,16 @@ class AircraftType(Base):
                 "neither of the first two). Part of the type's identity: an A300-600 freighter "
                 "and an A300-600 in passenger layout are separate rows.",
     )
-    template_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True, default=None)
+    template_url: Mapped[Optional[dict]] = mapped_column(
+        # none_as_null is NOT optional here. SQLAlchemy's default writes Python None as JSON
+        # `null` rather than SQL NULL, and a JSON null is an object of the wrong type as far as
+        # the CHECK is concerned — every type created without drawings would be rejected.
+        JSONB(none_as_null=True), nullable=True, default=None,
+        comment="The outline drawings the portal overlays damage on, as "
+                "{airborne, on_the_ground}. URLs into the image store, never bytes. NULL means "
+                "no drawing is recorded; an object always carries both keys and at least one "
+                "non-null URL.",
+    )
 
     __table_args__ = (
         # The CATEGORY is part of the key. Without it 'Airbus A300-600' is one row that has to be
@@ -104,6 +139,7 @@ class AircraftType(Base):
             "manufacturer_normalized", "master_series_normalized", "category",
             name="uq_aircraft_type_manufacturer_series", postgresql_nulls_not_distinct=True,
         ),
+        CheckConstraint(TEMPLATE_URL_CHECK, name="ck_aircraft_type_template_url"),
     )
 
 

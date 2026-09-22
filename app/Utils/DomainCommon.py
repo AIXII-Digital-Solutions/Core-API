@@ -25,6 +25,7 @@ from Database import ApiToken
 from Database.RefModels import Airline, Party, PartyContact
 from Database.FleetModels import (
     Aircraft, AircraftType, AircraftEngine, EngineType, ServiceInfo, AircraftCategory,
+    TEMPLATE_VIEWS,
 )
 from Database.LeasingModels import Agreement, AircraftLease
 from Database.PolicyModels import Policy, Coverage
@@ -391,6 +392,50 @@ def aircraft_type_json(t: Optional[AircraftType]) -> Optional[dict]:
     return type_json(t)
 
 
+# ==============================================================================================
+# the outline drawings
+# ==============================================================================================
+# `fleet.aircraft_type.template_url` is an object, `{airborne, on_the_ground}`, and the column's
+# CHECK allows exactly one representation of "nothing recorded": SQL NULL. These three functions
+# are the only places that know it, so the routers never assemble the shape by hand.
+
+def template_urls_json(value: Optional[dict]) -> dict:
+    """What a READER sees: always both keys, even when nothing is recorded.
+
+    A client that can rely on `template_url.airborne` existing never has to branch on null, and
+    the information is not lost by it — the column forbids an object with both views null, so
+    `{airborne: null, on_the_ground: null}` and SQL NULL mean the same thing.
+    """
+    value = value or {}
+    return {view: value.get(view) for view in TEMPLATE_VIEWS}
+
+
+def normalize_template_urls(payload: Optional[dict]) -> Optional[dict]:
+    """What a WRITER stores: both keys, or NULL when no view has a URL.
+
+    Collapsing the all-empty object to NULL is what keeps the reader's promise true, and an empty
+    string is treated as no URL — a cleared form field must not become a link to nowhere.
+    """
+    if payload is None:
+        return None
+    out = {view: ((payload.get(view) or "").strip() or None) for view in TEMPLATE_VIEWS}
+    return out if any(out.values()) else None
+
+
+def merge_template_urls(current: Optional[dict], patch: dict) -> Optional[dict]:
+    """PATCH, per VIEW. Only the views actually sent change.
+
+    This is the whole reason the merge exists: uploading a new ground drawing must not wipe the
+    airborne one the caller never mentioned. Sending a view explicitly as null clears that view;
+    clearing both leaves the column NULL.
+    """
+    merged = dict(current or {})
+    for view in TEMPLATE_VIEWS:
+        if view in patch:
+            merged[view] = patch[view]
+    return normalize_template_urls(merged)
+
+
 def type_json(t) -> Optional[dict]:
     """An aircraft type or an engine type — nearly the same shape. An AIRFRAME type also carries
     its category, which is part of its identity: 'Airbus A300-600' alone does not say whether the
@@ -404,7 +449,7 @@ def type_json(t) -> Optional[dict]:
         out["label"] = " ".join(x for x in (
             t.manufacturer, t.master_series, enum_value(t.category).capitalize()) if x)
     if hasattr(t, "template_url"):
-        out["template_url"] = t.template_url
+        out["template_url"] = template_urls_json(t.template_url)
     return out
 
 
