@@ -40,7 +40,7 @@ from settings import Router
 from Database import ApiToken
 from Database.FleetModels import (
     Aircraft, AircraftType, AircraftEngine, EngineType, ServiceInfo,
-    RecordSource, InsuranceStatus, MAX_ENGINES,
+    RecordSource, InsuranceStatus, AircraftCategory, MAX_ENGINES,
 )
 from Database.LeasingModels import AircraftLease, Agreement
 from Database.PolicyModels import Coverage, Policy
@@ -109,10 +109,17 @@ _AIRCRAFT_ONE = (
 # ==============================================================================================
 
 class TypeIn(BaseModel):
-    """A type is the manufacturer AND the master series together — 48 series in Cirium are built
-    by more than one manufacturer, so the series alone is not the identity."""
+    """An airframe type is the manufacturer, the master series AND the category together. 48
+    series in Cirium are built by more than one manufacturer, and a series flown in two roles is
+    two rows: an A300-600 freighter and an A300-600 in passenger layout are not the same thing to
+    insure. All three make the identity; none of them alone does."""
     master_series: str = Field(min_length=1, max_length=128, description="e.g. 'A320-232'.")
     manufacturer: Optional[str] = Field(default=None, max_length=128, description="e.g. 'Airbus'.")
+    category: AircraftCategory = Field(
+        default=AircraftCategory.PASSENGER,
+        description="passenger (airline AND business aviation), cargo (freight and the "
+                    "convertibles) or other (military, training, EMS, utility — neither of the "
+                    "first two). Defaults to passenger.")
     template_url: Optional[str] = Field(
         default=None, max_length=2048,
         description="URL of the outline drawing in the platform image store — a link, not bytes.")
@@ -121,6 +128,11 @@ class TypeIn(BaseModel):
 class TypePatch(BaseModel):
     master_series: Optional[str] = Field(default=None, min_length=1, max_length=128)
     manufacturer: Optional[str] = Field(default=None, max_length=128)
+    category: Optional[AircraftCategory] = Field(
+        default=None,
+        description="Moving a type between categories re-files every aircraft on it. To split a "
+                    "type instead, create the second row and re-point the aircraft that belong "
+                    "to it.")
     template_url: Optional[str] = Field(default=None, max_length=2048)
 
 
@@ -200,7 +212,12 @@ class AircraftIn(BaseModel):
     msn: Optional[str] = Field(default=None, max_length=64)
     aircraft_type: Optional[str] = Field(default=None, max_length=128)
     manufacturer: Optional[str] = Field(default=None, max_length=128,
-                                        description="Only used when the type has to be created.")
+                                        description="Disambiguates a series several builders make.")
+    aircraft_category: Optional[AircraftCategory] = Field(
+        default=None,
+        description="Which role of that series — a freighter and a passenger aircraft of the same "
+                    "series are separate types. Omit it when only one exists; a 400 lists the "
+                    "choices when several do. A type that has to be CREATED defaults to passenger.")
     airline: Optional[str] = Field(default=None, max_length=256)
     engines: list[EngineIn] = Field(default_factory=list)
     service: ServiceIn = Field(default_factory=ServiceIn,
@@ -212,6 +229,10 @@ class AircraftPatch(BaseModel):
     msn: Optional[str] = Field(default=None, max_length=64)
     aircraft_type: Optional[str] = Field(default=None, max_length=128)
     manufacturer: Optional[str] = Field(default=None, max_length=128)
+    aircraft_category: Optional[AircraftCategory] = Field(
+        default=None, description="Which role of the series — see AircraftIn. Sending it alone "
+                                  "moves the aircraft to that role of its current series, which "
+                                  "is how a converted freighter is recorded.")
     airline: Optional[str] = Field(default=None, max_length=256)
 
 
@@ -222,18 +243,23 @@ class AircraftPatch(BaseModel):
 # are deliberately the same shape: the portal can drive them with one component.
 
 def _type_sortmap(model):
-    return {"manufacturer": model.manufacturer, "master_series": model.master_series,
-            "created_at": model.created_at}
+    out = {"manufacturer": model.manufacturer, "master_series": model.master_series,
+           "created_at": model.created_at}
+    if hasattr(model, "category"):
+        out["category"] = model.category
+    return out
 
 
 async def _list_types(request, response, model, to_json, entity, q, manufacturer, limit, offset,
-                      sort, order):
+                      sort, order, category=None):
     conds = []
     q = (q or "").strip()
     if q:
         conds.append(or_(model.master_series.ilike(f"%{q}%"), model.manufacturer.ilike(f"%{q}%")))
     if manufacturer:
         conds.append(model.manufacturer_normalized == manufacturer.strip().upper())
+    if category is not None:
+        conds.append(model.category == category)
     stmt = apply_sort(select(model).where(*conds), sort=sort, order=order,
                       sortmap=_type_sortmap(model), tiebreak=(model.master_series, model.id))
 
@@ -248,7 +274,10 @@ async def _list_types(request, response, model, to_json, entity, q, manufacturer
 
     data = await cached(request, entity,
                         {"q": q, "manufacturer": manufacturer, "limit": limit, "offset": offset,
-                         "sort": sort, "order": order}, load)
+                         "sort": sort, "order": order,
+                         # Part of the key, not decoration: leave it out and a request filtered to
+                         # cargo is served the cached unfiltered page.
+                         "category": getattr(category, "value", category)}, load)
     return success_response(request=request, response=response, data=data)
 
 
@@ -309,21 +338,28 @@ _TYPE_LIST_DESC = (
     "one row per manufacturer AND master series. `q` matches either; `manufacturer` pins a series "
     "several builders make. Returns `{items, total}`."
 )
+_AIRFRAME_LIST_DESC = (
+    "one row per manufacturer, master series AND category, so 'Airbus A300-600' appears twice — "
+    "once as the freighter, once as the passenger aircraft. `q` matches the manufacturer or the "
+    "series; `manufacturer` pins a series several builders make; `category` narrows to one role. "
+    "Each item carries `category` and a ready-made `label`. Returns `{items, total}`."
+)
 
 
 # --- aircraft types ---------------------------------------------------------------------------
 
-@router.get(path="/aircraft-types", description="Airframe types — " + _TYPE_LIST_DESC,
+@router.get(path="/aircraft-types", description="Airframe types — " + _AIRFRAME_LIST_DESC,
             responses=build_responses(include=_OK), dependencies=_READ)
 async def list_aircraft_types(
     request: Request, response: Response, q: str = Query(""),
     manufacturer: Optional[str] = Query(None, description="Exact manufacturer name."),
+    category: Optional[AircraftCategory] = Query(None, description="passenger | cargo | other."),
     limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0),
     sort: Optional[str] = Query(None), order: Optional[str] = Query(None),
 ):
     try:
         return await _list_types(request, response, AircraftType, type_json, AIRCRAFT_TYPE,
-                                 q, manufacturer, limit, offset, sort, order)
+                                 q, manufacturer, limit, offset, sort, order, category)
     except SortError as _ex:
         return warning_response(request=request, response=response, msg=str(_ex))
     except Exception as _ex:
@@ -331,14 +367,17 @@ async def list_aircraft_types(
 
 
 @router.post(path="/aircraft-types",
-             description="Add an airframe type. The manufacturer and master series are unique "
-                         "TOGETHER — 48 series in Cirium are built by more than one manufacturer.",
+             description="Add an airframe type. The manufacturer, master series and category are "
+                         "unique TOGETHER: 48 series in Cirium are built by more than one "
+                         "manufacturer, and the same series flown as a freighter and as a "
+                         "passenger aircraft is two rows. `category` defaults to passenger.",
              responses=build_responses(include=_OK | {status.HTTP_201_CREATED}))
 async def create_aircraft_type(request: Request, response: Response, body: TypeIn,
                                token: Optional[ApiToken] = Depends(authorize(SCOPE_INSURANCE_WRITE))):
     try:
         return await _create_type(request, response, AircraftType, type_json, AIRCRAFT_TYPE, body,
-                                  token, {"template_url": body.template_url})
+                                  token, {"template_url": body.template_url,
+                                          "category": body.category})
     except IntegrityError as _ex:
         code, msg = integrity_error(_ex)
         return warning_response(request=request, response=response, msg=msg, status_code=code)
@@ -504,7 +543,8 @@ async def create_aircraft(request: Request, response: Response, body: AircraftIn
     try:
         async with request.app.state.db_client.session(DB) as session:
             await set_actor(session, token)
-            ac_type = await get_or_create_aircraft_type(session, body.aircraft_type, body.manufacturer)
+            ac_type = await get_or_create_aircraft_type(
+                session, body.aircraft_type, body.manufacturer, body.aircraft_category)
             airline = await get_or_create_airline(session, body.airline)
 
             row = await find_aircraft(session, registration=body.registration, msn=body.msn)
@@ -667,11 +707,21 @@ async def update_aircraft(request: Request, response: Response, aircraft_id: int
                 return warning_response(request=request, response=response,
                                         msg=f"Aircraft {aircraft_id} not found",
                                         status_code=status.HTTP_404_NOT_FOUND)
-            if "aircraft_type" in fields:
-                ac_type = await get_or_create_aircraft_type(
-                    session, fields.pop("aircraft_type"), fields.pop("manufacturer", None))
+            if "aircraft_type" in fields or "aircraft_category" in fields:
+                # Either name may be omitted, and what is omitted is taken from the type the
+                # aircraft is on now — so `{"aircraft_category": "cargo"}` alone moves a converted
+                # freighter to the cargo row of the SAME series rather than needing the series
+                # spelled out again.
+                held = row.aircraft_type
+                series = fields.pop("aircraft_type", None) or (held.master_series if held else None)
+                maker = fields.pop("manufacturer", None) or (held.manufacturer if held else None)
+                # A series change with no category keeps the role it is in: re-typing an
+                # aircraft should not quietly turn a freighter into a passenger aircraft.
+                wanted = fields.pop("aircraft_category", None) or (held.category if held else None)
+                ac_type = await get_or_create_aircraft_type(session, series, maker, wanted)
                 row.aircraft_type_id = ac_type.id if ac_type else None
             fields.pop("manufacturer", None)
+            fields.pop("aircraft_category", None)
             if "airline" in fields:
                 airline = await get_or_create_airline(session, fields.pop("airline"))
                 row.airline_id = airline.id if airline else None

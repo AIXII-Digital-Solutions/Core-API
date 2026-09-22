@@ -18,7 +18,7 @@ ref       airline               the airlines this business insures or tracks
           party                 every counterparty: lessor, insured, reinsured, retrocedent
           party_contact         one row per COMPANY / CONTACTS / EMAIL block
 
-fleet     aircraft_type         manufacturer, master series, template drawing
+fleet     aircraft_type         manufacturer, master series, category, template drawing
           engine_type           manufacturer, master series — the same shape
           aircraft              the airframe — registration, MSN, -> type, -> ref.airline
           aircraft_engine       one row per installation, position 1..4, -> engine_type
@@ -144,7 +144,7 @@ migration that touches no type shared by two schemas.
 The row is created with the aircraft, so every airframe has one. A missing row reads as these
 defaults with `recorded: false` rather than as a screen of nulls.
 
-**6. Aircraft type → `fleet.aircraft_type`** — `manufacturer`, `master_series`, `template_url`.
+**6. Aircraft type → `fleet.aircraft_type`** — `manufacturer`, `master_series`, `category`, `template_url`.
 The two names are unique TOGETHER (normalised), not the series alone — see below.
 
 **7. Airline → `ref.airline`** — `airline_name`, `icao`, `iata` and `is_asg` came with the table;
@@ -205,25 +205,49 @@ so both halves of the domain describe hardware at one level rather than two. A f
 migration away if a schedule ever needs the sub-series (464 pairs at series level, 952 at
 sub-series).
 
-**An aircraft type is the manufacturer AND the master series.** Cirium carries 806 distinct pairs
-across Commercial and Business & Helicopters but only 751 distinct series: **48 series are built by
-more than one manufacturer** under licence — Kawasaki builds the BK117, Mitsubishi the CRJ family and
-the UH-60, Harbin the ERJ-145, Viking Air the DHC-6, Indonesia Aerospace the CN235. Same design,
-different build. `uq_aircraft_type_manufacturer_series` is therefore over the pair, declared NULLS
-NOT DISTINCT so a series entered without a manufacturer still cannot be inserted twice
+**An aircraft type is the manufacturer, the master series AND the category.** Two independent
+reasons force each part into the key.
+
+*The manufacturer*, because **48 series are built by more than one manufacturer** under licence —
+Kawasaki builds the BK117, Mitsubishi the CRJ family and the UH-60, Harbin the ERJ-145, Viking Air
+the DHC-6, Indonesia Aerospace the CN235. Same design, different build. Cirium carries 806 distinct
+manufacturer/series pairs across Commercial and Business & Helicopters but only 751 distinct series
 (revision `aircraft_type_manufacturer`).
 
-The consequence for the write path: looking a type up by series alone can match several rows.
-`get_or_create_aircraft_type` matches the pair when a manufacturer is given, and by series alone
-otherwise — but only when exactly ONE row matches. An ambiguous series with no manufacturer is
-rejected with a 400 listing the builders, because resolving it by guesswork would attach the
-aircraft to the wrong one — and the same resolver serves engine models, so the rule is one rule.
-No engine master series currently collides; the key is still the pair so the first one that does
-needs no migration.
+*The category*, because the same series flown in a different role is a different thing to insure.
+An A300-600 freighter and an A300-600 in passenger layout share an airframe and nothing else that
+matters here, and while they shared one row half the fleet pointed at a type describing the other
+half. `fleet.aircraft_type.category` is a three-value enum, `fleet.aircraft_category`:
 
-Both catalogues are loaded by `_admin/load_types.py` from Cirium: **806 airframe types** over 191
-manufacturers, **365 engine models** over 54. `template_url` stays NULL — the drawings are not in
-Cirium.
+| value | what it covers |
+|---|---|
+| `passenger` | airline passengers AND business aviation — `Passenger`, both `Business - *` roles, `Private Use`, `VIP / Head of State`, `Sightseeing / Tourist`, `Government - Liaison` |
+| `cargo` | `Freight / Cargo` plus the convertibles (`Combi / Mixed`, `Quick-Change/Convertible`) — a cargo deck is what distinguishes those from an ordinary passenger aircraft |
+| `other` | everything else: military, training, agriculture, EMS, police, survey, firefighting, experimental |
+
+Three values and no NULL, which means `other` has to be a **statement** — this type carries neither
+passengers nor freight for hire — and not a bucket for "we don't know". It is most of the catalogue
+by rows (667 of 1355) and none of it by fleet.
+
+The mapping is a collapse of Cirium's `Primary Usage`, which is per-AIRFRAME and 49 values deep, and
+that per-airframe origin is the whole point: 366 manufacturer/series pairs appear in two categories
+and 82 in all three, so the category cannot be derived from the series name. `uq_aircraft_type_
+manufacturer_series` covers all three columns, still NULLS NOT DISTINCT to guard the manufacturer
+(revision `aircraft_type_category`).
+
+The consequence for the write path: looking a type up by a partial name can match several rows, and
+each omitted part widens the search. `get_or_create_aircraft_type` narrows on whatever it is given
+and returns the row only when exactly ONE matches. Several builders and no manufacturer, or several
+roles and no category, is a 400 listing the choices — resolving either by guesswork files the
+aircraft under the wrong builder or the wrong role, and nothing downstream would notice. Creating
+from scratch defaults the category to `passenger`, which is what a fleet of insured aircraft is
+made of. The same resolver serves engine models, which have no category, so the rule is one rule.
+
+Both catalogues are loaded by `_admin/load_types.py` from Cirium (**806 airframe pairs** over 191
+manufacturers, **365 engine models** over 54); `_admin/load_type_categories.py` then classifies the
+airframes, splits the pairs that appear in more than one role into separate rows — **1355 after the
+split: 558 passenger, 130 cargo, 667 other** — and re-points `fleet.aircraft` at the row matching
+each airframe's own usage. `template_url` stays NULL: the drawings are not in Cirium.
 
 **The fleet itself is loaded too** — `_admin/load_insured_fleet.py` reads the four
 `cirium.asg_*` / `cirium.non_asg_insured_*` matviews into `fleet.aircraft` (148),
@@ -386,7 +410,7 @@ that expose timestamps, and their handlers refresh `updated_at` explicitly.
 
 **The reference listings are cached; nothing else is.** `/ref/airlines`, `/ref/parties`,
 `/fleet/aircraft-types` and `/fleet/engine-types` are read by every typeahead keystroke, are large
-(806 airframe types, 365 engine models) and change a handful of times a year, so they are served
+(1355 airframe rows, 365 engine models) and change a handful of times a year, so they are served
 from Redis. An aircraft, a lease, a policy, the coverage comparison and the change log are NOT
 cached: they are read immediately after somebody writes them, and showing a portal user a stale
 copy of their own change is worse than the query it saved.
