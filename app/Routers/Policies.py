@@ -35,6 +35,7 @@ from Database.PolicyModels import Policy, Coverage
 from api_auth import authorize, SCOPE_INSURANCE_READ, SCOPE_INSURANCE_WRITE
 from Utils import success_response, warning_response, error_response
 from Utils.ResponsesFunc import build_responses
+from Utils.DomainCache import PARTY, invalidate
 from Utils.DomainCommon import (
     DB, set_actor, apply_sort, SortError, integrity_error, find_aircraft, get_or_create_party,
     policy_json, coverage_json, aircraft_json, lease_in_force, num, enum_value,
@@ -243,6 +244,7 @@ async def create_policy(request: Request, response: Response, body: PolicyIn,
             await session.flush()
             await session.refresh(row, ["insured", "reinsured", "retrocedent"])
             data = policy_json(row)
+        await invalidate(request, PARTY)   # a counterparty may have been created
         return success_response(request=request, response=response, data=data,
                                 status_code=status.HTTP_201_CREATED)
     except IntegrityError as _ex:
@@ -313,6 +315,7 @@ async def update_policy(request: Request, response: Response, policy_id: int, bo
             # lazy IO outside the greenlet context and the request 500s.
             await session.refresh(row, ["insured", "reinsured", "retrocedent", "updated_at"])
             data = policy_json(row)
+        await invalidate(request, PARTY)   # a counterparty may have been created
         return success_response(request=request, response=response, data=data)
     except IntegrityError as _ex:
         code, msg = integrity_error(_ex)
@@ -385,6 +388,7 @@ async def renew_policy(request: Request, response: Response, policy_id: int, bod
             await session.refresh(new, ["insured", "reinsured", "retrocedent"])
             data = policy_json(new)
             data["aircraft_carried"] = moved
+        await invalidate(request, PARTY)   # an override can name a new counterparty
         return success_response(
             request=request, response=response, data=data,
             msg=f"Renewed; {moved} aircraft carried onto the new policy",

@@ -42,6 +42,11 @@ API_WORKERS: int = int(require_env("API_WORKERS", 4))
 # and every reopen is a handshake over the network. 65 s outlives the common 60 s proxy setting.
 API_KEEPALIVE_TIMEOUT: int = int(require_env("API_KEEPALIVE_TIMEOUT", 65))
 
+# How long a cached insured-fleet reference listing may stand. This is a BACKSTOP, not the
+# correctness mechanism: every write invalidates the entity it touched (Utils/DomainCache), so the
+# TTL only bounds how long a MISSED invalidation could be visible — a Redis hiccup, say.
+INSURED_FLEET_CACHE_SECONDS: int = int(require_env("INSURED_FLEET_CACHE_SECONDS", 300))
+
 SELF_HOST: str = require_env("SELF_HOST", "api.aixii.com")
 SELF_PORT: int = int(require_env("SELF_PORT", 8000))
 
