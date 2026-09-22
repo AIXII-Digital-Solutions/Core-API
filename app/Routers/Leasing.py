@@ -41,6 +41,7 @@ from Utils import success_response, warning_response, error_response
 from Utils.ResponsesFunc import build_responses
 from Utils.DomainCache import PARTY, invalidate
 from Utils.DomainCommon import (
+    reload_with, AIRCRAFT_BRIEF,
     DB, norm, set_actor, apply_sort, SortError, integrity_error, find_aircraft,
     get_or_create_party, agreement_json, lease_json,
 )
@@ -194,7 +195,8 @@ async def create_agreement(request: Request, response: Response, body: Agreement
             )
             session.add(row)
             await session.flush()
-            await session.refresh(row, ["lessor"])
+            row = await reload_with(session, Agreement, row.id,
+                                    joinedload(Agreement.lessor))
             data = agreement_json(row)
         await invalidate(request, PARTY)   # a counterparty may have been created
         return success_response(request=request, response=response, data=data,
@@ -226,7 +228,7 @@ async def get_agreement(request: Request, response: Response, agreement_id: int,
                 select(AircraftLease, Aircraft)
                 .join(Aircraft, Aircraft.id == AircraftLease.aircraft_id)
                 .where(AircraftLease.agreement_id == agreement_id)
-                .options(*_LEASE_LOAD)
+                .options(*_LEASE_LOAD, *AIRCRAFT_BRIEF)
                 .order_by(Aircraft.registration, AircraftLease.effective_date.desc())
             )).all()
             data = agreement_json(row)
@@ -259,7 +261,8 @@ async def update_agreement(request: Request, response: Response, agreement_id: i
             for key, value in fields.items():
                 setattr(row, key, value.strip() if key == "name" and value else value)
             await session.flush()
-            await session.refresh(row, ["lessor"])
+            row = await reload_with(session, Agreement, row.id,
+                                    joinedload(Agreement.lessor))
             data = agreement_json(row)
         await invalidate(request, PARTY)   # a counterparty may have been created
         return success_response(request=request, response=response, data=data)
@@ -341,7 +344,7 @@ async def list_leases(
         async with request.app.state.db_client.read_session(DB) as session:
             stmt = (select(AircraftLease, Aircraft)
                     .join(Aircraft, Aircraft.id == AircraftLease.aircraft_id)
-                    .where(*conds).options(*_LEASE_LOAD))
+                    .where(*conds).options(*_LEASE_LOAD, *AIRCRAFT_BRIEF))
             if current_only:
                 # one per aircraft: the newest row not later than `on`. DISTINCT ON needs the
                 # distinct column to lead ORDER BY, so paging and sorting happen in Python below.
@@ -383,9 +386,12 @@ async def create_lease(request: Request, response: Response, body: LeaseIn,
             await set_actor(session, token)
 
             if body.aircraft_id is not None:
-                aircraft = await session.get(Aircraft, body.aircraft_id)
+                aircraft = await session.get(Aircraft, body.aircraft_id, options=AIRCRAFT_BRIEF)
             else:
-                aircraft = await find_aircraft(session, registration=body.registration, msn=body.msn)
+                # lease_json renders the aircraft and reads its service block for the currency,
+                # so the lookup has to bring the references with it.
+                aircraft = await find_aircraft(session, registration=body.registration,
+                                               msn=body.msn, options=AIRCRAFT_BRIEF)
             if aircraft is None:
                 return warning_response(
                     request=request, response=response,
@@ -427,8 +433,7 @@ async def create_lease(request: Request, response: Response, body: LeaseIn,
             )
             session.add(row)
             await session.flush()
-            await session.refresh(row, ["agreement"])
-            await session.refresh(agreement, ["lessor"])
+            row = await reload_with(session, AircraftLease, row.id, *_LEASE_LOAD)
             data = lease_json(row, aircraft=aircraft)
         await invalidate(request, PARTY)   # a counterparty may have been created
         return success_response(request=request, response=response, data=data,
@@ -454,7 +459,7 @@ async def get_lease(request: Request, response: Response, lease_id: int,
                 return warning_response(request=request, response=response,
                                         msg=f"Lease {lease_id} not found",
                                         status_code=status.HTTP_404_NOT_FOUND)
-            aircraft = await session.get(Aircraft, row.aircraft_id)
+            aircraft = await session.get(Aircraft, row.aircraft_id, options=AIRCRAFT_BRIEF)
             data = lease_json(row, on=on, aircraft=aircraft)
         return success_response(request=request, response=response, data=data)
     except Exception as _ex:
@@ -489,8 +494,10 @@ async def update_lease(request: Request, response: Response, lease_id: int, body
             # `updated_at` is computed by the database on UPDATE, so SQLAlchemy expires it
             # after the flush. Read it here, inside the session, or serializing the row
             # later triggers lazy IO outside the greenlet context and the request 500s.
-            await session.refresh(row, ["updated_at"])
-            aircraft = await session.get(Aircraft, row.aircraft_id)
+            # A re-select repopulates `updated_at`, which the UPDATE expired, and loads the
+            # agreement chain the serializer reads — one round trip for both.
+            row = await reload_with(session, AircraftLease, row.id, *_LEASE_LOAD)
+            aircraft = await session.get(Aircraft, row.aircraft_id, options=AIRCRAFT_BRIEF)
             data = lease_json(row, aircraft=aircraft)
         return success_response(request=request, response=response, data=data)
     except IntegrityError as _ex:
@@ -516,7 +523,7 @@ async def delete_lease(request: Request, response: Response, lease_id: int,
                 return warning_response(request=request, response=response,
                                         msg=f"Lease {lease_id} not found",
                                         status_code=status.HTTP_404_NOT_FOUND)
-            aircraft = await session.get(Aircraft, row.aircraft_id)
+            aircraft = await session.get(Aircraft, row.aircraft_id, options=AIRCRAFT_BRIEF)
             data = lease_json(row, aircraft=aircraft)
             await session.delete(row)
         return success_response(request=request, response=response, data=data,

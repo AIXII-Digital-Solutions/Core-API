@@ -49,7 +49,8 @@ from Utils import success_response, warning_response, error_response
 from Utils.ResponsesFunc import build_responses
 from Utils.DomainCache import AIRCRAFT_TYPE, AIRLINE, ENGINE_TYPE, cached, invalidate
 from Utils.DomainCommon import (
-    normalize_template_urls, merge_template_urls,
+    normalize_template_urls, merge_template_urls, reload_with,
+    AIRCRAFT_GRID, AIRCRAFT_ONE, AIRCRAFT_BRIEF, ENGINE_LOAD,
     DB, norm_reg, set_actor, apply_sort, SortError, AmbiguousType, integrity_error, find_aircraft,
     get_or_create_airline, get_or_create_aircraft_type, get_or_create_engine_type,
     aircraft_json, type_json, engine_json, fitted_engine_ids, service_json,
@@ -76,33 +77,11 @@ _READ = [Depends(authorize(SCOPE_INSURANCE_READ))]
 _OK = {status.HTTP_200_OK, status.HTTP_400_BAD_REQUEST, status.HTTP_404_NOT_FOUND,
        status.HTTP_409_CONFLICT, status.HTTP_500_INTERNAL_SERVER_ERROR}
 
-# HOW MANY ROUND TRIPS THIS COSTS IS THE WHOLE STORY. Every relationship here is loaded from a
-# REMOTE database, so each extra SELECT is a network round trip, and the models declare
-# `lazy="selectin"` — one query per relationship. That is right for a collection and wasteful for a
-# to-one: the type, the airline and the service block are single rows that belong in the aircraft's
-# own SELECT. `joinedload` puts them there.
-#
-# `engines` stays selectin: it is a COLLECTION, and joining a collection multiplies the parent rows
-# and breaks LIMIT/OFFSET on the grid. Its own to-one (the engine model) is joined inside that one
-# query, so the pair costs one trip, not one per engine.
-#
-# Card: 8 round trips -> 4. Grid: 7 -> 3, whatever the page size.
-_AIRCRAFT_LOAD = (
-    joinedload(Aircraft.aircraft_type),
-    joinedload(Aircraft.airline),
-    joinedload(Aircraft.service),
-    selectinload(Aircraft.engines).joinedload(AircraftEngine.engine_type),
-)
-
-# ONE aircraft, so there is no LIMIT for a joined collection to multiply: the engines can come
-# along in the same SELECT, and the card drops to three round trips (airframe, leases, coverages).
-# A joined collection makes the result rows non-unique, hence `.unique()` at every call site.
-_AIRCRAFT_ONE = (
-    joinedload(Aircraft.aircraft_type),
-    joinedload(Aircraft.airline),
-    joinedload(Aircraft.service),
-    joinedload(Aircraft.engines).joinedload(AircraftEngine.engine_type),
-)
+# The loader sets live in Utils/DomainCommon beside the serializers that decide what they
+# must contain — Leasing and Policies render aircraft too, and three copies of the rule
+# would be three chances to get it wrong. Local names kept so the call sites read the same.
+_AIRCRAFT_LOAD = AIRCRAFT_GRID
+_AIRCRAFT_ONE = AIRCRAFT_ONE
 
 
 # ==============================================================================================
@@ -598,7 +577,7 @@ async def create_aircraft(request: Request, response: Response, body: AircraftIn
                 fields["policy_currency"] = fields["policy_currency"].upper()
                 session.add(ServiceInfo(aircraft_id=row.id, **fields))
             await session.flush()
-            await session.refresh(row, ["aircraft_type", "airline", "engines", "service"])
+            row = await reload_with(session, Aircraft, row.id, *_AIRCRAFT_ONE)
             data = aircraft_json(row)
         # creating an aircraft can find-or-create its type, its engines' model and its
         # airline, so all three listings may have changed
@@ -750,7 +729,7 @@ async def update_aircraft(request: Request, response: Response, aircraft_id: int
             for key, value in fields.items():
                 setattr(row, key, value.strip() if isinstance(value, str) else value)
             await session.flush()
-            await session.refresh(row, ["aircraft_type", "airline", "engines", "service"])
+            row = await reload_with(session, Aircraft, row.id, *_AIRCRAFT_ONE)
             data = aircraft_json(row)
         await invalidate(request, AIRCRAFT_TYPE, AIRLINE)
         return success_response(request=request, response=response, data=data)
@@ -818,14 +797,21 @@ async def delete_aircraft(request: Request, response: Response, aircraft_id: int
 async def get_service(request: Request, response: Response, aircraft_id: int):
     try:
         async with request.app.state.db_client.read_session(DB) as session:
-            if await session.get(Aircraft, aircraft_id) is None:
+            # ONE query answers both questions. "Does the aircraft exist" and "has it a service
+            # row" used to be two, and the first was a full ORM load of the aircraft, which
+            # dragged its type, airline, engines and engine models along: seven round trips to
+            # read one 1:1 row. A LEFT JOIN separates the three cases by itself - no aircraft
+            # (404), an aircraft with no service row (the defaults), or both.
+            found = (await session.execute(
+                select(Aircraft.id, ServiceInfo)
+                .outerjoin(ServiceInfo, ServiceInfo.aircraft_id == Aircraft.id)
+                .where(Aircraft.id == aircraft_id)
+            )).first()
+            if found is None:
                 return warning_response(request=request, response=response,
                                         msg=f"Aircraft {aircraft_id} not found",
                                         status_code=status.HTTP_404_NOT_FOUND)
-            row = (await session.execute(
-                select(ServiceInfo).where(ServiceInfo.aircraft_id == aircraft_id)
-            )).scalar_one_or_none()
-            data = service_json(row)
+            data = service_json(found[1])
         return success_response(request=request, response=response, data=data)
     except Exception as _ex:
         return error_response(request=request, exc=_ex, response=response)
@@ -850,13 +836,16 @@ async def update_service(request: Request, response: Response, aircraft_id: int,
                 fields[key] = fields[key].upper()
         async with request.app.state.db_client.session(DB) as session:
             await set_actor(session, token)
-            if await session.get(Aircraft, aircraft_id) is None:
+            found = (await session.execute(
+                select(Aircraft.id, ServiceInfo)
+                .outerjoin(ServiceInfo, ServiceInfo.aircraft_id == Aircraft.id)
+                .where(Aircraft.id == aircraft_id)
+            )).first()
+            if found is None:
                 return warning_response(request=request, response=response,
                                         msg=f"Aircraft {aircraft_id} not found",
                                         status_code=status.HTTP_404_NOT_FOUND)
-            row = (await session.execute(
-                select(ServiceInfo).where(ServiceInfo.aircraft_id == aircraft_id)
-            )).scalar_one_or_none()
+            row = found[1]
             if row is None:
                 row = ServiceInfo(aircraft_id=aircraft_id, **fields)
                 session.add(row)
@@ -907,13 +896,17 @@ async def list_engines(request: Request, response: Response, aircraft_id: int,
         async with request.app.state.db_client.read_session(DB) as session:
             rows = (await session.execute(
                 select(AircraftEngine).where(AircraftEngine.aircraft_id == aircraft_id)
+                .options(*ENGINE_LOAD)
                 .order_by(AircraftEngine.position,
                           AircraftEngine.installed_on.desc().nulls_last(),
                           AircraftEngine.id.desc())
-            )).scalars().all()
-        fitted = fitted_engine_ids(rows)
-        items = [engine_json(e, fitted=e.id in fitted) for e in rows
-                 if not fitted_only or e.id in fitted]
+            )).unique().scalars().all()
+            # Serialized INSIDE the session. Outside it these rows are detached, and reading a
+            # relationship off a detached instance raises rather than loading - which is right,
+            # but it means the rendering has to happen while the session is still open.
+            fitted = fitted_engine_ids(rows)
+            items = [engine_json(e, fitted=e.id in fitted) for e in rows
+                     if not fitted_only or e.id in fitted]
         return success_response(request=request, response=response,
                                 data={"items": items, "total": len(items)})
     except Exception as _ex:
@@ -934,8 +927,11 @@ async def add_engine(request: Request, response: Response, aircraft_id: int, bod
     try:
         async with request.app.state.db_client.session(DB) as session:
             await set_actor(session, token)
-            aircraft = await session.get(Aircraft, aircraft_id)
-            if aircraft is None:
+            # An existence check selects the ID and nothing else: loading the aircraft would
+            # fetch four relationships to answer a yes/no question.
+            exists = (await session.execute(
+                select(Aircraft.id).where(Aircraft.id == aircraft_id))).scalar_one_or_none()
+            if exists is None:
                 return warning_response(request=request, response=response,
                                         msg=f"Aircraft {aircraft_id} not found",
                                         status_code=status.HTTP_404_NOT_FOUND)
@@ -943,7 +939,8 @@ async def add_engine(request: Request, response: Response, aircraft_id: int, bod
                                  **await _engine_fields(session, body))
             session.add(row)
             await session.flush()
-            await session.refresh(row, ["engine_type"])
+            row = await reload_with(session, AircraftEngine, row.id,
+                                    joinedload(AircraftEngine.engine_type))
             data = engine_json(row, fitted=True)
         await invalidate(request, ENGINE_TYPE)   # the model may have been created here
         return success_response(request=request, response=response, data=data,
@@ -967,7 +964,7 @@ async def update_engine(request: Request, response: Response, engine_id: int, bo
         fields = body.model_dump(exclude_unset=True)
         async with request.app.state.db_client.session(DB) as session:
             await set_actor(session, token)
-            row = await session.get(AircraftEngine, engine_id)
+            row = await session.get(AircraftEngine, engine_id, options=ENGINE_LOAD)
             if row is None:
                 return warning_response(request=request, response=response,
                                         msg=f"Engine {engine_id} not found",
@@ -975,7 +972,8 @@ async def update_engine(request: Request, response: Response, engine_id: int, bo
             for key, value in (await _engine_fields(session, body, partial=True)).items():
                 setattr(row, key, value)
             await session.flush()
-            await session.refresh(row, ["engine_type"])
+            row = await reload_with(session, AircraftEngine, row.id,
+                                    joinedload(AircraftEngine.engine_type))
             data = engine_json(row)
         await invalidate(request, ENGINE_TYPE)
         return success_response(request=request, response=response, data=data)
@@ -997,7 +995,7 @@ async def delete_engine(request: Request, response: Response, engine_id: int,
     try:
         async with request.app.state.db_client.session(DB) as session:
             await set_actor(session, token)
-            row = await session.get(AircraftEngine, engine_id)
+            row = await session.get(AircraftEngine, engine_id, options=ENGINE_LOAD)
             if row is None:
                 return warning_response(request=request, response=response,
                                         msg=f"Engine {engine_id} not found",

@@ -35,6 +35,29 @@ from .RefModels import Airline, CURRENCIES, CURRENCY_VALUES
 
 MAX_ENGINES = 4
 
+# ==============================================================================================
+# WHY EVERY RELATIONSHIP HERE IS lazy="raise_on_sql"
+# ==============================================================================================
+# The database is a network away — tens of milliseconds per round trip — and a relationship that
+# loads itself is a round trip nobody asked for. These models used `selectin`, which is one extra
+# SELECT per relationship per load, so reading ONE aircraft to check that it exists fetched its
+# type, its airline, its engines, their engine models and its service block: six round trips to
+# answer a yes/no question. The endpoint that did exactly that cost 7; the aircraft timeline cost
+# 16.
+#
+# `raise_on_sql` does not load and does not silently defer: touching an unloaded relationship
+# raises immediately, naming it. The cost of a load therefore has to be written down at the call
+# site, in `options(...)`, where it is visible in review — and the rule for which loader to use is
+# simple:
+#
+#     to-one        joinedload      - one row, belongs in the parent's own SELECT
+#     collection    selectinload    - joining it multiplies parent rows and breaks LIMIT/OFFSET
+#     not needed    say nothing     - and it costs nothing, which is the point
+#
+# A relationship already loaded is still free to read, so `raise_on_sql` never fires on data the
+# query actually fetched. If something raises, the fix is an `options(...)`, never a lazy default.
+# ==============================================================================================
+
 # The two drawings a type can have. An aircraft is damaged in the air and on the ground and the
 # portal overlays each on the matching outline, so one URL was never going to be enough.
 TEMPLATE_VIEWS = ("airborne", "on_the_ground")
@@ -214,17 +237,17 @@ class Aircraft(Base):
         index=True, nullable=True, default=None,
     )
 
-    aircraft_type: Mapped[Optional["AircraftType"]] = relationship("AircraftType", lazy="selectin")
-    airline: Mapped[Optional["Airline"]] = relationship(Airline, lazy="selectin")
+    aircraft_type: Mapped[Optional["AircraftType"]] = relationship("AircraftType", lazy="raise_on_sql")
+    airline: Mapped[Optional["Airline"]] = relationship(Airline, lazy="raise_on_sql")
     engines: Mapped[List["AircraftEngine"]] = relationship(
-        "AircraftEngine", back_populates="aircraft", lazy="selectin",
+        "AircraftEngine", back_populates="aircraft", lazy="raise_on_sql",
         order_by="(AircraftEngine.position, AircraftEngine.installed_on)",
         cascade="all, delete-orphan",
     )
     # 1:1. The API creates it with the aircraft, so every airframe has one; a NULL here means the
     # aircraft predates that and should be read as the defaults.
     service: Mapped[Optional["ServiceInfo"]] = relationship(
-        "ServiceInfo", back_populates="aircraft", lazy="selectin", uselist=False,
+        "ServiceInfo", back_populates="aircraft", lazy="raise_on_sql", uselist=False,
         cascade="all, delete-orphan",
     )
 
@@ -378,7 +401,7 @@ class AircraftEngine(Base):
     details: Mapped[Optional[str]] = mapped_column(Text, nullable=True, default=None)
 
     aircraft: Mapped["Aircraft"] = relationship("Aircraft", back_populates="engines")
-    engine_type: Mapped[Optional["EngineType"]] = relationship("EngineType", lazy="selectin")
+    engine_type: Mapped[Optional["EngineType"]] = relationship("EngineType", lazy="raise_on_sql")
 
     __table_args__ = (
         CheckConstraint(f"position BETWEEN 1 AND {MAX_ENGINES}", name="ck_aircraft_engine_position"),

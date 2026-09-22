@@ -63,9 +63,9 @@ class Agreement(Base):
     alternative_contract_party: Mapped[Optional[str]] = mapped_column(Text, nullable=True, default=None)
     other_contracts: Mapped[Optional[str]] = mapped_column(Text, nullable=True, default=None)
 
-    lessor: Mapped[Optional["Party"]] = relationship(Party, lazy="selectin")
+    lessor: Mapped[Optional["Party"]] = relationship(Party, lazy="raise_on_sql")
     aircraft_leases: Mapped[List["AircraftLease"]] = relationship(
-        "AircraftLease", back_populates="agreement", lazy="selectin",
+        "AircraftLease", back_populates="agreement", lazy="raise_on_sql",
     )
 
     __table_args__ = (
@@ -127,7 +127,7 @@ class AircraftLease(Base):
 
 
     agreement: Mapped["Agreement"] = relationship(
-        "Agreement", back_populates="aircraft_leases", lazy="selectin",
+        "Agreement", back_populates="aircraft_leases", lazy="raise_on_sql",
     )
 
     __table_args__ = (

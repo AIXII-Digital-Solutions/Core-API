@@ -18,7 +18,8 @@ from decimal import Decimal
 from typing import Any, Iterable, Optional, Sequence
 
 from fastapi import status
-from sqlalchemy import select, text, desc
+from sqlalchemy import select, text, desc, func, case, cast, literal, union_all, String
+from sqlalchemy.orm import joinedload, selectinload, raiseload
 from sqlalchemy.exc import IntegrityError
 
 from Database import ApiToken
@@ -31,6 +32,43 @@ from Database.LeasingModels import Agreement, AircraftLease
 from Database.PolicyModels import Policy, Coverage
 
 DB = "aixii"
+
+
+# ==============================================================================================
+# loader sets — what each serializer needs, declared once
+# ==============================================================================================
+# The models are `lazy="raise_on_sql"`, so a relationship is loaded only where a query asks for it.
+# `aircraft_json` reads the type, the airline and the service block EVERY time, and the engines
+# when asked; `lease_json` and `coverage_json` render an aircraft the same way. Rather than have
+# four routers each remember that, the three shapes live here.
+#
+#   AIRCRAFT_BRIEF  the aircraft inside a lease, a coverage or a comparison row: no engines, so
+#                   they are `raiseload` — asking for them later should fail loudly rather than
+#                   quietly cost a query per row.
+#   AIRCRAFT_GRID   a PAGE of aircraft. The engines are a collection, so they must be `selectin`:
+#                   joining a collection multiplies parent rows and breaks LIMIT/OFFSET.
+#   AIRCRAFT_ONE    ONE aircraft. Nothing to multiply without a LIMIT, so the engines join too and
+#                   the whole card is a single round trip. Needs `.unique()` on the result.
+
+AIRCRAFT_BRIEF = (
+    joinedload(Aircraft.aircraft_type),
+    joinedload(Aircraft.airline),
+    joinedload(Aircraft.service),
+    raiseload(Aircraft.engines),
+)
+AIRCRAFT_GRID = (
+    joinedload(Aircraft.aircraft_type),
+    joinedload(Aircraft.airline),
+    joinedload(Aircraft.service),
+    selectinload(Aircraft.engines).joinedload(AircraftEngine.engine_type),
+)
+AIRCRAFT_ONE = (
+    joinedload(Aircraft.aircraft_type),
+    joinedload(Aircraft.airline),
+    joinedload(Aircraft.service),
+    joinedload(Aircraft.engines).joinedload(AircraftEngine.engine_type),
+)
+ENGINE_LOAD = (joinedload(AircraftEngine.engine_type),)
 
 
 # ==============================================================================================
@@ -183,6 +221,33 @@ async def find_aircraft(session, *, registration: Optional[str] = None,
             .order_by(Aircraft.id).limit(1).options(*options)
         )).unique().scalar_one_or_none()
     return None
+
+
+async def reload_with(session, model, pk, *options):
+    """Re-read a row and its relationships in ONE round trip, after a write.
+
+    Replaces `session.refresh(row, ["a", "b", "c"])`, which costs a query for the row and ANOTHER
+    FOR EACH ATTRIBUTE named — four round trips to hand back an aircraft that was just created,
+    against a database tens of milliseconds away. A single SELECT with joined loaders does the
+    same work once.
+
+    It also fixes something `refresh` only papered over: a column with an `onupdate` SQL expression
+    (`updated_at`) is EXPIRED after an UPDATE, and reading it lazily outside the greenlet raises
+    MissingGreenlet. The re-select repopulates every expired attribute on the way past, so the
+    serializers no longer need a refresh of their own to be safe.
+
+    The identity map returns the instance the caller already holds, now loaded — not a copy.
+
+    `populate_existing` is what makes that safe. Without it a relationship ALREADY loaded is left
+    as it was, because changing a foreign key does not expire the object hanging off it: a PATCH
+    that moved an engine to another model flushed the new `engine_type_id` and then handed back
+    the OLD model, and the response looked like the write had not happened. With it, every
+    attribute the query touches is overwritten from the row that is really there.
+    """
+    return (await session.execute(
+        select(model).where(model.id == pk).options(*options)
+        .execution_options(populate_existing=True)
+    )).unique().scalar_one_or_none()
 
 
 async def set_actor(session, token: Optional[ApiToken]) -> None:
@@ -634,11 +699,42 @@ FK_LABELS = {
 }
 
 
+def _label_sources():
+    """How each kind of foreign key renders, as SQL.
+
+    Rendering in the DATABASE rather than in Python is what lets all seven kinds be asked for in
+    one statement instead of seven. `concat_ws` skips nulls, which is exactly the "join the parts
+    that exist" the Python did; everything is cast to text so the UNION's columns line up.
+    """
+    return {
+        "party": (Party, Party.id, cast(Party.name, String)),
+        "airline": (Airline, Airline.id, cast(Airline.airline_name, String)),
+        "aircraft": (Aircraft, Aircraft.id, case(
+            (Aircraft.msn.is_(None), cast(Aircraft.registration, String)),
+            else_=func.concat(Aircraft.registration, " (MSN ", Aircraft.msn, ")"))),
+        "aircraft_type": (AircraftType, AircraftType.id, func.concat_ws(
+            " ", AircraftType.manufacturer, AircraftType.master_series,
+            func.initcap(cast(AircraftType.category, String)))),
+        "engine_type": (EngineType, EngineType.id, func.concat_ws(
+            " ", EngineType.manufacturer, EngineType.master_series)),
+        "agreement": (Agreement, Agreement.id, case(
+            (Agreement.start_date.is_(None), cast(Agreement.name, String)),
+            else_=func.concat(Agreement.name, " (", cast(Agreement.start_date, String), ")"))),
+        "policy": (Policy, Policy.id, func.concat(
+            cast(Policy.period_from, String), "..",
+            func.coalesce(cast(Policy.period_to, String), ""))),
+    }
+
+
 async def resolve_fk_labels(session, rows: Iterable[Optional[dict]]) -> dict:
     """Bulk-load the display name behind every foreign key mentioned in a batch of snapshots.
 
-    Returns {(kind, id): label}. One query per KIND, not per row — an aircraft's history is dozens
-    of snapshots repeating the same handful of ids.
+    Returns {(kind, id): label}. ONE query for the whole batch, whatever mix of kinds it mentions.
+
+    It used to be one per kind, which is already far better than one per row — but a page of the
+    change log routinely names parties, airlines, aircraft, types, engine models, agreements and
+    policies all at once, and seven serial round trips is seven times the network for work the
+    database can do in a single pass. A UNION ALL of seven small lookups costs one.
     """
     wanted: dict[str, set] = {}
     for row in rows:
@@ -651,53 +747,18 @@ async def resolve_fk_labels(session, rows: Iterable[Optional[dict]]) -> dict:
     if not wanted:
         return {}
 
-    labels: dict = {}
-    if wanted.get("party"):
-        for pid, name in (await session.execute(
-            select(Party.id, Party.name).where(Party.id.in_(wanted["party"]))
-        )).all():
-            labels[("party", pid)] = name
-    if wanted.get("airline"):
-        for aid, name in (await session.execute(
-            select(Airline.id, Airline.airline_name).where(Airline.id.in_(wanted["airline"]))
-        )).all():
-            labels[("airline", aid)] = name
-    if wanted.get("aircraft"):
-        for aid, reg, msn in (await session.execute(
-            select(Aircraft.id, Aircraft.registration, Aircraft.msn)
-            .where(Aircraft.id.in_(wanted["aircraft"]))
-        )).all():
-            labels[("aircraft", aid)] = f"{reg} (MSN {msn})" if msn else reg
-    if wanted.get("aircraft_type"):
-        # The CATEGORY belongs in the label. Without it, re-pointing an aircraft from the
-        # passenger A320 to the cargo A320 renders as "Airbus A320 -> Airbus A320": a real change
-        # that reads as no change at all, which is the one thing a change log must never do.
-        for tid, manuf, series, category in (await session.execute(
-            select(AircraftType.id, AircraftType.manufacturer, AircraftType.master_series,
-                   AircraftType.category)
-            .where(AircraftType.id.in_(wanted["aircraft_type"]))
-        )).all():
-            labels[("aircraft_type", tid)] = " ".join(
-                x for x in (manuf, series, enum_value(category).capitalize()) if x)
-    if wanted.get("engine_type"):
-        for eid, manuf, series in (await session.execute(
-            select(EngineType.id, EngineType.manufacturer, EngineType.master_series)
-            .where(EngineType.id.in_(wanted["engine_type"]))
-        )).all():
-            labels[("engine_type", eid)] = f"{manuf} {series}" if manuf else series
-    if wanted.get("agreement"):
-        for gid, name, start in (await session.execute(
-            select(Agreement.id, Agreement.name, Agreement.start_date)
-            .where(Agreement.id.in_(wanted["agreement"]))
-        )).all():
-            labels[("agreement", gid)] = f"{name} ({iso(start)})" if start else name
-    if wanted.get("policy"):
-        for pid, pfrom, pto in (await session.execute(
-            select(Policy.id, Policy.period_from, Policy.period_to)
-            .where(Policy.id.in_(wanted["policy"]))
-        )).all():
-            labels[("policy", pid)] = f"{iso(pfrom)}..{iso(pto) or ''}"
-    return labels
+    sources = _label_sources()
+    parts = [
+        select(literal(kind).label("kind"), pk.label("row_id"), label.label("label"))
+        .where(pk.in_(ids))
+        for kind, ids in wanted.items()
+        if kind in sources
+        for _model, pk, label in (sources[kind],)
+    ]
+    if not parts:
+        return {}
+    stmt = parts[0] if len(parts) == 1 else union_all(*parts)
+    return {(r.kind, r.row_id): r.label for r in (await session.execute(stmt)).all()}
 
 
 def diff_rows(old_row: Optional[dict], new_row: Optional[dict], labels: dict) -> list[dict]:
