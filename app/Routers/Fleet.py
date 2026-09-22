@@ -33,7 +33,7 @@ from fastapi import Request, Response, Depends, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select, func, or_
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import joinedload, selectinload
 
 from Config import setup_logger
 from settings import Router
@@ -42,8 +42,8 @@ from Database.FleetModels import (
     Aircraft, AircraftType, AircraftEngine, EngineType, ServiceInfo,
     RecordSource, InsuranceStatus, MAX_ENGINES,
 )
-from Database.LeasingModels import AircraftLease
-from Database.PolicyModels import Coverage
+from Database.LeasingModels import AircraftLease, Agreement
+from Database.PolicyModels import Coverage, Policy
 from api_auth import authorize, SCOPE_INSURANCE_READ, SCOPE_INSURANCE_WRITE
 from Utils import success_response, warning_response, error_response
 from Utils.ResponsesFunc import build_responses
@@ -75,11 +75,32 @@ _READ = [Depends(authorize(SCOPE_INSURANCE_READ))]
 _OK = {status.HTTP_200_OK, status.HTTP_400_BAD_REQUEST, status.HTTP_404_NOT_FOUND,
        status.HTTP_409_CONFLICT, status.HTTP_500_INTERNAL_SERVER_ERROR}
 
+# HOW MANY ROUND TRIPS THIS COSTS IS THE WHOLE STORY. Every relationship here is loaded from a
+# REMOTE database, so each extra SELECT is a network round trip, and the models declare
+# `lazy="selectin"` — one query per relationship. That is right for a collection and wasteful for a
+# to-one: the type, the airline and the service block are single rows that belong in the aircraft's
+# own SELECT. `joinedload` puts them there.
+#
+# `engines` stays selectin: it is a COLLECTION, and joining a collection multiplies the parent rows
+# and breaks LIMIT/OFFSET on the grid. Its own to-one (the engine model) is joined inside that one
+# query, so the pair costs one trip, not one per engine.
+#
+# Card: 8 round trips -> 4. Grid: 7 -> 3, whatever the page size.
 _AIRCRAFT_LOAD = (
-    selectinload(Aircraft.aircraft_type),
-    selectinload(Aircraft.airline),
-    selectinload(Aircraft.engines).selectinload(AircraftEngine.engine_type),
-    selectinload(Aircraft.service),
+    joinedload(Aircraft.aircraft_type),
+    joinedload(Aircraft.airline),
+    joinedload(Aircraft.service),
+    selectinload(Aircraft.engines).joinedload(AircraftEngine.engine_type),
+)
+
+# ONE aircraft, so there is no LIMIT for a joined collection to multiply: the engines can come
+# along in the same SELECT, and the card drops to three round trips (airframe, leases, coverages).
+# A joined collection makes the result rows non-unique, hence `.unique()` at every call site.
+_AIRCRAFT_ONE = (
+    joinedload(Aircraft.aircraft_type),
+    joinedload(Aircraft.airline),
+    joinedload(Aircraft.service),
+    joinedload(Aircraft.engines).joinedload(AircraftEngine.engine_type),
 )
 
 
@@ -536,14 +557,20 @@ async def create_aircraft(request: Request, response: Response, body: AircraftIn
 async def _aircraft_card(session, row: Aircraft, on: date, history: bool) -> dict:
     """Everything known about one airframe: identity, engines, the lease terms and the policy in
     force on `on`, and — unless `history=false` — every lease and every coverage it has ever had."""
+    # The agreement's lessor and the policy's three parties are to-one all the way down, and the
+    # models would fetch each with its own SELECT. Joined, a leased and insured aircraft costs the
+    # same two trips here as an aircraft with neither — which is what the portal will meet once
+    # contracts start being entered.
     leases = (await session.execute(
         select(AircraftLease).where(AircraftLease.aircraft_id == row.id)
-        .options(selectinload(AircraftLease.agreement))
+        .options(joinedload(AircraftLease.agreement).joinedload(Agreement.lessor))
         .order_by(AircraftLease.effective_date.desc(), AircraftLease.id.desc())
     )).scalars().all()
     coverages = (await session.execute(
         select(Coverage).where(Coverage.aircraft_id == row.id)
-        .options(selectinload(Coverage.policy))
+        .options(joinedload(Coverage.policy).joinedload(Policy.insured),
+                 joinedload(Coverage.policy).joinedload(Policy.reinsured),
+                 joinedload(Coverage.policy).joinedload(Policy.retrocedent))
         .order_by(Coverage.covered_from.desc(), Coverage.id.desc())
     )).scalars().all()
 
@@ -577,12 +604,12 @@ async def get_aircraft_by_registration(
     try:
         on = on_date or date.today()
         async with request.app.state.db_client.read_session(DB) as session:
-            row = await find_aircraft(session, registration=registration, msn=msn)
+            row = await find_aircraft(session, registration=registration, msn=msn,
+                                      options=_AIRCRAFT_ONE)
             if row is None:
                 return warning_response(request=request, response=response,
                                         msg=f"No aircraft matches '{registration}'",
                                         status_code=status.HTTP_404_NOT_FOUND)
-            await session.refresh(row, ["aircraft_type", "airline", "engines", "service"])
             data = await _aircraft_card(session, row, on, history)
         return success_response(request=request, response=response, data=data)
     except Exception as _ex:
@@ -605,8 +632,8 @@ async def get_aircraft(
         on = on_date or date.today()
         async with request.app.state.db_client.read_session(DB) as session:
             row = (await session.execute(
-                select(Aircraft).where(Aircraft.id == aircraft_id).options(*_AIRCRAFT_LOAD)
-            )).scalar_one_or_none()
+                select(Aircraft).where(Aircraft.id == aircraft_id).options(*_AIRCRAFT_ONE)
+            )).unique().scalar_one_or_none()
             if row is None:
                 return warning_response(request=request, response=response,
                                         msg=f"Aircraft {aircraft_id} not found",
@@ -634,8 +661,8 @@ async def update_aircraft(request: Request, response: Response, aircraft_id: int
         async with request.app.state.db_client.session(DB) as session:
             await set_actor(session, token)
             row = (await session.execute(
-                select(Aircraft).where(Aircraft.id == aircraft_id).options(*_AIRCRAFT_LOAD)
-            )).scalar_one_or_none()
+                select(Aircraft).where(Aircraft.id == aircraft_id).options(*_AIRCRAFT_ONE)
+            )).unique().scalar_one_or_none()
             if row is None:
                 return warning_response(request=request, response=response,
                                         msg=f"Aircraft {aircraft_id} not found",
@@ -679,8 +706,8 @@ async def delete_aircraft(request: Request, response: Response, aircraft_id: int
         async with request.app.state.db_client.session(DB) as session:
             await set_actor(session, token)
             row = (await session.execute(
-                select(Aircraft).where(Aircraft.id == aircraft_id).options(*_AIRCRAFT_LOAD)
-            )).scalar_one_or_none()
+                select(Aircraft).where(Aircraft.id == aircraft_id).options(*_AIRCRAFT_ONE)
+            )).unique().scalar_one_or_none()
             if row is None:
                 return warning_response(request=request, response=response,
                                         msg=f"Aircraft {aircraft_id} not found",

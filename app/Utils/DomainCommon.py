@@ -15,7 +15,7 @@ Two conventions every router in this domain follows:
 import re
 from datetime import date
 from decimal import Decimal
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Optional, Sequence
 
 from fastapi import status
 from sqlalchemy import select, text, desc
@@ -141,21 +141,26 @@ async def get_or_create_engine_type(session, master_series: Optional[str],
 
 
 async def find_aircraft(session, *, registration: Optional[str] = None,
-                        msn: Optional[str] = None) -> Optional[Aircraft]:
+                        msn: Optional[str] = None, options: Sequence = ()) -> Optional[Aircraft]:
     """MSN wins: it is the airframe's identity, and a tail number can be reissued to a different
-    aircraft after a re-registration."""
+    aircraft after a re-registration.
+
+    Pass `options` when the caller is about to read the relationships. Without them the model
+    defaults apply — `lazy="selectin"`, one extra round trip per relationship, against a remote
+    database — and a caller that only needs the row pays nothing for leaving them out.
+    """
     if msn and msn.strip():
         row = (await session.execute(
-            select(Aircraft).where(Aircraft.msn == msn.strip())
-        )).scalar_one_or_none()
+            select(Aircraft).where(Aircraft.msn == msn.strip()).options(*options)
+        )).unique().scalar_one_or_none()
         if row is not None:
             return row
     if registration and registration.strip():
         return (await session.execute(
             select(Aircraft)
             .where(Aircraft.registration_normalized == norm_reg(registration))
-            .order_by(Aircraft.id).limit(1)
-        )).scalar_one_or_none()
+            .order_by(Aircraft.id).limit(1).options(*options)
+        )).unique().scalar_one_or_none()
     return None
 
 

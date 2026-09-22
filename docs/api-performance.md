@@ -43,6 +43,52 @@ are listed under [Proxy](#proxy-not-verified--no-access).
   within the TTL. The throttled `last_used_at` write is one autocommitted `UPDATE`.
 - **`/queues`** reads all depths and paused flags in one Redis pipeline (was 2 calls per queue).
 
+### Insured-fleet round trips (September 2026)
+
+The portal reported ~1.2 s for an aircraft card that returns almost nothing, and it was right: the
+card made **eight** round trips and the by-registration form of it **fourteen**. Not one of them was
+slow — they were simply serial, against a database ~24 ms away, which is the shape `lazy="selectin"`
+gives you. Selectin issues one extra `SELECT` per relationship; that is the right trade for a
+*collection* (it keeps `LIMIT`/`OFFSET` intact and does not multiply parent rows) and pure waste for
+a **to-one**, whose single row belongs in the parent's own `SELECT`.
+
+So every to-one relationship in the domain routers became a `joinedload`. Counted on the wire with
+a `before_cursor_execute` hook, median of five after a warm-up:
+
+| Endpoint                                     | Before | After | What is left                                             |
+|----------------------------------------------|--------|-------|----------------------------------------------------------|
+| `GET /fleet/aircraft/by-registration/{reg}`  | **14** | **3** | airframe+type+airline+service+engines, leases, coverages |
+| `GET /fleet/aircraft/{id}` (card)            | 8      | **3** | same                                                     |
+| `GET /policy/coverage/compare` (whole fleet) | 8      | **3** | fleet+type+airline+service, leases, coverages            |
+| `GET /fleet/aircraft` (grid, any page)       | 7      | **3** | count, page+type+airline+service, engines                |
+
+Three of those fourteen were a `session.refresh(row, [...])` in the by-registration handler, put
+there because `find_aircraft()` loaded no relationships and the card needed them. It now takes
+`options`, so the refresh — a second full fetch of a row already in the session — is gone.
+
+Two rules came out of it, and both are load-bearing:
+
+- **To-one → `joinedload`; a collection → `selectinload`.** Joining a collection multiplies the
+  parent rows, which silently breaks `LIMIT`/`OFFSET` on a grid.
+- **One row is not a page.** With no `LIMIT` there is nothing for a joined collection to break, so
+  the single-aircraft paths use `_AIRCRAFT_ONE`, which joins the engines too. A joined collection
+  makes the result rows non-unique, hence `.unique()` before `scalar_one_or_none()` — leave it out
+  and SQLAlchemy raises rather than lying, so the mistake cannot reach production quietly.
+
+The chains under a lease and a policy were joined for the same reason: agreement → lessor, policy →
+insured/reinsured/retrocedent are to-one all the way down and would have cost four more trips each
+*once contracts exist*. The card costs three trips whether the aircraft is leased and insured or
+neither — the table above will not decay as the portal fills the tables.
+
+`/policy/coverage/compare` had a subtler version of the same bug: it renders every aircraft with
+`engines=False`, but `lazy="selectin"` does not care what the code reads — it fetched the engines
+and their models for all 149 airframes regardless. `raiseload(Aircraft.engines)` refuses instead,
+which is two round trips cheaper and turns a future `engines=True` into a loud error rather than a
+silent pair of extra queries.
+
+What is NOT fixed: `history=false` still costs the same three trips. It trims the payload, not the
+work — the in-force lease and coverage have to be read either way.
+
 ### Per-request overhead
 - The two `@app.middleware("http")` functions (each a `BaseHTTPMiddleware` with its own streams and
   task group) became one pure ASGI class, `RequestContextMiddleware`. Same `request.state` keys, same
@@ -117,7 +163,9 @@ The ~370 ms between openresty and api-master is the biggest single cost. In orde
 
 - Moving the API onto the data host (the proxy, Postgres and Redis are already there) removes the
   proxy hop and the DB/Redis RTT — expected `/health` ~160 ms, a DB GET ~170 ms from the client.
-- `/forecast/claims` runs a page query and a count: two round trips;
-  `count(*) OVER ()` would make it one.
-- Reference lists (`/airlines`, and whatever the insured-fleet API grows) could be cached in Redis — worthwhile only once the
-  DB round trip, not the proxy, dominates.
+- Every grid runs a page query and a count: two round trips. `count(*) OVER ()` would make it one,
+  at a price — past the last page the window returns no rows and the total reads as 0, so a pager
+  that overshoots would be told the collection is empty. Worth ~24 ms; not taken yet.
+- Reference lists are cached in Redis since the insured-fleet module (`Utils/DomainCache`,
+  generation-counter invalidation — see `insured-fleet.md`). The rest of the domain is deliberately
+  uncached: it is read immediately after somebody writes it.
