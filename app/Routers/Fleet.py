@@ -49,6 +49,7 @@ from Utils import success_response, warning_response, error_response
 from Utils.ResponsesFunc import build_responses
 from Utils.DomainCache import AIRCRAFT_TYPE, AIRLINE, ENGINE_TYPE, cached, invalidate
 from Utils.DomainCommon import (
+    normalize_template_urls, merge_template_urls,
     DB, norm_reg, set_actor, apply_sort, SortError, AmbiguousType, integrity_error, find_aircraft,
     get_or_create_airline, get_or_create_aircraft_type, get_or_create_engine_type,
     aircraft_json, type_json, engine_json, fitted_engine_ids, service_json,
@@ -108,6 +109,14 @@ _AIRCRAFT_ONE = (
 # bodies
 # ==============================================================================================
 
+class TemplateUrls(BaseModel):
+    """The outline drawings a type can have, one per state the aircraft is damaged in: gear up in
+    the air, gear down and doors open on the stand. URLs into the platform image store — links,
+    never bytes, so a grid of a hundred types stays a grid of a hundred rows."""
+    airborne: Optional[str] = Field(default=None, max_length=2048)
+    on_the_ground: Optional[str] = Field(default=None, max_length=2048)
+
+
 class TypeIn(BaseModel):
     """An airframe type is the manufacturer, the master series AND the category together. 48
     series in Cirium are built by more than one manufacturer, and a series flown in two roles is
@@ -120,9 +129,10 @@ class TypeIn(BaseModel):
         description="passenger (airline AND business aviation), cargo (freight and the "
                     "convertibles) or other (military, training, EMS, utility — neither of the "
                     "first two). Defaults to passenger.")
-    template_url: Optional[str] = Field(
-        default=None, max_length=2048,
-        description="URL of the outline drawing in the platform image store — a link, not bytes.")
+    template_url: Optional[TemplateUrls] = Field(
+        default=None,
+        description="The two outline drawings, `{airborne, on_the_ground}`. Omit it, or omit a "
+                    "view, to record nothing for it.")
 
 
 class TypePatch(BaseModel):
@@ -133,7 +143,10 @@ class TypePatch(BaseModel):
         description="Moving a type between categories re-files every aircraft on it. To split a "
                     "type instead, create the second row and re-point the aircraft that belong "
                     "to it.")
-    template_url: Optional[str] = Field(default=None, max_length=2048)
+    template_url: Optional[TemplateUrls] = Field(
+        default=None,
+        description="Merged per VIEW, not replaced: sending only `on_the_ground` leaves the "
+                    "airborne drawing alone. Send a view as null to clear it.")
 
 
 class EngineTypeIn(BaseModel):
@@ -303,7 +316,14 @@ async def _update_type(request, response, model, to_json, entity, type_id, field
                                     msg=f"{subject} {type_id} not found",
                                     status_code=status.HTTP_404_NOT_FOUND)
         for key, value in fields.items():
-            setattr(row, key, value.strip() if key == "master_series" and value else value)
+            if key == "template_url":
+                # The only field here that MERGES. Everything else on a type is one value that a
+                # PATCH replaces; the drawings are two, and replacing the pair would mean the
+                # caller had to resend a URL it may not even have in hand.
+                value = merge_template_urls(row.template_url, value or {})
+            elif key == "master_series" and value:
+                value = value.strip()
+            setattr(row, key, value)
         await session.flush()
         data = to_json(row)
     await invalidate(request, entity)
@@ -375,9 +395,11 @@ async def list_aircraft_types(
 async def create_aircraft_type(request: Request, response: Response, body: TypeIn,
                                token: Optional[ApiToken] = Depends(authorize(SCOPE_INSURANCE_WRITE))):
     try:
-        return await _create_type(request, response, AircraftType, type_json, AIRCRAFT_TYPE, body,
-                                  token, {"template_url": body.template_url,
-                                          "category": body.category})
+        return await _create_type(
+            request, response, AircraftType, type_json, AIRCRAFT_TYPE, body, token,
+            {"template_url": normalize_template_urls(
+                body.template_url.model_dump() if body.template_url else None),
+             "category": body.category})
     except IntegrityError as _ex:
         code, msg = integrity_error(_ex)
         return warning_response(request=request, response=response, msg=msg, status_code=code)

@@ -144,7 +144,7 @@ migration that touches no type shared by two schemas.
 The row is created with the aircraft, so every airframe has one. A missing row reads as these
 defaults with `recorded: false` rather than as a screen of nulls.
 
-**6. Aircraft type → `fleet.aircraft_type`** — `manufacturer`, `master_series`, `category`, `template_url`.
+**6. Aircraft type → `fleet.aircraft_type`** — `manufacturer`, `master_series`, `category`, `template_url` (`{airborne, on_the_ground}`).
 The two names are unique TOGETHER (normalised), not the series alone — see below.
 
 **7. Airline → `ref.airline`** — `airline_name`, `icao`, `iata` and `is_asg` came with the table;
@@ -247,7 +247,7 @@ Both catalogues are loaded by `_admin/load_types.py` from Cirium (**806 airframe
 manufacturers, **365 engine models** over 54); `_admin/load_type_categories.py` then classifies the
 airframes, splits the pairs that appear in more than one role into separate rows — **1355 after the
 split: 558 passenger, 130 cargo, 667 other** — and re-points `fleet.aircraft` at the row matching
-each airframe's own usage. `template_url` stays NULL: the drawings are not in Cirium.
+each airframe's own usage. `template_url` stays NULL at that point: the drawings are not in Cirium and arrive separately (see below).
 
 **The fleet itself is loaded too** — `_admin/load_insured_fleet.py` reads the four
 `cirium.asg_*` / `cirium.non_asg_insured_*` matviews into `fleet.aircraft` (148),
@@ -307,6 +307,37 @@ unknown figures through.
 **Images are URLs, never bytes.** `fleet.aircraft_type.template_url` and `ref.airline.logo_url`
 point into the platform's image store. A grid reads every row on the page; a blob per row would drag
 megabytes through the connection for nothing.
+
+**The outline drawings are a PAIR** (revision `template_url_jsonb`). An aircraft is damaged in two
+states and the portal overlays the damage on a different outline for each — gear up in the air,
+gear down and doors open on the stand — so `template_url` is JSONB holding
+`{"airborne": ..., "on_the_ground": ...}`.
+
+`ck_aircraft_type_template_url` enforces the shape: an object with exactly those two keys, each a
+string or null, and never one where both are null. That last clause is what matters — it leaves
+**one** representation of "nothing recorded", SQL NULL, so no reader has to test for two. The check
+compares with `->` rather than `?&` because a missing key yields SQL NULL while a key holding JSON
+null does not, which is exactly the distinction being made.
+
+Three rules follow, and all three live in `Utils/DomainCommon`:
+
+- **reads always return both keys**, null where there is no drawing, so a client never branches;
+- **writes collapse the all-empty object to NULL**, and treat an empty string as no URL — a
+  cleared form field must not become a link to nowhere;
+- **`PATCH` merges per VIEW.** It is the only field in this domain that merges rather than
+  replaces: uploading a ground drawing must not wipe an airborne one the caller never mentioned.
+  Sending a view explicitly as null clears that view.
+
+The column is `JSONB(none_as_null=True)`, and that argument is load-bearing rather than tidy:
+SQLAlchemy's default writes Python `None` as JSON `null`, which is an object of the wrong type as
+far as the CHECK is concerned, so **every type created without drawings would be rejected**.
+
+`_admin/load_template_urls.py` loads them from a CSV of `aircraft_type,category,url_airborne,
+url_on_the_ground`, matching on the LABEL the API itself renders rather than parsing the label
+apart — nothing in "Textron Aviation (Cessna) Cessna 208B Caravan Passenger" says where the
+manufacturer ends. 206 of 1355 types carry drawings today, covering 146 of the 149 insured
+aircraft; the gaps are Dassault Falcon 900 Passenger and Boeing 737-400 Cargo, which have rows in
+the asset set but no images yet.
 
 ## History
 
