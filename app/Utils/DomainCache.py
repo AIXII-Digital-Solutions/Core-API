@@ -39,7 +39,15 @@ AIRLINE = "airline"
 PARTY = "party"
 AIRCRAFT_TYPE = "aircraft_type"
 ENGINE_TYPE = "engine_type"
-ENTITIES = frozenset({AIRLINE, PARTY, AIRCRAFT_TYPE, ENGINE_TYPE})
+# The whole domain, as ONE generation. The reference listings are invalidated precisely, by the
+# handler that changed them; the fleet reads are invalidated COARSELY, by any write to any of
+# these tables. See `invalidate_fleet` for why that is the safer of the two designs here.
+FLEET = "fleet"
+ENTITIES = frozenset({AIRLINE, PARTY, AIRCRAFT_TYPE, ENGINE_TYPE, FLEET})
+
+# The URL prefixes whose writes change what a fleet read returns. An aircraft embeds its type, its
+# airline and its service block, a comparison reads leases and coverage, so all five count.
+FLEET_WRITE_PREFIXES = ("/fleet", "/ref", "/leasing", "/policy")
 
 _PREFIX = "insfleet"
 
@@ -128,6 +136,32 @@ async def cached(request: Request, entity: str, signature: dict,
     except Exception:
         logger.debug("cache write failed for %s — the answer still stands", entity, exc_info=True)
     return data
+
+
+async def invalidate_fleet(redis) -> None:
+    """Bump the fleet generation. Called from the MIDDLEWARE, once, after any successful write.
+
+    WHY NOT FROM THE HANDLERS. The reference listings can be invalidated precisely because there
+    are four of them and a handler knows which it touched. The fleet reads cannot: an aircraft
+    embeds its type, its airline and its service block; the comparison reads every lease and every
+    coverage; a policy renewal moves coverage rows the fleet card shows. Naming the right set in
+    each of thirty-five write handlers is a rule that WILL be forgotten by the thirty-sixth, and
+    the failure mode is silent — a portal user saving a change and being shown the old one.
+
+    So it is coarse and it is automatic: any 2xx to a non-GET under `FLEET_WRITE_PREFIXES` bumps
+    it, whatever the handler did. Writes are rare and reads are constant, so throwing away more
+    than strictly necessary costs almost nothing and cannot be got wrong.
+
+    WHAT IT DOES NOT COVER: a write made outside this API — an `_admin/` loader, a hand-run SQL
+    statement. Those are bounded by INSURED_FLEET_CACHE_SECONDS, which is what the TTL is for.
+    """
+    if redis is None:
+        return
+    try:
+        await redis.incr(_gen_key(FLEET))
+    except Exception:
+        logger.warning("could not invalidate the fleet cache; entries stand until their TTL (%ss)",
+                       INSURED_FLEET_CACHE_SECONDS, exc_info=True)
 
 
 async def invalidate(request: Request, *entities: str) -> None:

@@ -37,6 +37,8 @@ anybody asking. Measured on the wire with a `before_cursor_execute` hook, median
 | `GET /fleet/aircraft` (any page) | 3 | **2** |
 | `GET /fleet/aircraft/{id}/engines` | 2 | **1** |
 | every other grid | 2 | **1** when it fits on one page |
+| `GET /fleet/aircraft` (cached) | 3 | **0** |
+| `GET /policy/coverage/compare` (cached) | 3 | **0** |
 | `POST /fleet/aircraft` (2 engines, new type) | 13 | **10** |
 
 Nothing the API serves reads more than four.
@@ -112,6 +114,18 @@ statement. The level follows what is wrong rather than what happened — 5xx err
 and 4xx warn, and so does a request that crosses `BUSY_REQUEST_QUERIES` (default 8), which is the
 one that matters: too many round trips is merely slow here and much worse over a longer wire. A
 warning also names that request's slowest statement.
+
+### Two heavy reads became free
+
+`GET /fleet/aircraft` and `GET /policy/coverage/compare` now read through a `fleet` generation
+bumped **by the middleware** after any 2xx to a non-GET under `/fleet`, `/ref`, `/leasing` or
+`/policy`. Precise invalidation was the wrong tool: an aircraft row embeds its type, its airline
+and its service block, and the comparison reads every lease and coverage, so the correct set to
+invalidate differs per handler and the thirty-sixth write handler would get it wrong silently.
+One choke point cannot be forgotten. A write made OUTSIDE the API — an `_admin/` loader — is not
+seen, and is bounded by `INSURED_FLEET_CACHE_SECONDS`.
+
+15 checks walk every kind of write in the domain and demand that both reads have already moved.
 
 ### Indexes
 

@@ -468,6 +468,28 @@ does not know, so a typo cannot silently become a listing that never invalidates
 Everything fails open: a Redis error falls through to the database. A cache that can take the
 endpoint down with it is a worse bug than the latency it saves.
 
+**The two heavy READS are cached too, and invalidated differently — on purpose.** `GET
+/fleet/aircraft` (the grid the portal opens on every page load) and `GET /policy/coverage/compare`
+(the whole fleet, every lease and coverage in force, compared field by field in Python) read
+through a single `fleet` generation.
+
+That generation is bumped by the MIDDLEWARE, not by the handlers: any 2xx to a non-GET under
+`/fleet`, `/ref`, `/leasing` or `/policy` bumps it, whatever the handler did. The precise approach
+does not work here and it is worth knowing why — an aircraft row embeds its type, its airline and
+its service block, the comparison reads leases and coverage, and a policy renewal moves coverage
+rows. Naming the right set in each of thirty-five write handlers is a rule the thirty-sixth will
+forget, and the failure is silent: a user saves a change and is shown the old value. Coarse and
+automatic throws away more than strictly necessary — which costs nothing, because writes are rare
+and reads are constant — and cannot be got wrong.
+
+**What it does NOT cover: a write made outside this API.** An `_admin/` loader or a hand-run
+`UPDATE` never reaches the middleware, so the cache keeps serving the old answer until
+`INSURED_FLEET_CACHE_SECONDS` expires. After loading data by script, either wait it out or
+`INCR insfleet:gen:fleet` in Redis.
+
+The card (`GET /fleet/aircraft/{id}`) is deliberately NOT cached: it is what a user opens straight
+after saving, and three round trips is a price worth paying to be certain.
+
 **No relationship loads itself.** Every model here is `lazy="raise_on_sql"`, so a query fetches
 exactly what a handler declared and touching anything else raises with the relationship named.
 This is not tidiness: the database is a network away, `selectin` is one extra SELECT per

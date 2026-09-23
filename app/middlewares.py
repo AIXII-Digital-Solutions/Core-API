@@ -18,6 +18,7 @@ from Queue import get_redis_settings
 from Schemas import DefaultResponse, DetailField
 from Utils import DBProxy
 from Utils import RequestMetrics
+from Utils.DomainCache import FLEET_WRITE_PREFIXES, invalidate_fleet
 
 logger = setup_logger(
     'fastapi_app',
@@ -170,6 +171,14 @@ class RequestContextMiddleware:
                        correlation_id)
             # Name the query only when the request was worth complaining about. Logging every
             # statement of every request is how a log becomes something nobody reads.
+            # One place, so a new write handler cannot forget it. A 2xx to a non-GET under a
+            # domain prefix means something changed; anything else means nothing did.
+            if (scope.get("method") not in ("GET", "HEAD", "OPTIONS")
+                    and status_code < 400
+                    and any(f"{p}/" in scope.get("path", "") or scope.get("path", "").endswith(p)
+                            for p in FLEET_WRITE_PREFIXES)):
+                await invalidate_fleet(getattr(app_state, "redis", None))
+
             if level >= logging.WARNING and cost.slowest_statement:
                 logger.log(level, "  slowest statement of %s: %.1fms  %s",
                            correlation_id, cost.slowest_seconds * 1000, cost.slowest_statement)

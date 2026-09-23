@@ -84,6 +84,8 @@ can be attributed to the service or to the network without guessing.
 | the coverage comparison, whole fleet | 3 |
 | the change log, or one aircraft's timeline | 2–4 |
 | a reference listing (cached) | **0** |
+| the aircraft grid, cached (the usual case) | **0** |
+| the coverage comparison, cached | **0** |
 
 **Read that header before reporting a slow endpoint.** Most of what a browser measures against
 production is not this service: a request crosses the client's link to the proxy and then a proxy
@@ -145,6 +147,12 @@ try.
 **The four reference listings are cached** — `/ref/airlines`, `/ref/parties`,
 `/fleet/aircraft-types`, `/fleet/engine-types`. Type as fast as you like into a typeahead; those
 answers come from Redis, keyed on the exact query you sent.
+
+**The aircraft grid and the coverage comparison are cached too**, and invalidated by ANY write
+under `/fleet`, `/ref`, `/leasing` or `/policy` — so a user who saves an aircraft and is sent back
+to the list sees their own change. The aircraft CARD is not cached at all, on purpose: it is what
+gets opened right after a save. Do not add cache-busting query parameters; they only fragment the
+cache and slow everyone down.
 
 **You do not have to do anything about it, and you must not work around it.** Every write that can
 change one of those listings invalidates it, including the ones you would not think of: creating an
