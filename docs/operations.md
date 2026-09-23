@@ -214,6 +214,43 @@ an opt-in to coordinate with current callers like PowerBI / the portal.)
   rotation races.
 - core-api stamps an `X-Correlation-ID` per request and includes it in error log lines; clients
   get that id on errors (never the exception internals).
+- **Every request line carries what it cost**:
+  `GET /fleet/aircraft?limit=50 completed_in=0.412s | status_code=200 | db=2/71.4ms | correlation_id=…`
+  — `db=<statements>/<time in them>`. This process is a network away from its database, so a slow
+  request is almost always one that made too many round trips, and the count says so directly.
+- **The level says what is wrong, so the log can be grepped rather than read.** 5xx → ERROR.
+  A 4xx, or a request over `SLOW_REQUEST_MS` (default 750), or one that makes more than
+  `BUSY_REQUEST_QUERIES` statements (default 8) → WARNING, followed by a second line naming that
+  request's slowest statement. A normal request names none, because a log that reports every query
+  is a log nobody reads.
+- `grep WARNING` on a day's file is the fastest triage available: it is exactly the set of requests
+  that failed, dragged, or asked the database too often.
+
+## Authentication — what changed on 2026-09-23
+
+`flights:read` and `status:read` existed in `api_auth.py` and were wired to **nothing**. Four
+route groups were reachable without any credential and now are not:
+
+| Route | Now requires | Why it mattered |
+|---|---|---|
+| `GET /database/{type}` | `flights:read` | builds a workbook of the whole `Lease_Output` table |
+| `GET /flightradar/flightsummary`, `/airports` | `flights:read` | enqueue work against a **metered** upstream — an anonymous caller could spend money |
+| `GET /status`, `GET /status/{job_id}` | `status:read` | a job's `ref` is the absolute path of the uploaded file |
+| `POST /status/{job_id}/cancel` | `queues:admin` | it used `authorize()` with no scope, and `set().issubset(anything)` is always true — a read-only key could kill a running forecast |
+
+**The master `X-Service-Token` satisfies all of them**, so anything using it is unaffected. A
+narrowly scoped `X-Api-Key` may need `flights:read` or `status:read` added — mint a replacement at
+`POST /tokens`.
+
+> **If a Power BI report calls `/flightradar/*` or `/database/*` it will now get a 401** until it
+> sends `X-Service-Token` or an `X-Api-Key` with `flights:read`. This is the one change of that
+> day that can break a previously working consumer.
+
+The Microsoft Graph webhook (`/webhooks/microsoft*`) also changed: `clientState` is compared with
+`hmac.compare_digest` instead of `!=`, the rejected value is no longer echoed back, a body with an
+empty `value` array is rejected instead of validating nothing, and the subscription-validation
+handshake now replies with the raw token as `text/plain` — which is the only thing Graph accepts,
+so creating or renewing a subscription against this endpoint could not previously have succeeded.
 
 ## Notes / recommendations
 - **CORS**: the default `CORS_ORIGINS=*` with `CORS_CREDENTIALS=true` is rejected by browsers for

@@ -35,7 +35,7 @@ from Database.PolicyModels import Policy, Coverage
 from api_auth import authorize, SCOPE_INSURANCE_READ, SCOPE_INSURANCE_WRITE
 from Utils import success_response, warning_response, error_response
 from Utils.ResponsesFunc import build_responses
-from Utils.DomainCache import PARTY, invalidate
+from Utils.DomainCache import FLEET, PARTY, cached, invalidate
 from Utils.DomainCommon import (
     reload_with, AIRCRAFT_BRIEF, page_with_total,
     DB, set_actor, apply_sort, SortError, integrity_error, find_aircraft, get_or_create_party,
@@ -494,72 +494,85 @@ async def compare_cover(request: Request, response: Response,
                         limit: int = Query(200, ge=1, le=1000), offset: int = Query(0, ge=0)):
     try:
         on = on_date or date.today()
-        async with request.app.state.db_client.read_session(DB) as session:
-            # AIRCRAFT_BRIEF: the type and the airline that aircraft_json reads, joined into this
-            # query, and the engines explicitly refused — they are rendered with engines=False and
-            # asking for them later should fail loudly rather than quietly cost a query per row.
-            aircraft = (await session.execute(
-                select(Aircraft).options(*AIRCRAFT_BRIEF)
-                .order_by(Aircraft.registration, Aircraft.id))).scalars().all()
-            # ONE lease per aircraft — the newest not later than `on`, which is the only one this
-            # comparison can use. Without DISTINCT ON this read EVERY lease ever recorded for
-            # every aircraft and threw all but the last away in Python: a query bounded by the
-            # HISTORY rather than by the fleet, and the history is the half that grows for ever.
-            leases = (await session.execute(
-                select(AircraftLease).where(AircraftLease.effective_date <= on)
-                .options(joinedload(AircraftLease.agreement))
-                .distinct(AircraftLease.aircraft_id)
-                .order_by(AircraftLease.aircraft_id, AircraftLease.effective_date.desc(),
-                          AircraftLease.id.desc())
-            )).scalars().all()
-            covers = (await session.execute(
-                select(Coverage).where(
-                    Coverage.covered_from <= on,
-                    (Coverage.covered_to.is_(None)) | (Coverage.covered_to >= on))
-                .options(joinedload(Coverage.policy))
-            )).scalars().all()
 
-            by_aircraft_lease: dict[int, list] = {}
-            for l in leases:
-                by_aircraft_lease.setdefault(l.aircraft_id, []).append(l)
-            by_aircraft_cover = {c.aircraft_id: c for c in covers}
+        # The heaviest read in the domain: the WHOLE fleet, every lease in force and every
+        # coverage in force, compared field by field in Python. It is also the one whose
+        # answer changes least often, so it reads through the FLEET generation — which the
+        # middleware bumps after any successful write under /fleet, /ref, /leasing or
+        # /policy, i.e. after anything that could change the answer.
+        async def load():
+            async with request.app.state.db_client.read_session(DB) as session:
+                # AIRCRAFT_BRIEF: the type and the airline that aircraft_json reads, joined into this
+                # query, and the engines explicitly refused — they are rendered with engines=False and
+                # asking for them later should fail loudly rather than quietly cost a query per row.
+                aircraft = (await session.execute(
+                    select(Aircraft).options(*AIRCRAFT_BRIEF)
+                    .order_by(Aircraft.registration, Aircraft.id))).scalars().all()
+                # ONE lease per aircraft — the newest not later than `on`, which is the only one this
+                # comparison can use. Without DISTINCT ON this read EVERY lease ever recorded for
+                # every aircraft and threw all but the last away in Python: a query bounded by the
+                # HISTORY rather than by the fleet, and the history is the half that grows for ever.
+                leases = (await session.execute(
+                    select(AircraftLease).where(AircraftLease.effective_date <= on)
+                    .options(joinedload(AircraftLease.agreement))
+                    .distinct(AircraftLease.aircraft_id)
+                    .order_by(AircraftLease.aircraft_id, AircraftLease.effective_date.desc(),
+                              AircraftLease.id.desc())
+                )).scalars().all()
+                covers = (await session.execute(
+                    select(Coverage).where(
+                        Coverage.covered_from <= on,
+                        (Coverage.covered_to.is_(None)) | (Coverage.covered_to >= on))
+                    .options(joinedload(Coverage.policy))
+                )).scalars().all()
 
-            items = []
-            for a in aircraft:
-                lease = lease_in_force(by_aircraft_lease.get(a.id, []), on)
-                cover = by_aircraft_cover.get(a.id)
-                policy = cover.policy if cover else None
-                fields = {}
-                agree = True
-                for column in COMPARED:
-                    required = num(getattr(lease, column)) if lease else None
-                    provided = num(getattr(policy, column)) if policy else None
-                    ok = required == provided
-                    agree = agree and ok
-                    fields[column] = {"required": required, "provided": provided, "match": ok}
-                # An aircraft whose service block STATES it is uncovered is not a missing policy.
-                # It is an answer, so it counts as a match and carries the reason, not a red flag.
-                service = a.service
-                declared_uncovered = (
-                    service is not None
-                    and enum_value(service.status) == InsuranceStatus.NOT_INSURED.value)
-                row = {
-                    "aircraft": aircraft_json(a, engines=False),
-                    "has_lease": lease is not None,
-                    "has_policy": policy is not None,
-                    "policy_id": policy.id if policy else None,
-                    "lease_id": lease.id if lease else None,
-                    "status": enum_value(service.status) if service else "insured",
-                    "usage_status": service.usage_status if service else None,
-                    "match": declared_uncovered or (
-                        agree and lease is not None and policy is not None),
-                    "fields": fields,
-                }
-                if not mismatches_only or not row["match"]:
-                    items.append(row)
-            total = len(items)
-            items = items[offset:offset + limit]
-            data = {"items": items, "total": total, "as_of": on.isoformat()}
+                by_aircraft_lease: dict[int, list] = {}
+                for l in leases:
+                    by_aircraft_lease.setdefault(l.aircraft_id, []).append(l)
+                by_aircraft_cover = {c.aircraft_id: c for c in covers}
+
+                items = []
+                for a in aircraft:
+                    lease = lease_in_force(by_aircraft_lease.get(a.id, []), on)
+                    cover = by_aircraft_cover.get(a.id)
+                    policy = cover.policy if cover else None
+                    fields = {}
+                    agree = True
+                    for column in COMPARED:
+                        required = num(getattr(lease, column)) if lease else None
+                        provided = num(getattr(policy, column)) if policy else None
+                        ok = required == provided
+                        agree = agree and ok
+                        fields[column] = {"required": required, "provided": provided, "match": ok}
+                    # An aircraft whose service block STATES it is uncovered is not a missing policy.
+                    # It is an answer, so it counts as a match and carries the reason, not a red flag.
+                    service = a.service
+                    declared_uncovered = (
+                        service is not None
+                        and enum_value(service.status) == InsuranceStatus.NOT_INSURED.value)
+                    row = {
+                        "aircraft": aircraft_json(a, engines=False),
+                        "has_lease": lease is not None,
+                        "has_policy": policy is not None,
+                        "policy_id": policy.id if policy else None,
+                        "lease_id": lease.id if lease else None,
+                        "status": enum_value(service.status) if service else "insured",
+                        "usage_status": service.usage_status if service else None,
+                        "match": declared_uncovered or (
+                            agree and lease is not None and policy is not None),
+                        "fields": fields,
+                    }
+                    if not mismatches_only or not row["match"]:
+                        items.append(row)
+                total = len(items)
+                items = items[offset:offset + limit]
+                data = {"items": items, "total": total, "as_of": on.isoformat()}
+            return data
+
+        data = await cached(request, FLEET,
+                            {"grid": "compare", "on": on.isoformat(),
+                             "mismatches_only": mismatches_only,
+                             "limit": limit, "offset": offset}, load)
         return success_response(request=request, response=response, data=data)
     except Exception as _ex:
         return error_response(request=request, exc=_ex, response=response)

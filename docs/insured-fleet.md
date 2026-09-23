@@ -468,6 +468,53 @@ does not know, so a typo cannot silently become a listing that never invalidates
 Everything fails open: a Redis error falls through to the database. A cache that can take the
 endpoint down with it is a worse bug than the latency it saves.
 
+**The two heavy READS are cached too, and invalidated differently — on purpose.** `GET
+/fleet/aircraft` (the grid the portal opens on every page load) and `GET /policy/coverage/compare`
+(the whole fleet, every lease and coverage in force, compared field by field in Python) read
+through a single `fleet` generation.
+
+That generation is bumped by the MIDDLEWARE, not by the handlers: any 2xx to a non-GET under
+`/fleet`, `/ref`, `/leasing` or `/policy` bumps it, whatever the handler did. The precise approach
+does not work here and it is worth knowing why — an aircraft row embeds its type, its airline and
+its service block, the comparison reads leases and coverage, and a policy renewal moves coverage
+rows. Naming the right set in each of thirty-five write handlers is a rule the thirty-sixth will
+forget, and the failure is silent: a user saves a change and is shown the old value. Coarse and
+automatic throws away more than strictly necessary — which costs nothing, because writes are rare
+and reads are constant — and cannot be got wrong.
+
+**What it does NOT cover: a write made outside this API.** An `_admin/` loader or a hand-run
+`UPDATE` never reaches the middleware, so the cache keeps serving the old answer until
+`INSURED_FLEET_CACHE_SECONDS` expires. After loading data by script, either wait it out or
+`INCR insfleet:gen:fleet` in Redis.
+
+The card (`GET /fleet/aircraft/{id}`) is deliberately NOT cached: it is what a user opens straight
+after saving, and three round trips is a price worth paying to be certain.
+
+**No relationship loads itself.** Every model here is `lazy="raise_on_sql"`, so a query fetches
+exactly what a handler declared and touching anything else raises with the relationship named.
+This is not tidiness: the database is a network away, `selectin` is one extra SELECT per
+relationship per load, and reading ONE aircraft to check it existed used to fetch its type, its
+airline, its engines and their models. `GET /fleet/aircraft/{id}/service` cost seven round trips
+to return a single 1:1 row; the aircraft timeline cost sixteen.
+
+The rule at a call site is: **to-one → `joinedload`, collection → `selectinload`, not needed → say
+nothing.** Joining a collection multiplies the parent rows and silently breaks `LIMIT/OFFSET`,
+which is why a grid selectin-loads the engines and a single card may join them. The three aircraft
+shapes are written once, in `Utils/DomainCommon`:
+
+| | what it loads | used by |
+|---|---|---|
+| `AIRCRAFT_BRIEF` | type, airline, service; engines REFUSED | an aircraft inside a lease, a coverage, the comparison |
+| `AIRCRAFT_GRID` | the three, plus engines by selectin | a PAGE of aircraft |
+| `AIRCRAFT_ONE` | the three, plus engines joined | ONE aircraft — needs `.unique()` |
+
+Two helpers exist so the old habits cannot come back. **`reload_with()`** replaces
+`session.refresh(row, [...])`, which costs a round trip per attribute named; it passes
+`populate_existing`, without which a relationship already loaded is left stale and a PATCH that
+moved an engine to another model hands back the old one. **`page_with_total()`** replaces the
+COUNT-then-page pair with `count(*) OVER ()`, falling back to a COUNT only for an empty page past
+a non-zero offset.
+
 **Every write sets the actor.** `set_actor(session, token)` issues
 `set_config('app.actor', …, true)` inside the transaction, which is what
 `audit.change_log.changed_by` records. A write path that forgets it logs the database login,

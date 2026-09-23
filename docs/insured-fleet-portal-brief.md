@@ -73,6 +73,20 @@ success or not, so a client can log it without parsing the body.
 Responses also carry `Server-Timing: app;dur=<ms>` — time spent inside the API, so a slow call
 can be attributed to the service or to the network without guessing.
 
+**What the endpoints cost now** (round trips to the database — the thing that decides latency):
+
+| | |
+|---|---|
+| an aircraft card, by id or by registration | 3 |
+| the aircraft grid, any page size | 2 |
+| the service block | 1 |
+| the engines of one aircraft | 1 |
+| the coverage comparison, whole fleet | 3 |
+| the change log, or one aircraft's timeline | 2–4 |
+| a reference listing (cached) | **0** |
+| the aircraft grid, cached (the usual case) | **0** |
+| the coverage comparison, cached | **0** |
+
 **Read that header before reporting a slow endpoint.** Most of what a browser measures against
 production is not this service: a request crosses the client's link to the proxy and then a proxy
 hop that is ~340 ms on its own, empty. `app;dur` is the part core-api owns. If a card takes 1.2 s
@@ -133,6 +147,12 @@ try.
 **The four reference listings are cached** — `/ref/airlines`, `/ref/parties`,
 `/fleet/aircraft-types`, `/fleet/engine-types`. Type as fast as you like into a typeahead; those
 answers come from Redis, keyed on the exact query you sent.
+
+**The aircraft grid and the coverage comparison are cached too**, and invalidated by ANY write
+under `/fleet`, `/ref`, `/leasing` or `/policy` — so a user who saves an aircraft and is sent back
+to the list sees their own change. The aircraft CARD is not cached at all, on purpose: it is what
+gets opened right after a save. Do not add cache-busting query parameters; they only fragment the
+cache and slow everyone down.
 
 **You do not have to do anything about it, and you must not work around it.** Every write that can
 change one of those listings invalidates it, including the ones you would not think of: creating an

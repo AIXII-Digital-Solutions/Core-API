@@ -47,7 +47,7 @@ from Database.PolicyModels import Coverage, Policy
 from api_auth import authorize, SCOPE_INSURANCE_READ, SCOPE_INSURANCE_WRITE
 from Utils import success_response, warning_response, error_response
 from Utils.ResponsesFunc import build_responses
-from Utils.DomainCache import AIRCRAFT_TYPE, AIRLINE, ENGINE_TYPE, cached, invalidate
+from Utils.DomainCache import AIRCRAFT_TYPE, AIRLINE, ENGINE_TYPE, FLEET, cached, invalidate
 from Utils.DomainCommon import (
     normalize_template_urls, merge_template_urls, reload_with, page_with_total,
     AIRCRAFT_GRID, AIRCRAFT_ONE, AIRCRAFT_BRIEF, ENGINE_LOAD,
@@ -517,11 +517,21 @@ async def list_aircraft(
         stmt = apply_sort(select(Aircraft).where(*conds).options(*_AIRCRAFT_LOAD),
                           sort=sort, order=order, sortmap=_AIRCRAFT_SORTS,
                           tiebreak=(Aircraft.registration, Aircraft.id))
-        async with request.app.state.db_client.read_session(DB) as session:
-            rows, total = await page_with_total(
-                session, stmt, limit=limit, offset=offset,
-                count_stmt=select(func.count()).select_from(Aircraft).where(*conds))
-            data = {"items": [aircraft_json(a) for a in rows], "total": total}
+        # The grid the portal opens on every page load, over a fleet that changes a few times a
+        # week. Cached under the FLEET generation, which the middleware bumps after ANY successful
+        # write to /fleet, /ref, /leasing or /policy — so a user who saves an aircraft and is sent
+        # back to the list sees their own change, and nobody had to remember to say so here.
+        async def load():
+            async with request.app.state.db_client.read_session(DB) as session:
+                rows, total = await page_with_total(
+                    session, stmt, limit=limit, offset=offset,
+                    count_stmt=select(func.count()).select_from(Aircraft).where(*conds))
+                return {"items": [aircraft_json(a) for a in rows], "total": total}
+
+        data = await cached(request, FLEET,
+                            {"grid": "aircraft", "q": q, "airline_id": airline_id,
+                             "type_id": type_id, "limit": limit, "offset": offset,
+                             "sort": sort, "order": order}, load)
         return success_response(request=request, response=response, data=data)
     except SortError as _ex:
         return warning_response(request=request, response=response, msg=str(_ex))
