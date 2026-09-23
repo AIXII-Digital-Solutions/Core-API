@@ -67,9 +67,20 @@ class DBProxy:
         return session
 
     async def close_all(self):
-        for session in self._open_sessions:
-            await session.close()
-        self._open_sessions.clear()
+        """Close every session, even if one of them refuses.
+
+        Without the per-session guard the first failure - a connection the server already killed
+        is the ordinary case - left the rest open AND propagated out of the middleware's `finally`,
+        replacing the response that was on its way. The list is cleared whatever happens, so a
+        session cannot be closed twice or leak into the next request."""
+        try:
+            for session in self._open_sessions:
+                try:
+                    await session.close()
+                except Exception:
+                    logger.warning("could not close a cached-query session", exc_info=True)
+        finally:
+            self._open_sessions.clear()
 
     # -----------------------------
     # Redis utils
@@ -177,7 +188,11 @@ def cache_query(key_template: str, ttl: int = 60, update: bool = False, related_
                 raise ValueError("Request must be passed to the endpoint")
 
             key = key_template.format(**kwargs)
-            db: DBProxy = request.app.state.db_proxy
+            # The PER-REQUEST proxy, which the middleware closes in its `finally`. The app-wide one
+            # on `app.state` is never closed, so every session opened through it was appended to a
+            # process-lifetime list and held a connection for ever - and concurrent requests shared
+            # one `_open_sessions`. Latent until now: nothing calls this decorator yet.
+            db: DBProxy = request.state.db_proxy
             db_name = kwargs.get("db_name")
 
             _related_pattern = related_pattern.format(**kwargs) if related_pattern else None

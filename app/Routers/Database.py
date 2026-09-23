@@ -2,7 +2,7 @@ import random
 from datetime import datetime, date
 from pathlib import Path
 
-from fastapi import Request, BackgroundTasks
+from fastapi import Request, BackgroundTasks, Depends
 from fastapi.responses import FileResponse
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
@@ -14,11 +14,16 @@ from settings import Router, RESPONSES_PATH, PA_APP_URL, CUSTOM_EXCEL_LEASE_HEAD
 from Database.Models import Lease_Output
 from Schemas import JsonFileSchema
 from Schemas.Enums import service
+from api_auth import authorize, SCOPE_FLIGHTS_READ
 from Utils import remove_file
 
+# `flights:read` was defined in api_auth.py and wired to nothing, so this router was open to
+# anyone who could reach the gateway — and `/database/lease_agr` builds a workbook of the whole
+# Lease_Output table, which is lease commercials. The scope existed; it is used now.
 router = Router(
     prefix="/database",
-    tags=["Database"]
+    tags=["Database"],
+    dependencies=[Depends(authorize(SCOPE_FLIGHTS_READ))],
 )
 
 # TODO: Update it like Flightradar router

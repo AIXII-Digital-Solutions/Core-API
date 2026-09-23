@@ -495,20 +495,22 @@ async def compare_cover(request: Request, response: Response,
     try:
         on = on_date or date.today()
         async with request.app.state.db_client.read_session(DB) as session:
+            # AIRCRAFT_BRIEF: the type and the airline that aircraft_json reads, joined into this
+            # query, and the engines explicitly refused — they are rendered with engines=False and
+            # asking for them later should fail loudly rather than quietly cost a query per row.
             aircraft = (await session.execute(
-                # aircraft_json() reads the type and the airline, and the model default would
-                # fetch each with its own SELECT. Joined, the whole fleet arrives in one.
-                #
-                # The engines are rendered with `engines=False` here, but `lazy="selectin"` does
-                # not care whether the code reads them — it loads them, and their models, for all
-                # 149 airframes anyway. `raiseload` refuses instead, which costs two round trips
-                # less and turns a later `engines=True` into a loud error rather than a silent
-                # pair of extra queries.
                 select(Aircraft).options(*AIRCRAFT_BRIEF)
                 .order_by(Aircraft.registration, Aircraft.id))).scalars().all()
+            # ONE lease per aircraft — the newest not later than `on`, which is the only one this
+            # comparison can use. Without DISTINCT ON this read EVERY lease ever recorded for
+            # every aircraft and threw all but the last away in Python: a query bounded by the
+            # HISTORY rather than by the fleet, and the history is the half that grows for ever.
             leases = (await session.execute(
                 select(AircraftLease).where(AircraftLease.effective_date <= on)
                 .options(joinedload(AircraftLease.agreement))
+                .distinct(AircraftLease.aircraft_id)
+                .order_by(AircraftLease.aircraft_id, AircraftLease.effective_date.desc(),
+                          AircraftLease.id.desc())
             )).scalars().all()
             covers = (await session.execute(
                 select(Coverage).where(

@@ -36,8 +36,11 @@ from fastapi import Depends, Request, HTTPException, status
 from fastapi.security import APIKeyHeader
 from sqlalchemy import select, update
 
+from Config import setup_logger
 from settings import SERVICE_TOKEN, API_TOKEN_PEPPER
 from Database import ApiToken
+
+logger = setup_logger("api_auth")
 
 # --- Domain scopes -----------------------------------------------------------------------
 # Keep these in sync with the docs and the /tokens admin router validation.
@@ -150,12 +153,23 @@ async def _lookup_api_token(request: Request, x_api_key: Optional[str]) -> Optio
             _token_cache[key] = (time.monotonic(), row)
     if row.expires_at is not None and row.expires_at < now:
         return None
-    # throttled best-effort last_used_at (coalesced so we don't write on every request): a single
-    # autocommitted UPDATE, no transaction around it
+    # Throttled best-effort last_used_at, coalesced so it is not written on every request.
+    #
+    # It goes through a TRANSACTIONAL session even though it is one statement: `read_session` is
+    # documented as "never write through it", and an exception to that rule sitting in the auth
+    # path is the one most likely to be copied. Two extra round trips, once per key per throttle
+    # window, is not a price worth arguing about.
+    #
+    # And it cannot fail the request. This is bookkeeping: a database hiccup here must not turn a
+    # valid credential into a 500 for the caller holding it.
     if row.last_used_at is None or (now - row.last_used_at) > _LAST_USED_THROTTLE:
         row.last_used_at = now
-        async with request.app.state.db_client.read_session("service") as session:
-            await session.execute(update(ApiToken).where(ApiToken.id == row.id).values(last_used_at=now))
+        try:
+            async with request.app.state.db_client.session("service") as session:
+                await session.execute(
+                    update(ApiToken).where(ApiToken.id == row.id).values(last_used_at=now))
+        except Exception:
+            logger.warning("could not record last_used_at for token %s", row.prefix, exc_info=True)
     return row
 
 
