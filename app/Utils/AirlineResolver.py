@@ -98,6 +98,16 @@ _EXACT_SQL = text("""
     LIMIT 1
 """)
 
+# The same match for MANY names at once. A bulk load's names are overwhelmingly already exact, and
+# asking one at a time made the common case one round trip per carrier; this makes it one for all
+# of them, and only the leftovers go through the fuzzy path.
+_EXACT_MANY_SQL = text("""
+    SELECT DISTINCT ON (lower(btrim(airline))) lower(btrim(airline)) AS key, airline
+    FROM cirium.airlines
+    WHERE lower(btrim(airline)) = ANY(CAST(:keys AS text[]))
+    ORDER BY lower(btrim(airline)), airline
+""")
+
 # Candidates by trigram OR small edit distance. The trigram half uses the GIN index; the edit-distance
 # half is bounded by length so it cannot turn into a 63k-row levenshtein sweep on every call.
 _FUZZY_SQL = text("""
@@ -105,7 +115,12 @@ _FUZZY_SQL = text("""
            similarity(airline, :q) AS sim,
            levenshtein(lower(airline), lower(:q)) AS lev
     FROM cirium.airlines
-    WHERE airline % :q
+    -- `similarity(...) >= :floor` rather than the `%` operator. `%` reads its cutoff from
+    -- `pg_trgm.similarity_threshold`, which the caller used to set with `SELECT set_limit()` -
+    -- a SESSION-level GUC on a POOLED connection, so the connection went back to the pool with
+    -- the threshold changed and every later `%` query on it silently ran looser than it meant to.
+    -- Stating the floor in the predicate needs no session state at all.
+    WHERE similarity(airline, :q) >= :floor
        OR (length(airline) BETWEEN length(:q) - :maxlev AND length(:q) + :maxlev
            AND levenshtein(lower(airline), lower(:q)) <= :maxlev)
     ORDER BY sim DESC, lev ASC, length(airline) ASC, airline ASC
@@ -124,9 +139,9 @@ async def resolve_airline(session, typed: str) -> AirlineMatch:
     if hit is not None:
         return AirlineMatch(typed=typed, resolved=hit, exact=True, similarity=1.0, candidates=[hit])
 
-    await session.execute(text("SELECT set_limit(:f)"), {"f": _TRGM_FLOOR})
     rows = (await session.execute(_FUZZY_SQL, {
-        "q": q, "maxlev": _MAX_EDIT_DISTANCE, "lim": _CANDIDATE_LIMIT})).all()
+        "q": q, "floor": _TRGM_FLOOR,
+        "maxlev": _MAX_EDIT_DISTANCE, "lim": _CANDIDATE_LIMIT})).all()
 
     if not rows:
         return AirlineMatch(typed=typed, resolved=None, exact=False, similarity=None, candidates=[],
@@ -160,10 +175,32 @@ async def resolve_airlines(session, typed_names: Sequence[str]) -> dict:
     per cover section), so resolving per distinct spelling instead of per row turns hundreds of
     lookups into a few. Returns {typed: AirlineMatch}, keyed by the string as it was passed in."""
     out: dict = {}
+    distinct = []
     for name in typed_names:
-        if name in out:
-            continue
-        out[name] = await resolve_airline(session, name)
+        if name not in out:
+            out[name] = None
+            distinct.append(name)
+
+    # One query settles every name that is already spelled exactly right, which is nearly all of
+    # them. Before this, each name cost its own round trip even when it matched on the first try.
+    wanted = {name: " ".join((name or "").split()) for name in distinct}
+    keys = sorted({q.strip().lower() for q in wanted.values()
+                   if len(q) >= _MIN_QUERY_LENGTH})
+    exact: dict = {}
+    if keys:
+        exact = {r.key: r.airline
+                 for r in (await session.execute(_EXACT_MANY_SQL, {"keys": keys})).all()}
+
+    for name in distinct:
+        q = wanted[name]
+        hit = exact.get(q.strip().lower()) if len(q) >= _MIN_QUERY_LENGTH else None
+        if hit is not None:
+            out[name] = AirlineMatch(typed=name, resolved=hit, exact=True, similarity=1.0,
+                                     candidates=[hit])
+        else:
+            # Only what the exact pass could not settle: the fuzzy path is a trigram scan and is
+            # worth one round trip per unsettled spelling, not per row.
+            out[name] = await resolve_airline(session, name)
     return out
 
 

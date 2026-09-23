@@ -37,6 +37,7 @@ from Utils import success_response, warning_response, error_response
 from Utils.ResponsesFunc import build_responses
 from Utils.DomainCache import PARTY, invalidate
 from Utils.DomainCommon import (
+    reload_with, AIRCRAFT_BRIEF, page_with_total,
     DB, set_actor, apply_sort, SortError, integrity_error, find_aircraft, get_or_create_party,
     policy_json, coverage_json, aircraft_json, lease_in_force, num, enum_value,
 )
@@ -201,9 +202,9 @@ async def list_policies(request: Request, response: Response,
                           sort=sort, order=order, sortmap=_POLICY_SORTS,
                           tiebreak=(Policy.period_from.desc(), Policy.id))
         async with request.app.state.db_client.read_session(DB) as session:
-            total = (await session.execute(
-                select(func.count()).select_from(Policy).where(*conds))).scalar_one()
-            rows = (await session.execute(stmt.limit(limit).offset(offset))).scalars().all()
+            rows, total = await page_with_total(
+                session, stmt, limit=limit, offset=offset,
+                count_stmt=select(func.count()).select_from(Policy).where(*conds))
             data = {"items": [policy_json(p) for p in rows], "total": total}
         return success_response(request=request, response=response, data=data)
     except SortError as _ex:
@@ -243,7 +244,7 @@ async def create_policy(request: Request, response: Response, body: PolicyIn,
                          retrocedent_id=retrocedent.id if retrocedent else None, **fields)
             session.add(row)
             await session.flush()
-            await session.refresh(row, ["insured", "reinsured", "retrocedent"])
+            row = await reload_with(session, Policy, row.id, *_POLICY_LOAD)
             data = policy_json(row)
         await invalidate(request, PARTY)   # a counterparty may have been created
         return success_response(request=request, response=response, data=data,
@@ -270,7 +271,7 @@ async def get_policy(request: Request, response: Response, policy_id: int):
                                         status_code=status.HTTP_404_NOT_FOUND)
             covered = (await session.execute(
                 select(Coverage, Aircraft).join(Aircraft, Aircraft.id == Coverage.aircraft_id)
-                .where(Coverage.policy_id == policy_id)
+                .where(Coverage.policy_id == policy_id).options(*AIRCRAFT_BRIEF)
                 .order_by(Aircraft.registration)
             )).all()
             data = policy_json(row)
@@ -314,7 +315,7 @@ async def update_policy(request: Request, response: Response, policy_id: int, bo
             # `updated_at` is computed by the database on UPDATE, so SQLAlchemy expires it after
             # the flush. Read it here, inside the session, or serializing the row later triggers
             # lazy IO outside the greenlet context and the request 500s.
-            await session.refresh(row, ["insured", "reinsured", "retrocedent", "updated_at"])
+            row = await reload_with(session, Policy, row.id, *_POLICY_LOAD)
             data = policy_json(row)
         await invalidate(request, PARTY)   # a counterparty may have been created
         return success_response(request=request, response=response, data=data)
@@ -386,7 +387,7 @@ async def renew_policy(request: Request, response: Response, policy_id: int, bod
                     moved += 1
                 await session.flush()
 
-            await session.refresh(new, ["insured", "reinsured", "retrocedent"])
+            new = await reload_with(session, Policy, new.id, *_POLICY_LOAD)
             data = policy_json(new)
             data["aircraft_carried"] = moved
         await invalidate(request, PARTY)   # an override can name a new counterparty
@@ -462,13 +463,13 @@ async def list_coverage(request: Request, response: Response,
             conds.append((Coverage.covered_to.is_(None)) | (Coverage.covered_to >= on_date))
         stmt = apply_sort(
             select(Coverage, Aircraft).join(Aircraft, Aircraft.id == Coverage.aircraft_id)
-            .where(*conds).options(*_COVERAGE_LOAD),
+            .where(*conds).options(*_COVERAGE_LOAD, *AIRCRAFT_BRIEF),
             sort=sort, order=order, sortmap=_COVERAGE_SORTS,
             tiebreak=(Coverage.covered_from.desc(), Coverage.id))
         async with request.app.state.db_client.read_session(DB) as session:
-            total = (await session.execute(
-                select(func.count()).select_from(Coverage).where(*conds))).scalar_one()
-            rows = (await session.execute(stmt.limit(limit).offset(offset))).all()
+            rows, total = await page_with_total(
+                session, stmt, limit=limit, offset=offset,
+                count_stmt=select(func.count()).select_from(Coverage).where(*conds))
             data = {"items": [coverage_json(c, aircraft=a) for c, a in rows], "total": total}
         return success_response(request=request, response=response, data=data)
     except SortError as _ex:
@@ -494,23 +495,22 @@ async def compare_cover(request: Request, response: Response,
     try:
         on = on_date or date.today()
         async with request.app.state.db_client.read_session(DB) as session:
+            # AIRCRAFT_BRIEF: the type and the airline that aircraft_json reads, joined into this
+            # query, and the engines explicitly refused — they are rendered with engines=False and
+            # asking for them later should fail loudly rather than quietly cost a query per row.
             aircraft = (await session.execute(
-                # aircraft_json() reads the type and the airline, and the model default would
-                # fetch each with its own SELECT. Joined, the whole fleet arrives in one.
-                #
-                # The engines are rendered with `engines=False` here, but `lazy="selectin"` does
-                # not care whether the code reads them — it loads them, and their models, for all
-                # 149 airframes anyway. `raiseload` refuses instead, which costs two round trips
-                # less and turns a later `engines=True` into a loud error rather than a silent
-                # pair of extra queries.
-                select(Aircraft).options(joinedload(Aircraft.service),
-                                         joinedload(Aircraft.aircraft_type),
-                                         joinedload(Aircraft.airline),
-                                         raiseload(Aircraft.engines))
+                select(Aircraft).options(*AIRCRAFT_BRIEF)
                 .order_by(Aircraft.registration, Aircraft.id))).scalars().all()
+            # ONE lease per aircraft — the newest not later than `on`, which is the only one this
+            # comparison can use. Without DISTINCT ON this read EVERY lease ever recorded for
+            # every aircraft and threw all but the last away in Python: a query bounded by the
+            # HISTORY rather than by the fleet, and the history is the half that grows for ever.
             leases = (await session.execute(
                 select(AircraftLease).where(AircraftLease.effective_date <= on)
                 .options(joinedload(AircraftLease.agreement))
+                .distinct(AircraftLease.aircraft_id)
+                .order_by(AircraftLease.aircraft_id, AircraftLease.effective_date.desc(),
+                          AircraftLease.id.desc())
             )).scalars().all()
             covers = (await session.execute(
                 select(Coverage).where(
@@ -585,9 +585,10 @@ async def create_coverage(request: Request, response: Response, body: CoverageIn
                                         msg=f"Policy {body.policy_id} not found",
                                         status_code=status.HTTP_404_NOT_FOUND)
             if body.aircraft_id is not None:
-                aircraft = await session.get(Aircraft, body.aircraft_id)
+                aircraft = await session.get(Aircraft, body.aircraft_id, options=AIRCRAFT_BRIEF)
             else:
-                aircraft = await find_aircraft(session, registration=body.registration, msn=body.msn)
+                aircraft = await find_aircraft(session, registration=body.registration,
+                                               msn=body.msn, options=AIRCRAFT_BRIEF)
             if aircraft is None:
                 return warning_response(
                     request=request, response=response,
@@ -599,8 +600,7 @@ async def create_coverage(request: Request, response: Response, body: CoverageIn
                            covered_to=body.covered_to if body.covered_to is not None else policy.period_to)
             session.add(row)
             await session.flush()
-            await session.refresh(row, ["policy"])
-            await session.refresh(policy, ["insured", "reinsured", "retrocedent"])
+            row = await reload_with(session, Coverage, row.id, *_COVERAGE_LOAD)
             data = coverage_json(row, aircraft=aircraft)
         return success_response(request=request, response=response, data=data,
                                 status_code=status.HTTP_201_CREATED)
@@ -633,7 +633,7 @@ async def update_coverage(request: Request, response: Response, coverage_id: int
             for key, value in fields.items():
                 setattr(row, key, value)
             await session.flush()
-            aircraft = await session.get(Aircraft, row.aircraft_id)
+            aircraft = await session.get(Aircraft, row.aircraft_id, options=AIRCRAFT_BRIEF)
             data = coverage_json(row, aircraft=aircraft)
         return success_response(request=request, response=response, data=data)
     except IntegrityError as _ex:
@@ -659,7 +659,7 @@ async def delete_coverage(request: Request, response: Response, coverage_id: int
                 return warning_response(request=request, response=response,
                                         msg=f"Coverage {coverage_id} not found",
                                         status_code=status.HTTP_404_NOT_FOUND)
-            aircraft = await session.get(Aircraft, row.aircraft_id)
+            aircraft = await session.get(Aircraft, row.aircraft_id, options=AIRCRAFT_BRIEF)
             data = coverage_json(row, aircraft=aircraft)
             await session.delete(row)
         return success_response(request=request, response=response, data=data,

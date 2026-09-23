@@ -1,8 +1,9 @@
-import random
+import asyncio
+import uuid as _uuid
 from datetime import datetime, date
 from pathlib import Path
 
-from fastapi import Request, BackgroundTasks
+from fastapi import Request, Response, BackgroundTasks, Depends, status
 from fastapi.responses import FileResponse
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
@@ -14,25 +15,46 @@ from settings import Router, RESPONSES_PATH, PA_APP_URL, CUSTOM_EXCEL_LEASE_HEAD
 from Database.Models import Lease_Output
 from Schemas import JsonFileSchema
 from Schemas.Enums import service
-from Utils import remove_file
+from api_auth import authorize, SCOPE_FLIGHTS_READ
+from Utils import remove_file, warning_response
 
+# `flights:read` was defined in api_auth.py and wired to nothing, so this router was open to
+# anyone who could reach the gateway — and `/database/lease_agr` builds a workbook of the whole
+# Lease_Output table, which is lease commercials. The scope existed; it is used now.
 router = Router(
     prefix="/database",
-    tags=["Database"]
+    tags=["Database"],
+    dependencies=[Depends(authorize(SCOPE_FLIGHTS_READ))],
 )
 
 # TODO: Update it like Flightradar router
 
+# A workbook is built entirely in memory before it is saved, so this is the ceiling on what one
+# request may cost. Tune it if the report legitimately outgrows it; do not remove it.
+_MAX_EXPORT_ROWS = 50_000
+
+
 @router.get('/{type}')
-async def get_db(type: str, request: Request, background_tasks: BackgroundTasks):
+async def get_db(type: str, request: Request, response: Response,
+                 background_tasks: BackgroundTasks):
+    token = _uuid.uuid4().hex
     if type.lower() == 'lease_agr':
         # NOTE: Lease_Output is a `main`/core model — core is being rewritten and is not
         # migrated into aixii yet, so this endpoint will not return data until core is rebuilt.
         async with request.app.state.db_client.read_session("main") as main_db:
+            # Bounded. The select had no LIMIT and every row became openpyxl cells, so one request
+            # scaled with the table in memory. A workbook is a report, not a data feed: past
+            # _MAX_EXPORT_ROWS the answer is "narrow it down", not a bigger file.
             result = await main_db.execute(
-                select(Lease_Output).order_by(Lease_Output.id.asc())
+                select(Lease_Output).order_by(Lease_Output.id.asc()).limit(_MAX_EXPORT_ROWS + 1)
             )
             rows = result.scalars().all()
+        if len(rows) > _MAX_EXPORT_ROWS:
+            return warning_response(
+                request=request, response=response,
+                msg=(f"This export is capped at {_MAX_EXPORT_ROWS} rows and the table has more. "
+                     f"Narrow the request or use the API directly."),
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
 
         wb = Workbook()
         ws = wb.active
@@ -126,11 +148,17 @@ async def get_db(type: str, request: Request, background_tasks: BackgroundTasks)
         # freeze
         ws.freeze_panes = "A3"
 
-        filename_xl = "Lease_Agreements.xlsx"
+        # A UNIQUE name per request. Every call wrote the same path, so two concurrent calls had
+        # both wb.save() writing one file and a reader could collect a half-written workbook - and
+        # nothing ever deleted it, so it also grew on the volume for ever.
+        filename_xl = f"Lease_Agreements_{token}.xlsx"
         filepath_xl = RESPONSES_PATH / filename_xl
-        wb.save(filepath_xl)
+        # openpyxl is synchronous and a workbook of thousands of rows is real CPU. On the event
+        # loop it blocks every other request in this worker for the duration.
+        await asyncio.to_thread(wb.save, filepath_xl)
+        background_tasks.add_task(remove_file, str(filepath_xl))
     else:
-        filename_xl = "Lease_Agreements.xlsx"
+        filename_xl = f"Lease_Agreements_{token}.xlsx"
 
     data = JsonFileSchema(
         type=type,
@@ -138,7 +166,9 @@ async def get_db(type: str, request: Request, background_tasks: BackgroundTasks)
         filename=filename_xl
     )
 
-    filename = f"{random.randint(10000, 99999)}.json"
+    # `random.randint(10000, 99999)` collides once in ninety thousand, and a collision means one
+    # request's background cleanup deletes the file another request is still serving.
+    filename = f"{token}.json"
     filepath = Path(RESPONSES_PATH / filename)
     filepath.write_text(data.model_dump_json(indent=4), encoding="utf-8")
 

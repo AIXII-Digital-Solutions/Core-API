@@ -14,14 +14,19 @@ from sqlalchemy import select
 
 from Config import setup_logger
 from settings import Router
-from Queue import EXTERNAL_QUEUE
+from Queue import EXTERNAL_QUEUE, FILE_QUEUE
 from Database import JobStatus
-from api_auth import authorize
+from api_auth import authorize, SCOPE_STATUS_READ, SCOPE_QUEUES_ADMIN
 from Utils import success_response, warning_response
 
 logger = setup_logger("status_api")
 
-router = Router(prefix="/status", tags=["Status"])
+# `status:read` was defined in api_auth.py and wired to nothing, so every one of these routes was
+# open: an anonymous caller could list every job with its `ref` — which for a file job is the
+# absolute path of the uploaded file — plus its message and payload. The scope existed; it is used
+# now. Cancelling is not a read, so it asks for more (see the route).
+router = Router(prefix="/status", tags=["Status"],
+                dependencies=[Depends(authorize(SCOPE_STATUS_READ))])
 
 STATUS_CHANNEL = "status:events"  # must match the workers' status.py
 _CANCEL_KEY = "job:cancel:{}"     # must match the worker's panel.py cooperative-cancel flag
@@ -52,7 +57,9 @@ async def list_status(
     response: Response,
     kind: Optional[str] = Query(None, description="file | external"),
     state: Optional[str] = Query(None, description="queued | running | success | error | skipped"),
-    limit: int = Query(100, le=1000),
+    # ge=1: without a lower bound `limit=-1` renders LIMIT -1, which Postgres refuses, and the
+    # handler has no try/except — a 500 for what is plainly a bad request.
+    limit: int = Query(100, ge=1, le=1000),
 ):
     stmt = select(JobStatus).order_by(JobStatus.updated_at.desc()).limit(limit)
     if kind:
@@ -76,9 +83,12 @@ async def stream_status(request: Request):
     redis = request.app.state.redis
 
     async def event_gen():
-        pubsub = redis.pubsub()
-        await pubsub.subscribe(STATUS_CHANNEL)
+        # Both INSIDE the try. Subscribing can fail on a Redis blip, and outside the try the
+        # `finally` never runs — every failed connect would leak a pubsub connection.
+        pubsub = None
         try:
+            pubsub = redis.pubsub()
+            await pubsub.subscribe(STATUS_CHANNEL)
             yield ": connected\n\n"   # first bytes immediately so the stream is established
             while True:
                 if await request.is_disconnected():
@@ -101,8 +111,9 @@ async def stream_status(request: Request):
                 yield f"data: {data}\n\n"
         finally:
             try:
-                await pubsub.unsubscribe(STATUS_CHANNEL)
-                await pubsub.aclose()
+                if pubsub is not None:
+                    await pubsub.unsubscribe(STATUS_CHANNEL)
+                    await pubsub.aclose()
             except Exception:
                 pass
 
@@ -128,7 +139,11 @@ async def get_status(job_id: str, request: Request, response: Response):
     return success_response(request=request, response=response, data=_serialize(row))
 
 
-@router.post("/{job_id}/cancel", dependencies=[Depends(authorize())])
+# `authorize()` with no scope required NOTHING: `set().issubset(anything)` is always true, so a key
+# minted with only `flights:read` could kill a running forecast. Cancelling a job is an operational
+# action and asks for the operational scope; the master service token satisfies it as it does
+# everything else.
+@router.post("/{job_id}/cancel", dependencies=[Depends(authorize(SCOPE_QUEUES_ADMIN))])
 async def cancel_status(job_id: str, request: Request, response: Response):
     """Cancel a running job. Sets a cooperative Redis flag (checked by the worker's forecast/fetch loop,
     which then stops with a terminal `cancelled` status) AND sends a generic ARQ abort so ANY job's
@@ -153,7 +168,11 @@ async def cancel_status(job_id: str, request: Request, response: Response):
     # 2) generic ARQ abort — cancels the running task for ANY job (backstop / non-cooperative jobs)
     aborted = False
     try:
-        job = Job(job_id, redis=request.state.arq, _queue_name=EXTERNAL_QUEUE)
+        # The queue the job is ON. Hardcoding the external queue meant cancelling a FILE job
+        # aborted nothing while answering "Cancellation requested" — a success-shaped reply for
+        # work that carried on running.
+        queue = FILE_QUEUE if row.kind == "file" else EXTERNAL_QUEUE
+        job = Job(job_id, redis=request.state.arq, _queue_name=queue)
         aborted = await job.abort(timeout=2)
     except Exception as _ex:
         logger.warning("arq abort for %s failed: %s", job_id, _ex)

@@ -97,7 +97,7 @@ class Party(Base):
     details: Mapped[Optional[str]] = mapped_column(Text, nullable=True, default=None)
 
     contacts: Mapped[List["PartyContact"]] = relationship(
-        "PartyContact", back_populates="party", lazy="selectin",
+        "PartyContact", back_populates="party", lazy="raise_on_sql",
         order_by="PartyContact.id", cascade="all, delete-orphan",
     )
 

@@ -47,6 +47,14 @@ API_KEEPALIVE_TIMEOUT: int = int(require_env("API_KEEPALIVE_TIMEOUT", 65))
 # TTL only bounds how long a MISSED invalidation could be visible — a Redis hiccup, say.
 INSURED_FLEET_CACHE_SECONDS: int = int(require_env("INSURED_FLEET_CACHE_SECONDS", 300))
 
+# A request slower than this is logged at WARNING rather than INFO, so the ones worth looking at
+# can be found with grep instead of read for. It is wall time inside THIS process — the proxy hop
+# and the client's own link are not in it and must not be, or every request would cross the line.
+SLOW_REQUEST_MS: int = int(require_env("SLOW_REQUEST_MS", 750))
+# And this many database round trips is a lot for one request whatever the clock says: it is the
+# shape that produces a slow endpoint later, under a worse network, and it is worth naming early.
+BUSY_REQUEST_QUERIES: int = int(require_env("BUSY_REQUEST_QUERIES", 8))
+
 SELF_HOST: str = require_env("SELF_HOST", "api.aixii.com")
 SELF_PORT: int = int(require_env("SELF_PORT", 8000))
 

@@ -22,7 +22,7 @@ from datetime import datetime
 from typing import Optional
 
 from fastapi import Request, Response, Depends, Query, status
-from sqlalchemy import select, func, or_, and_
+from sqlalchemy import select, func, or_, and_, literal, union_all
 
 from Config import setup_logger
 from settings import Router
@@ -33,7 +33,7 @@ from Database.PolicyModels import Coverage
 from api_auth import authorize, SCOPE_INSURANCE_READ
 from Utils import success_response, warning_response, error_response
 from Utils.ResponsesFunc import build_responses
-from Utils.DomainCommon import DB, resolve_fk_labels, audit_entry
+from Utils.DomainCommon import DB, resolve_fk_labels, audit_entry, page_with_total
 
 logger = setup_logger("history_api")
 
@@ -113,13 +113,12 @@ async def list_history(
             conds.append(ChangeLog.changed_at <= until)
 
         async with request.app.state.db_client.read_session(DB) as session:
-            total = (await session.execute(
-                select(func.count()).select_from(ChangeLog).where(*conds))).scalar_one()
-            rows = (await session.execute(
+            rows, total = await page_with_total(
+                session,
                 select(ChangeLog).where(*conds)
-                .order_by(ChangeLog.changed_at.desc(), ChangeLog.id.desc())
-                .limit(limit).offset(offset)
-            )).scalars().all()
+                .order_by(ChangeLog.changed_at.desc(), ChangeLog.id.desc()),
+                limit=limit, offset=offset,
+                count_stmt=select(func.count()).select_from(ChangeLog).where(*conds))
             items = await _render(session, rows)
         return success_response(request=request, response=response,
                                 data={"items": items, "total": total})
@@ -153,31 +152,56 @@ async def aircraft_history(
                 msg=f"Unknown include {sorted(unknown)}. "
                     "Allowed: aircraft, engines, service, leases, coverage")
 
+        # Which child rows exist, and does the aircraft itself — in ONE round trip.
+        #
+        # This used to be five: a full ORM load of the aircraft to check it exists (which fetched
+        # its type, its airline, its engines and their models: six more), then one SELECT per
+        # child table for its ids. None of those queries is slow and all of them are serial,
+        # against a database tens of milliseconds away, which is the only thing that made the
+        # endpoint slow. A UNION ALL asks all five questions at once.
+        CHILDREN = (
+            ("engines", "fleet", "aircraft_engine", AircraftEngine, AircraftEngine.aircraft_id),
+            ("service", "fleet", "service_info", ServiceInfo, ServiceInfo.aircraft_id),
+            ("leases", "leasing", "aircraft_lease", AircraftLease, AircraftLease.aircraft_id),
+            ("coverage", "policy", "coverage", Coverage, Coverage.aircraft_id),
+        )
         async with request.app.state.db_client.read_session(DB) as session:
-            if await session.get(Aircraft, aircraft_id) is None:
-                return warning_response(request=request, response=response,
-                                        msg=f"Aircraft {aircraft_id} not found",
-                                        status_code=status.HTTP_404_NOT_FOUND)
+            parts = [select(literal("aircraft").label("kind"), Aircraft.id.label("row_id"))
+                     .where(Aircraft.id == aircraft_id)]
+            parts += [select(literal(key).label("kind"), model.id.label("row_id"))
+                      .where(column == aircraft_id)
+                      for key, _schema, _table, model, column in CHILDREN if key in wanted]
+            found: dict[str, list[int]] = {}
+            for row in (await session.execute(union_all(*parts))).all():
+                found.setdefault(row.kind, []).append(row.row_id)
+
+            if not found.get("aircraft") and not any(
+                    k in found for k, *_ in CHILDREN):
+                # Neither the aircraft nor any child of it: it never existed, or it and everything
+                # about it are gone. Either way there is nothing to show and a 404 says so.
+                if (await session.execute(
+                        select(func.count()).select_from(ChangeLog)
+                        .where(ChangeLog.schema_name == "fleet",
+                               ChangeLog.table_name == "aircraft",
+                               ChangeLog.row_id == aircraft_id))).scalar_one() == 0:
+                    return warning_response(request=request, response=response,
+                                            msg=f"Aircraft {aircraft_id} not found",
+                                            status_code=status.HTTP_404_NOT_FOUND)
+
             branches = []
             if "aircraft" in wanted:
                 branches.append(and_(ChangeLog.schema_name == "fleet",
                                      ChangeLog.table_name == "aircraft",
                                      ChangeLog.row_id == aircraft_id))
-            # For the child tables the log stores the CHILD's id, so the ids are looked up first.
-            # A row already deleted is still reachable: its delete entry named it while it existed,
-            # and `row_id` carries no foreign key precisely so the entry outlives it — but a child
-            # deleted before this call can no longer be found by id, so its entries are also matched
-            # through the aircraft_id inside the snapshot itself.
-            for key, schema, table, model, column in (
-                ("engines", "fleet", "aircraft_engine", AircraftEngine, AircraftEngine.aircraft_id),
-                ("service", "fleet", "service_info", ServiceInfo, ServiceInfo.aircraft_id),
-                ("leases", "leasing", "aircraft_lease", AircraftLease, AircraftLease.aircraft_id),
-                ("coverage", "policy", "coverage", Coverage, Coverage.aircraft_id),
-            ):
+            # For the child tables the log stores the CHILD's id. A row already deleted is still
+            # reachable: its delete entry named it while it existed, and `row_id` carries no
+            # foreign key precisely so the entry outlives it — but a child deleted before this
+            # call can no longer be found by id, so its entries are also matched through the
+            # aircraft_id inside the snapshot itself.
+            for key, schema, table, _model, _column in CHILDREN:
                 if key not in wanted:
                     continue
-                ids = (await session.execute(
-                    select(model.id).where(column == aircraft_id))).scalars().all()
+                ids = found.get(key, [])
                 by_snapshot = or_(
                     ChangeLog.new_row["aircraft_id"].astext == str(aircraft_id),
                     ChangeLog.old_row["aircraft_id"].astext == str(aircraft_id),

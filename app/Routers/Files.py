@@ -16,10 +16,13 @@ import httpx
 from fastapi import Request, Response, UploadFile, File, Form, Depends, status
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from Config import setup_logger
 from settings import Router, UPLOAD_PATH, FILE_PROCESSOR_URL, FILE_PROCESSOR_TOKEN
 from Database import JobStatus
 from Utils import success_response, warning_response, error_response
 from service_auth import verify_service_token
+
+logger = setup_logger("files_api")
 
 router = Router(prefix="/files", tags=["Files"], dependencies=[Depends(verify_service_token)])
 
@@ -98,18 +101,23 @@ async def upload_file(
                 )
         resp.raise_for_status()
     except Exception as e:
+        logger.error("forward of %s to file-processor failed: %s", safe_name, e, exc_info=True)
         await _set_status(request, job_id, str(dest), "error", message=f"forward to file-processor failed: {e}")
         return error_response(
             request=request, response=response,
-            msg=f"file-processor unavailable: {e}",
+            # The exception carries FILE_PROCESSOR_URL and the transport error. That belongs in
+            # the log above, not in a reply; the caller gets the correlation id to quote.
+            msg="file-processor unavailable",
             status_code=status.HTTP_502_BAD_GATEWAY,
         )
-
-    # file-processor now owns its own copy — drop core-api's staged copy (avoid disk growth)
-    try:
-        dest.unlink(missing_ok=True)
-    except OSError:
-        pass
+    finally:
+        # ALWAYS. The unlink used to sit on the success path only, so every failed forward - a
+        # file-processor restart, a timeout - left its upload on the volume with nothing to
+        # collect it. A file-processor outage during a bulk load filled the disk.
+        try:
+            dest.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("could not remove the staged upload %s", dest, exc_info=True)
 
     return success_response(
         request=request, response=response,

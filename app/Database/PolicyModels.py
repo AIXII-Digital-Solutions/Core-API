@@ -68,7 +68,8 @@ class Policy(Base):
     __tablename__ = "policy"
 
     insured_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey(Party.__table__.c.id, ondelete="RESTRICT"), nullable=False, index=True,
+        BigInteger, ForeignKey(Party.__table__.c.id, ondelete="RESTRICT"), nullable=False,
+        index=False,   # uq_policy_insured_period leads with it
     )
     reinsured_id: Mapped[Optional[int]] = mapped_column(
         BigInteger, ForeignKey(Party.__table__.c.id, ondelete="RESTRICT"),
@@ -104,11 +105,11 @@ class Policy(Base):
 
     cut_through_clause: Mapped[Optional[str]] = mapped_column(Text, nullable=True, default=None)
 
-    insured: Mapped["Party"] = relationship(Party, foreign_keys=[insured_id], lazy="selectin")
-    reinsured: Mapped[Optional["Party"]] = relationship(Party, foreign_keys=[reinsured_id], lazy="selectin")
-    retrocedent: Mapped[Optional["Party"]] = relationship(Party, foreign_keys=[retrocedent_id], lazy="selectin")
+    insured: Mapped["Party"] = relationship(Party, foreign_keys=[insured_id], lazy="raise_on_sql")
+    reinsured: Mapped[Optional["Party"]] = relationship(Party, foreign_keys=[reinsured_id], lazy="raise_on_sql")
+    retrocedent: Mapped[Optional["Party"]] = relationship(Party, foreign_keys=[retrocedent_id], lazy="raise_on_sql")
     coverages: Mapped[List["Coverage"]] = relationship(
-        "Coverage", back_populates="policy", lazy="selectin",
+        "Coverage", back_populates="policy", lazy="raise_on_sql",
     )
 
     __table_args__ = (
@@ -157,7 +158,8 @@ class Coverage(Base):
     __tablename__ = "coverage"
 
     aircraft_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey(Aircraft.__table__.c.id, ondelete="RESTRICT"), nullable=False, index=True,
+        BigInteger, ForeignKey(Aircraft.__table__.c.id, ondelete="RESTRICT"), nullable=False,
+        index=False,   # uq_coverage_aircraft_policy leads with it
     )
     policy_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("policy.policy.id", ondelete="RESTRICT"), nullable=False, index=True,
@@ -165,7 +167,7 @@ class Coverage(Base):
     covered_from: Mapped[date] = mapped_column(Date, nullable=False)
     covered_to: Mapped[Optional[date]] = mapped_column(Date, nullable=True, default=None)
 
-    policy: Mapped["Policy"] = relationship("Policy", back_populates="coverages", lazy="selectin")
+    policy: Mapped["Policy"] = relationship("Policy", back_populates="coverages", lazy="raise_on_sql")
 
     __table_args__ = (
         CheckConstraint(

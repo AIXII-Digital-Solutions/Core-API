@@ -2,7 +2,7 @@ from pathlib import Path
 import random
 from typing import Annotated, List
 
-from fastapi import Request, status, Query, BackgroundTasks, Response
+from fastapi import Request, status, Query, BackgroundTasks, Response, Depends
 from fastapi.responses import FileResponse
 
 from Config import setup_logger
@@ -10,15 +10,20 @@ from settings import Router, RESPONSES_PATH
 from Queue import EXTERNAL_QUEUE
 from Schemas import RequestFRFlightSummary, RequestFRAirports, DefaultResponse
 from Schemas.Enums import service
+from api_auth import authorize, SCOPE_FLIGHTS_READ
 from Utils import success_response, error_response, str_to_list
 from Utils.ResponsesFunc import build_responses
 
 logger = setup_logger(name="flightradar_api")
 
 
+# These two ENQUEUE WORK against a metered upstream: a FlightRadar fetch is billed by the call,
+# and until now anyone who could reach the gateway could start one. `flights:read` was defined
+# for exactly this and wired to nothing.
 router = Router(
     prefix="/flightradar",
     tags=[service.APITagsEnum.FLIGHTRADAR],
+    dependencies=[Depends(authorize(SCOPE_FLIGHTS_READ))],
 )
 
 

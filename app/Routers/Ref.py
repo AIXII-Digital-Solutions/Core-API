@@ -34,6 +34,7 @@ from Utils import success_response, warning_response, error_response
 from Utils.ResponsesFunc import build_responses
 from Utils.DomainCache import AIRLINE, PARTY, cached, invalidate
 from Utils.DomainCommon import (
+    page_with_total,
     DB, set_actor, apply_sort, typeahead_order, SortError, integrity_error,
     airline_json, party_json, contact_json,
 )
@@ -150,9 +151,9 @@ async def list_airlines(
                               tiebreak=(Airline.airline_name, Airline.id))
         async def load():
             async with request.app.state.db_client.read_session(DB) as session:
-                total = (await session.execute(
-                    select(func.count()).select_from(Airline).where(*conds))).scalar_one()
-                rows = (await session.execute(stmt.limit(limit).offset(offset))).scalars().all()
+                rows, total = await page_with_total(
+                    session, stmt, limit=limit, offset=offset,
+                    count_stmt=select(func.count()).select_from(Airline).where(*conds))
                 return {"items": [airline_json(a) for a in rows], "total": total}
 
         data = await cached(request, AIRLINE,
@@ -337,9 +338,9 @@ async def list_parties(
                               tiebreak=(Party.name, Party.id))
         async def load():
             async with request.app.state.db_client.read_session(DB) as session:
-                total = (await session.execute(
-                    select(func.count()).select_from(Party).where(*conds))).scalar_one()
-                rows = (await session.execute(stmt.limit(limit).offset(offset))).scalars().all()
+                rows, total = await page_with_total(
+                    session, stmt, limit=limit, offset=offset,
+                    count_stmt=select(func.count()).select_from(Party).where(*conds))
                 return {"items": [party_json(p) for p in rows], "total": total}
 
         data = await cached(request, PARTY,

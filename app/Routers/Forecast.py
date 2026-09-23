@@ -147,8 +147,11 @@ async def _mark_queued(request: Request, job_id: str, label: str, *, ref: str = 
             "job_id": job_id, "kind": "external", "ref": ref,
             "state": "queued", "progress": 0, "message": msg,
         }))
-    except Exception:
-        pass
+    except Exception as _ex:
+        # The durable row is already written, so nothing is lost - but a client watching
+        # /status/stream will never see this job appear, and in silence there was no way to find
+        # out why.
+        logger.warning("could not publish the queued status for %s: %s", job_id, _ex)
 
 
 # The columns a listing row is built from. `covered_registrations` is COUNTED, not listed: an
