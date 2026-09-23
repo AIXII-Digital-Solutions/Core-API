@@ -73,6 +73,18 @@ success or not, so a client can log it without parsing the body.
 Responses also carry `Server-Timing: app;dur=<ms>` — time spent inside the API, so a slow call
 can be attributed to the service or to the network without guessing.
 
+**What the endpoints cost now** (round trips to the database — the thing that decides latency):
+
+| | |
+|---|---|
+| an aircraft card, by id or by registration | 3 |
+| the aircraft grid, any page size | 2 |
+| the service block | 1 |
+| the engines of one aircraft | 1 |
+| the coverage comparison, whole fleet | 3 |
+| the change log, or one aircraft's timeline | 2–4 |
+| a reference listing (cached) | **0** |
+
 **Read that header before reporting a slow endpoint.** Most of what a browser measures against
 production is not this service: a request crosses the client's link to the proxy and then a proxy
 hop that is ~340 ms on its own, empty. `app;dur` is the part core-api owns. If a card takes 1.2 s

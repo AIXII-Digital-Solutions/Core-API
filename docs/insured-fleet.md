@@ -468,6 +468,31 @@ does not know, so a typo cannot silently become a listing that never invalidates
 Everything fails open: a Redis error falls through to the database. A cache that can take the
 endpoint down with it is a worse bug than the latency it saves.
 
+**No relationship loads itself.** Every model here is `lazy="raise_on_sql"`, so a query fetches
+exactly what a handler declared and touching anything else raises with the relationship named.
+This is not tidiness: the database is a network away, `selectin` is one extra SELECT per
+relationship per load, and reading ONE aircraft to check it existed used to fetch its type, its
+airline, its engines and their models. `GET /fleet/aircraft/{id}/service` cost seven round trips
+to return a single 1:1 row; the aircraft timeline cost sixteen.
+
+The rule at a call site is: **to-one → `joinedload`, collection → `selectinload`, not needed → say
+nothing.** Joining a collection multiplies the parent rows and silently breaks `LIMIT/OFFSET`,
+which is why a grid selectin-loads the engines and a single card may join them. The three aircraft
+shapes are written once, in `Utils/DomainCommon`:
+
+| | what it loads | used by |
+|---|---|---|
+| `AIRCRAFT_BRIEF` | type, airline, service; engines REFUSED | an aircraft inside a lease, a coverage, the comparison |
+| `AIRCRAFT_GRID` | the three, plus engines by selectin | a PAGE of aircraft |
+| `AIRCRAFT_ONE` | the three, plus engines joined | ONE aircraft — needs `.unique()` |
+
+Two helpers exist so the old habits cannot come back. **`reload_with()`** replaces
+`session.refresh(row, [...])`, which costs a round trip per attribute named; it passes
+`populate_existing`, without which a relationship already loaded is left stale and a PATCH that
+moved an engine to another model hands back the old one. **`page_with_total()`** replaces the
+COUNT-then-page pair with `count(*) OVER ()`, falling back to a COUNT only for an empty page past
+a non-zero offset.
+
 **Every write sets the actor.** `set_actor(session, token)` issues
 `set_config('app.actor', …, true)` inside the transaction, which is what
 `audit.change_log.changed_by` records. A write path that forgets it logs the database login,

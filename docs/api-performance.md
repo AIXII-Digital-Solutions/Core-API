@@ -24,6 +24,113 @@ Measured from a client with `bench_api.py` (median of 8 after a warm-up, keep-al
 between the proxy and api-master. That is far more than a 24 ms network RTT explains; likely causes
 are listed under [Proxy](#proxy-not-verified--no-access).
 
+## September 23: the loaders, the counts, and what a request costs
+
+The work above cut the round trips a request makes; this round cut the ones it made without
+anybody asking. Measured on the wire with a `before_cursor_execute` hook, median of three.
+
+| Endpoint | Before | After |
+|---|---:|---:|
+| `GET /history/aircraft/{id}` | 16 | **4** |
+| `GET /fleet/aircraft/{id}/service` | 7 | **1** |
+| `GET /history` | 5 | **2** |
+| `GET /fleet/aircraft` (any page) | 3 | **2** |
+| `GET /fleet/aircraft/{id}/engines` | 2 | **1** |
+| every other grid | 2 | **1** when it fits on one page |
+| `POST /fleet/aircraft` (2 engines, new type) | 13 | **10** |
+
+Nothing the API serves reads more than four.
+
+### Relationships stopped loading themselves
+
+The domain models were `lazy="selectin"`: one extra SELECT per relationship, on every load, whether
+or not anything read it. So reading ONE aircraft to check that it EXISTS fetched its type, its
+airline, its engines and their models — and two endpoints were built on exactly that check.
+
+They are `lazy="raise_on_sql"` now. Nothing loads implicitly; touching an unloaded relationship
+raises and names it, so the cost has to be written at the call site where review can see it. The
+rule is short enough to remember:
+
+| what it is | loader | why |
+|---|---|---|
+| to-one | `joinedload` | one row, belongs in the parent's own SELECT |
+| collection | `selectinload` | joining it multiplies parent rows and breaks LIMIT/OFFSET |
+| not needed | nothing, or `raiseload` | costs nothing, and asking later fails loudly |
+
+The aircraft shapes live once in `Utils/DomainCommon` — `AIRCRAFT_BRIEF` (inside a lease, a
+coverage, a comparison: no engines), `AIRCRAFT_GRID` (a page), `AIRCRAFT_ONE` (a single card, so
+the engines join too). Leasing and Policies render aircraft as well, and three private copies of
+the rule would be three chances to get it wrong.
+
+Turning the default up found BUGS, not just slow paths: `list_engines` rendered its rows after the
+session closed and only worked because selectin had already fetched everything; the engine PATCH
+and DELETE never asked for the model they print; every aircraft rendered inside a lease or a
+coverage was loading its references one query at a time.
+
+### Three helpers that replaced three habits
+
+- **`reload_with(session, Model, id, *options)`** replaces `session.refresh(row, ["a","b","c"])`,
+  which costs a round trip PER ATTRIBUTE — four to hand back a newly created aircraft.
+  `populate_existing` is what makes it correct: without it a relationship already loaded is left
+  as it was, because changing a foreign key does not expire the object hanging off it, and a PATCH
+  that moved an engine to another model handed back the OLD one.
+- **`page_with_total(...)`** returns `(rows, total)` from one statement with `count(*) OVER ()`.
+  The one case a window cannot answer is an empty page — over no rows it returns no rows, so
+  "nothing matched" and "page 9 of 3" look identical — so an empty result at a NON-ZERO offset,
+  and only that, falls back to the COUNT. Safe only because the grids no longer joined-load a
+  collection, which would have made the window count duplicates.
+- **`resolve_fk_labels`** builds its labels in SQL and asks for all seven kinds in one UNION ALL.
+  A page of the change log names parties, airlines, aircraft, types, engine models, agreements and
+  policies at once, and seven serial round trips is seven times the network for one pass of work.
+
+### Existence checks, and one UNION ALL
+
+`session.get(Aircraft, id)` to answer "does this exist" loaded the whole graph; it selects the id
+now. `/history/aircraft/{id}` did that AND one SELECT per child table for their ids — five round
+trips before it read a single log entry. One UNION ALL asks all five questions at once. A deleted
+aircraft's history is reachable as a result, which matches what the endpoint already promised for
+deleted children.
+
+### Writes
+
+`POST /fleet/aircraft` made thirteen round trips, three of them avoidable and none obvious:
+`find_aircraft` asked twice (MSN, then registration — now one query ordered so MSN still wins);
+`_get_or_create_type` was called once per ENGINE, so a twin looked its model up twice (memoised on
+the session); and the engines went in one INSERT at a time, because the SELECT inside
+`_engine_fields` triggered an autoflush of the row added just before it. Resolving every engine
+before adding any lets SQLAlchemy batch them.
+
+### Every request says what it cost
+
+```
+GET /fleet/aircraft?limit=50 completed_in=0.412s | status_code=200 | db=2/71.4ms | correlation_id=...
+```
+
+A ContextVar holds one counter per request and the SQLAlchemy listeners are on the Engine CLASS, so
+they cover every engine the process opens. Two `perf_counter()` calls and an integer add per
+statement. The level follows what is wrong rather than what happened — 5xx errors, slow requests
+and 4xx warn, and so does a request that crosses `BUSY_REQUEST_QUERIES` (default 8), which is the
+one that matters: too many round trips is merely slow here and much worse over a longer wire. A
+warning also names that request's slowest statement.
+
+### Indexes
+
+`audit.change_log` is the only table in this domain that grows without bound.
+`/history/aircraft/{id}` filters on `new_row ->> 'aircraft_id'` — the log stores the CHILD's id, so
+the aircraft is only named inside the snapshot — and nothing indexed it: 313 rows read to return 3,
+a ratio that does not improve with age. Two PARTIAL expression indexes take it to 3 and 3. The
+listing's sort index now matches `(changed_at DESC, id DESC)` instead of forcing an Incremental
+Sort. Four bare foreign-key indexes were dropped, each the leading column of a composite that
+already existed, and all thirteen domain tables were ANALYZEd — two had never been.
+
+### The cache
+
+A hit cost two Redis round trips (GET the generation, GET the payload keyed by it), and Redis is
+across the same network as the database. A Lua reader does both hops inside Redis and returns the
+generation alongside whatever it found: one round trip for a hit, one for a miss. Invalidation is
+pipelined — creating an aircraft can create an airline, a type and an engine model, and three
+INCRs were three waits.
+
 ## Changes
 
 ### Database round trips
