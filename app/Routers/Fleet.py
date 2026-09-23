@@ -566,9 +566,13 @@ async def create_aircraft(request: Request, response: Response, body: AircraftIn
                 row.airline_id = airline.id
             await session.flush()
 
-            for engine in body.engines:
-                session.add(AircraftEngine(aircraft_id=row.id,
-                                           **await _engine_fields(session, engine)))
+            # Resolve EVERY engine before adding ANY. Interleaving the two lets the SELECT
+            # inside _engine_fields trigger an autoflush of the row added just before it, so the
+            # engines went to the database one INSERT at a time; resolved first, they are one
+            # statement however many there are.
+            engine_rows = [AircraftEngine(aircraft_id=row.id, **await _engine_fields(session, e))
+                           for e in body.engines]
+            session.add_all(engine_rows)
             # every aircraft gets its service block; a re-post leaves an existing one alone rather
             # than resetting fields somebody has since set
             if created:

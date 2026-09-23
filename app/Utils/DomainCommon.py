@@ -18,7 +18,8 @@ from decimal import Decimal
 from typing import Any, Iterable, Optional, Sequence
 
 from fastapi import status
-from sqlalchemy import select, text, desc, func, case, cast, literal, union_all, String
+from sqlalchemy import (select, text, desc, func, case, cast, literal, union_all,
+                        String, or_)
 from sqlalchemy.orm import joinedload, selectinload, raiseload
 from sqlalchemy.exc import IntegrityError
 
@@ -147,6 +148,18 @@ async def _get_or_create_type(session, model, master_series: Optional[str],
     """
     if not master_series or not master_series.strip():
         return None
+
+    # Asked once per ENGINE, and an aircraft's engines are usually all the same model — so a
+    # twin-engined aircraft looked its model up twice and a four-engined one four times. The memo
+    # lives on the session, which is the request, so it cannot outlive the transaction that can
+    # still roll the row back.
+    memo = session.info.setdefault("_type_memo", {})
+    memo_key = (model.__name__, norm(master_series),
+                norm(manufacturer) if manufacturer else None,
+                getattr(category, "value", category))
+    if memo_key in memo:
+        return memo[memo_key]
+
     conds = [model.master_series_normalized == norm(master_series)]
     if manufacturer and manufacturer.strip():
         conds.append(model.manufacturer_normalized == norm(manufacturer))
@@ -157,6 +170,7 @@ async def _get_or_create_type(session, model, master_series: Optional[str],
     matches = (await session.execute(
         select(model).where(*conds).order_by(model.id))).scalars().all()
     if len(matches) == 1:
+        memo[memo_key] = matches[0]
         return matches[0]
     if len(matches) > 1:
         if not (manufacturer and manufacturer.strip()):
@@ -171,6 +185,7 @@ async def _get_or_create_type(session, model, master_series: Optional[str],
                 f"{label} '{master_series.strip()}' exists as {', '.join(roles)}. Send "
                 f"`aircraft_category` as well to say which — a freighter and a passenger "
                 f"aircraft of the same series are different rows.")
+        memo[memo_key] = matches[0]
         return matches[0]
 
     # Nothing matched: create it. Only an exact request can create, because creating from a
@@ -183,6 +198,7 @@ async def _get_or_create_type(session, model, master_series: Optional[str],
     row = model(**fields)
     session.add(row)
     await session.flush()
+    memo[memo_key] = row
     return row
 
 
@@ -208,19 +224,23 @@ async def find_aircraft(session, *, registration: Optional[str] = None,
     defaults apply — `lazy="selectin"`, one extra round trip per relationship, against a remote
     database — and a caller that only needs the row pays nothing for leaving them out.
     """
-    if msn and msn.strip():
-        row = (await session.execute(
-            select(Aircraft).where(Aircraft.msn == msn.strip()).options(*options)
-        )).unique().scalar_one_or_none()
-        if row is not None:
-            return row
-    if registration and registration.strip():
-        return (await session.execute(
-            select(Aircraft)
-            .where(Aircraft.registration_normalized == norm_reg(registration))
-            .order_by(Aircraft.id).limit(1).options(*options)
-        )).unique().scalar_one_or_none()
-    return None
+    msn = msn.strip() if msn else None
+    registration = registration.strip() if registration else None
+    conds = []
+    if msn:
+        conds.append(Aircraft.msn == msn)
+    if registration:
+        conds.append(Aircraft.registration_normalized == norm_reg(registration))
+    if not conds:
+        return None
+    # ONE query, and MSN still wins: ordering by the MSN match first reproduces "try the serial,
+    # fall back to the tail number" without asking twice. Two questions with one answer between
+    # them do not need two round trips.
+    return (await session.execute(
+        select(Aircraft).where(or_(*conds)).options(*options)
+        .order_by((Aircraft.msn == msn).desc() if msn else Aircraft.id, Aircraft.id)
+        .limit(1)
+    )).unique().scalar_one_or_none()
 
 
 async def page_with_total(session, stmt, *, limit: int, offset: int, count_stmt):
