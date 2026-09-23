@@ -93,12 +93,12 @@ async def read_state(
         logger.error("capacity unreachable op=state cid=%s: %s",
                      getattr(request.state, "correlation_id", None), exc)
         return error_response(request=request, response=response,
-                              msg=f"Azure unreachable: {exc}", status_code=status.HTTP_504_GATEWAY_TIMEOUT)
+                              msg="Azure is unreachable from the API host", status_code=status.HTTP_504_GATEWAY_TIMEOUT)
     except CapacityError as exc:
         logger.error("capacity ARM error op=state cid=%s: %s",
                      getattr(request.state, "correlation_id", None), exc)
         return error_response(request=request, response=response,
-                              msg=f"Azure ARM error: {exc}", status_code=status.HTTP_502_BAD_GATEWAY)
+                              msg="Azure rejected the request; see the logs for this correlation id", status_code=status.HTTP_502_BAD_GATEWAY)
 
 
 @router.post("/pause", responses=build_responses(include=_CODES))
@@ -143,9 +143,10 @@ async def _run(op: str, request: Request, response: Response, actor: str):
         logger.error("capacity unreachable op=%s actor=%s cid=%s: %s", op, actor, cid, exc)
         return error_response(
             request=request, response=response,
-            msg=f"{exc} Poll GET /capacity/state — the request may have been accepted.",
+            msg=("Azure is unreachable from the API host. Poll GET /capacity/state — the "
+                 "request may have been accepted."),
             status_code=status.HTTP_504_GATEWAY_TIMEOUT)
     except CapacityError as exc:
         logger.error("capacity ARM error op=%s actor=%s cid=%s: %s", op, actor, cid, exc)
         return error_response(request=request, response=response,
-                              msg=f"Azure ARM error: {exc}", status_code=status.HTTP_502_BAD_GATEWAY)
+                              msg="Azure rejected the request; see the logs for this correlation id", status_code=status.HTTP_502_BAD_GATEWAY)

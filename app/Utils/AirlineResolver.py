@@ -98,6 +98,16 @@ _EXACT_SQL = text("""
     LIMIT 1
 """)
 
+# The same match for MANY names at once. A bulk load's names are overwhelmingly already exact, and
+# asking one at a time made the common case one round trip per carrier; this makes it one for all
+# of them, and only the leftovers go through the fuzzy path.
+_EXACT_MANY_SQL = text("""
+    SELECT DISTINCT ON (lower(btrim(airline))) lower(btrim(airline)) AS key, airline
+    FROM cirium.airlines
+    WHERE lower(btrim(airline)) = ANY(CAST(:keys AS text[]))
+    ORDER BY lower(btrim(airline)), airline
+""")
+
 # Candidates by trigram OR small edit distance. The trigram half uses the GIN index; the edit-distance
 # half is bounded by length so it cannot turn into a 63k-row levenshtein sweep on every call.
 _FUZZY_SQL = text("""
@@ -165,10 +175,32 @@ async def resolve_airlines(session, typed_names: Sequence[str]) -> dict:
     per cover section), so resolving per distinct spelling instead of per row turns hundreds of
     lookups into a few. Returns {typed: AirlineMatch}, keyed by the string as it was passed in."""
     out: dict = {}
+    distinct = []
     for name in typed_names:
-        if name in out:
-            continue
-        out[name] = await resolve_airline(session, name)
+        if name not in out:
+            out[name] = None
+            distinct.append(name)
+
+    # One query settles every name that is already spelled exactly right, which is nearly all of
+    # them. Before this, each name cost its own round trip even when it matched on the first try.
+    wanted = {name: " ".join((name or "").split()) for name in distinct}
+    keys = sorted({q.strip().lower() for q in wanted.values()
+                   if len(q) >= _MIN_QUERY_LENGTH})
+    exact: dict = {}
+    if keys:
+        exact = {r.key: r.airline
+                 for r in (await session.execute(_EXACT_MANY_SQL, {"keys": keys})).all()}
+
+    for name in distinct:
+        q = wanted[name]
+        hit = exact.get(q.strip().lower()) if len(q) >= _MIN_QUERY_LENGTH else None
+        if hit is not None:
+            out[name] = AirlineMatch(typed=name, resolved=hit, exact=True, similarity=1.0,
+                                     candidates=[hit])
+        else:
+            # Only what the exact pass could not settle: the fuzzy path is a trigram scan and is
+            # worth one round trip per unsettled spelling, not per row.
+            out[name] = await resolve_airline(session, name)
     return out
 
 

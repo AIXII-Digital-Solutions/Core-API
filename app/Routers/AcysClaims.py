@@ -316,23 +316,26 @@ async def get_claim(
 )
 async def create_claim(request: Request, response: Response, body: ClaimRow):
     try:
-        async with request.app.state.db_client.session(_DB) as session:
+        # Same shape as the bulk path, same reason: the FX call is an outbound HTTPS request at an
+        # 8-second timeout and must not be made while holding a write transaction open.
+        async with request.app.state.db_client.read_session(_DB) as session:
             # An unresolved name is stored as sent (match.stored), never refused: see
             # Utils/AirlineResolver.AirlineMatch.stored. It comes back flagged in the response.
             match = await resolve_airline(session, body.airline)
 
-            try:
-                rate = await get_usd_rate(getattr(request.state, "redis", None),
-                                          body.currency.value, body.calendar_year)
-            except RateUnavailable as ex:
-                logger.error(f"create_claim: FX unavailable: {ex}")
-                return warning_response(
-                    request=request, response=response,
-                    msg=f"Could not obtain a {body.currency.value}->USD rate for "
-                        f"{body.calendar_year}, so the row was not written: {ex}",
-                    status_code=status.HTTP_502_BAD_GATEWAY,
-                )
+        try:
+            rate = await get_usd_rate(getattr(request.state, "redis", None),
+                                      body.currency.value, body.calendar_year)
+        except RateUnavailable as ex:
+            logger.error(f"create_claim: FX unavailable: {ex}")
+            return warning_response(
+                request=request, response=response,
+                msg=f"Could not obtain a {body.currency.value}->USD rate for "
+                    f"{body.calendar_year}, so the row was not written: {ex}",
+                status_code=status.HTTP_502_BAD_GATEWAY,
+            )
 
+        async with request.app.state.db_client.session(_DB) as session:
             row = AcysClaims(
                 airline=match.stored,
                 calendar_year=body.calendar_year,
@@ -392,24 +395,36 @@ async def create_claim(request: Request, response: Response, body: ClaimRow):
 )
 async def bulk_load_claims(request: Request, response: Response, body: ClaimBulk):
     try:
-        async with request.app.state.db_client.session(_DB) as session:
-            # One lookup per DISTINCT spelling and per DISTINCT currency, not per row: a sheet is
-            # hundreds of rows over a handful of carriers and two or three currencies.
+        # EVERYTHING SLOW HAPPENS BEFORE THE WRITE SESSION IS OPENED.
+        #
+        # Resolving the names and fetching the rates used to run INSIDE the write transaction. The
+        # rates come from an external HTTPS endpoint at an 8-second timeout, one call per
+        # (currency, year) the sheet mentions — a batch spanning twenty years in three currencies
+        # is minutes of network wait, and all of it held one of only DB_POOL_SIZE connections and
+        # an idle-in-transaction backend on the other end. Two slow sheets could stall every other
+        # request on the worker.
+        #
+        # A read-only session for the lookups, no session at all for the HTTP, and the write
+        # transaction opened last and held only for the insert.
+        async with request.app.state.db_client.read_session(_DB) as session:
+            # One lookup per DISTINCT spelling, not per row: a sheet is hundreds of rows over a
+            # handful of carriers.
             matches = await resolve_airlines(session, [r.airline for r in body.rows])
 
-            try:
-                # one lookup per (currency, year) the batch actually contains
-                rates = await get_usd_rates(
-                    getattr(request.state, "redis", None),
-                    {(r.currency.value, r.calendar_year) for r in body.rows})
-            except RateUnavailable as ex:
-                logger.error(f"bulk_load_claims: FX unavailable: {ex}")
-                return warning_response(
-                    request=request, response=response,
-                    msg=f"Could not obtain an FX rate, so nothing was written: {ex}",
-                    status_code=status.HTTP_502_BAD_GATEWAY,
-                )
+        try:
+            # one lookup per (currency, year) the batch actually contains
+            rates = await get_usd_rates(
+                getattr(request.state, "redis", None),
+                {(r.currency.value, r.calendar_year) for r in body.rows})
+        except RateUnavailable as ex:
+            logger.error(f"bulk_load_claims: FX unavailable: {ex}")
+            return warning_response(
+                request=request, response=response,
+                msg=f"Could not obtain an FX rate, so nothing was written: {ex}",
+                status_code=status.HTTP_502_BAD_GATEWAY,
+            )
 
+        async with request.app.state.db_client.session(_DB) as session:
             # Every row is inserted, in the order it was sent. Rows repeating a grain — already in
             # the table, or twice within this batch — are NOT merged or rejected: duplicates are
             # kept, so the stored set is exactly what was sent.
