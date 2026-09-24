@@ -26,8 +26,11 @@ Lease and Lease Type are carried into the per-flight dataset the report is built
 lays them over the model's rows; an INC edit rescales the year's monthly values, so AVE / AW AVE / EXP
 follow (they are derived, not editable), and an edit from the last actual year on carries into the
 projected years after it. A save changes the sheet at once, the REPORT once it is recalculated:
-`POST /apply` (or `POST /forecast/` with the snapshot id) refreshes it — no fetch, no model, and the
-same snapshot, never a new one. A full forecast run picks every edit up by itself.
+external-worker does that BY ITSELF, in batches: every 15 s it looks for edits the report has not
+taken in and applies them once the editing has been quiet for 10 s, or once the oldest has waited 60 s
+(cron `cron_apply_fleet_edits`; FLEET_EDITS_* in its settings). So the portal just saves every cell
+as it changes. `POST /apply` (or `POST /forecast/` with the snapshot id) is the "right now" button —
+no fetch, no model, the same snapshot, never a new one. A full forecast run picks every edit up too.
 
 The row id is derived from (Airline, Registration, Contract Year) — stable across panel refreshes
 — so an unedited row is patchable too. Every save and revert lands in `audit.change_log`
@@ -376,12 +379,18 @@ async def reset_airline_edits(
 _STATUS_SQL = """
 SELECT ls.snapshot_id, ls.refreshed_at, s.as_of, s.created_at AS snapshot_created_at,
        s.covered_operators, s.edits_applied_at,
-       coalesce((SELECT array_agg(mk.airline ORDER BY mk.airline) FROM forecast.aircraft_info_edit_marks mk
-                 WHERE (ls.refreshed_at IS NULL OR mk.changed_at > ls.refreshed_at)
-                   AND (s.id IS NULL OR mk.airline = ANY(s.covered_operators))),
-                CAST('{}' AS text[])) AS pending_airlines
+       coalesce(p.airlines, CAST('{}' AS text[])) AS pending_airlines,
+       p.pending_since, p.last_change_at
 FROM forecast.acys_live_state ls
 LEFT JOIN forecast.acys_snapshots s ON s.id = ls.snapshot_id
+LEFT JOIN LATERAL (
+    SELECT array_agg(mk.airline ORDER BY mk.airline) AS airlines,
+           min(coalesce(mk.pending_since, mk.changed_at)) AS pending_since,
+           max(mk.changed_at) AS last_change_at
+    FROM forecast.aircraft_info_edit_marks mk
+    WHERE (ls.refreshed_at IS NULL OR mk.changed_at > ls.refreshed_at)
+      AND (s.id IS NULL OR mk.airline = ANY(s.covered_operators))
+) p ON true
 WHERE ls.id = 1
 """
 
@@ -396,8 +405,10 @@ def _iso(value) -> Optional[str]:
         "Is the forecast report behind the fleet-sheet edits? `snapshot_id` is the saved run the "
         "report shows now (null while a run or restore is rewriting it, or if the last one did not "
         "finish), `refreshed_at` when the report last took the edits in, and `pending_airlines` the "
-        "airlines of that run edited since — `pending` is true when there are any. Recalculate with "
-        "POST /apply."
+        "airlines of that run edited since — `pending` is true when there are any. "
+        "`last_change_at` is the latest of those edits and `pending_since` the oldest one the report "
+        "has not taken in: the worker applies them by itself once `last_change_at` is 10 s old or "
+        "`pending_since` 60 s old (checked every 15 s). POST /apply does it at once."
     ),
     responses=build_responses(include=_OK),
     dependencies=[Depends(authorize(SCOPE_PREDICTIVE_READ))],
@@ -416,6 +427,8 @@ async def edits_status(request: Request, response: Response):
             "edits_applied_at": _iso(row.get("edits_applied_at")),
             "pending": bool(pending),
             "pending_airlines": pending,
+            "pending_since": _iso(row.get("pending_since")),
+            "last_change_at": _iso(row.get("last_change_at")),
         })
     except Exception as ex:
         logger.error(f"edits_status failed: {ex}")
@@ -425,7 +438,9 @@ async def edits_status(request: Request, response: Response):
 @router.post(
     "/apply",
     description=(
-        "Bring the forecast report up to date with the fleet-sheet edits: re-renders the saved run "
+        "Bring the forecast report up to date with the fleet-sheet edits NOW — the worker also does "
+        "it by itself within about a minute of the last save, so this is only for 'I want it this "
+        "second'. Re-renders the saved run "
         "the report shows now (GET /status), with every current edit laid over it. Nothing is "
         "fetched and nothing is forecast — the run is already loaded, so only the report is "
         "refreshed — and the SAME snapshot is updated, no new one is made. Same job and status "
