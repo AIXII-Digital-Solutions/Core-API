@@ -10,6 +10,7 @@ from .QueueAdmin import router as queues
 from .Tokens import router as tokens
 from .Airlines import router as airlines
 from .AcysClaims import router as acys_claims   # before .Forecast: literal /forecast/claims wins
+from .AircraftDetails import router as aircraft_details   # likewise /forecast/aircraft-details
 from .Forecast import router as forecast
 from .Registrations import router as registrations
 from .Capacity import router as capacity
