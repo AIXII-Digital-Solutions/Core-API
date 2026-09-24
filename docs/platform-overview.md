@@ -145,6 +145,14 @@ The **ACYS forecast** projects operator fleet utilisation. This is the most cros
   and the sheet view lays them on top with "Edited" / "Edited Fields" / "Original Values" columns. The row
   `id` is derived from (Airline, Registration, Contract Year). API: `/forecast/aircraft-details`
   (`Routers/AircraftDetails.py`: list, PATCH merge, per-row and per-airline revert).
+  Edits of Seats / Agreed Value INC / Lease / Lease Type also reach the REPORT: the chain
+  (`acys_summary_grouped` and everything above it) reads `forecast.acys_summary_by_day_effective`, a view
+  that lays those edits over the model's rows (INC rescales the year's monthly values, so AVE / AW AVE /
+  EXP follow; an edit from the last actual year on carries into the projected years). The table and the
+  snapshots stay the model's own output. Applying edits = refreshing the report: a full run does it, and
+  `POST /forecast/aircraft-details/apply` (or `POST /forecast/` with the snapshot id) re-renders the run
+  in `forecast.acys_live_state` without re-pouring it, re-stamping that snapshot's `edits_applied_at`.
+  PowerBI tables that read `acys_summary_by_day` directly must read the `_effective` view instead.
 
 ## 7. The Cirium pipeline (ingest → collapse → matviews → forecast)
 

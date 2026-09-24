@@ -9,6 +9,8 @@ JSONB object keyed by the view's own column names — and the view lays it over 
 
     GET    /forecast/aircraft-details                 the sheet (filters: airline, registration, edited)
     GET    /forecast/aircraft-details/fields          what may be edited, and as what type
+    GET    /forecast/aircraft-details/status          is the report behind the edits, and which run it shows
+    POST   /forecast/aircraft-details/apply           bring the report up to date with the edits
     GET    /forecast/aircraft-details/{id}            one row, with its ETag
     PATCH  /forecast/aircraft-details/{id}            merge overrides into the row
     DELETE /forecast/aircraft-details/{id}/edits      revert the row (or `?field=` just some fields)
@@ -18,6 +20,14 @@ A PATCH body is `{"<view column>": value}` and MERGES: fields not sent keep thei
 their source value). `null` means "unknown" and overrides the source with an empty cell. A value
 equal to the source value REMOVES that field's override instead of storing a copy, so "Edited" only
 ever flags cells that really differ, and typing the original value back is itself a revert.
+
+EDITS REACH THE REPORT, NOT ONLY THE SHEET (revision `acys_edits_overlay`). Seats, Agreed Value / INC,
+Lease and Lease Type are carried into the per-flight dataset the report is built from, by a view that
+lays them over the model's rows; an INC edit rescales the year's monthly values, so AVE / AW AVE / EXP
+follow (they are derived, not editable), and an edit from the last actual year on carries into the
+projected years after it. A save changes the sheet at once, the REPORT once it is recalculated:
+`POST /apply` (or `POST /forecast/` with the snapshot id) refreshes it — no fetch, no model, and the
+same snapshot, never a new one. A full forecast run picks every edit up by itself.
 
 The row id is derived from (Airline, Registration, Contract Year) — stable across panel refreshes
 — so an unedited row is patchable too. Every save and revert lands in `audit.change_log`
@@ -57,7 +67,9 @@ _OK = {status.HTTP_200_OK, status.HTTP_400_BAD_REQUEST, status.HTTP_404_NOT_FOUN
 # The editable columns and the type the view casts an override back to. KEEP IN STEP WITH
 # migration/versionsAixii/aircraft_info_edits.py (_COLUMNS): a key the view does not know is
 # stored but never shown. Airline / Registration / Contract Year / Data Type are the row's identity.
-_TEXT, _YEAR, _INT, _MUSD = "text", "year", "integer", "musd"
+_TEXT, _YEAR, _INT, _MUSD, _CHOICE = "text", "year", "integer", "musd", "choice"
+_INC = "Agreed Value / INC / mUSD"
+_LEASE_TYPE = "Lease Type"
 _FIELDS = {
     "Aircraft Type": _TEXT,
     "Manufacturer": _TEXT,
@@ -66,16 +78,25 @@ _FIELDS = {
     "MSN": _TEXT,
     "YOM": _YEAR,
     "Seats": _INT,
-    "Agreed Value / INC / mUSD": _MUSD,
-    "Agreed Value / AVE / mUSD": _MUSD,
-    "Agreed Value / AW AVE / mUSD": _MUSD,
-    "Agreed Value / EXP / mUSD": _MUSD,
+    _INC: _MUSD,
     "CSL / mUSD": _INT,
     "Lessor": _TEXT,
     "Manager": _TEXT,
     "Owner": _TEXT,
-    "Lease": _TEXT,
-    "Lease Type": _TEXT,
+    "Lease": _CHOICE,
+    _LEASE_TYPE: _CHOICE,
+}
+# Consequences of INC, not inputs: the report derives all three from the year's monthly values, which an
+# INC edit rescales. Refused on PATCH with a message that says so.
+_DERIVED = ("Agreed Value / AVE / mUSD", "Agreed Value / AW AVE / mUSD", "Agreed Value / EXP / mUSD")
+# The fields the report dataset carries per flight — compared against the MODEL's value (the rollup
+# already holds the edit once recalculated), and the ones that make a save leave the report behind.
+_CARRIED = ("Seats", _INC, "Lease", _LEASE_TYPE)
+# Cirium's own vocabulary for the two lease columns; matched case-insensitively, stored as written here.
+# "Not Leased" is what the sheet shows for an empty value.
+_CHOICES = {
+    "Lease": ("Lease", "Sub Lease", "Not Leased"),
+    _LEASE_TYPE: ("Dry", "Wet", "Not Leased"),
 }
 _TEXT_MAX = 200
 _INT_MAX = {"Seats": 1500, "CSL / mUSD": 100_000}
@@ -91,12 +112,12 @@ def _clean(field: str, value: Any) -> Any:
     """Validate one value and return it in the form it is stored (and compared) in. Raises _Invalid
     with a message written for the person who typed the value."""
     kind = _FIELDS[field]
-    if value is None:
-        return None
     if isinstance(value, str):
         value = value.strip()
-        if value == "":
-            return None                     # an emptied cell is "unknown", never an empty string
+    if value is None or value == "":
+        # an emptied cell is "unknown", never an empty string — except for the two lease columns,
+        # where empty is exactly what the sheet shows as "Not Leased"
+        return "Not Leased" if kind == _CHOICE else None
     if isinstance(value, bool):
         raise _Invalid(f"{field} cannot be true/false")
 
@@ -107,6 +128,13 @@ def _clean(field: str, value: Any) -> Any:
         if len(value) > _TEXT_MAX:
             raise _Invalid(f"{field} is longer than {_TEXT_MAX} characters")
         return value
+
+    if kind == _CHOICE:
+        options = _CHOICES[field]
+        match = next((o for o in options if isinstance(value, str) and o.lower() == value.lower()), None)
+        if match is None:
+            raise _Invalid(f"{field} must be one of: {', '.join(options)}")
+        return match
 
     if kind == _YEAR:
         if not (isinstance(value, int) or (isinstance(value, str) and value.isdigit())):
@@ -145,6 +173,41 @@ def _same(field: str, new: Any, original: Any) -> bool:
     if _FIELDS[field] in (_INT, _MUSD):
         return Decimal(str(new)) == Decimal(str(original))
     return str(new) == str(original)
+
+
+def _lease_rules(cleaned: dict, existing: dict, model: dict) -> List[tuple]:
+    """The two rules that tie Agreed Value to the lease, checked on the row as it will read after the
+    save. A wet lease carries no agreed value (the report pins it at a sentinel), so an INC on one
+    would be stored and never used; and a wet lease turned dry has no model value to fall back on, so
+    it needs an INC — in this save or one already stored."""
+    if _INC not in cleaned and _LEASE_TYPE not in cleaned:
+        return []
+
+    def after(field):
+        return cleaned[field] if field in cleaned else existing.get(field, model.get(field))
+
+    lease_type, inc = after(_LEASE_TYPE), after(_INC)
+    errors = []
+    if _INC in cleaned and cleaned[_INC] is not None and lease_type == "Wet":
+        errors.append((_INC, "Agreed value is not used for a wet lease — change Lease Type first"))
+    if model.get(_LEASE_TYPE) == "Wet" and lease_type != "Wet" and inc is None:
+        errors.append((_LEASE_TYPE, "This aircraft was wet-leased, so the forecast has no agreed value "
+                                    f"for it — set {_INC} in the same save"))
+    return errors
+
+
+# The sheet's source row as JSON, the model's values of the carried fields for it, and its overrides.
+_BASE_SQL = f"""
+SELECT CAST(to_jsonb(src) AS text) AS src,
+       CAST(forecast.aircraft_info_raw(src."Airline", src."Registration", src."Contract Year",
+                                       src."Data Type") AS text) AS raw,
+       CAST(e.edits AS text) AS edits
+FROM {_SOURCE} src
+LEFT JOIN forecast.aircraft_info_edits e
+       ON e.airline = src."Airline" AND e.registration = src."Registration"
+      AND e.contract_year = src."Contract Year"
+WHERE src.id = :id
+"""
 
 
 def _validation_error(errors: List[tuple]) -> RequestValidationError:
@@ -251,26 +314,34 @@ async def list_aircraft_details(
     "/fields",
     description=(
         "The editable columns: `field` is the exact key a PATCH body uses (the view's column "
-        "name), `type` is text | year | integer | musd (millions of USD, two decimals), and every "
-        "field accepts null (an empty cell = unknown)."
+        "name), `type` is text | year | integer | musd (millions of USD, two decimals) | choice "
+        "(one of `options`), and every field accepts null (an empty cell = unknown; for a choice, "
+        "\"Not Leased\"). `affects_report` marks the fields the forecast report carries: a save of "
+        "one leaves the report behind until it is recalculated (POST /apply). `derived` lists the "
+        "columns computed from Agreed Value / INC, which cannot be edited themselves."
     ),
     responses=build_responses(include={status.HTTP_200_OK}),
     dependencies=[Depends(authorize(SCOPE_PREDICTIVE_READ))],
 )
 async def list_editable_fields(request: Request, response: Response):
-    data = []
+    fields = []
     for field, kind in _FIELDS.items():
-        spec = {"field": field, "type": kind, "nullable": True}
+        spec = {"field": field, "type": kind, "nullable": True, "affects_report": field in _CARRIED}
         if kind == _TEXT:
             spec["max_length"] = _TEXT_MAX
         elif kind == _YEAR:
             spec.update(min=_YEAR_MIN, max=_YEAR_MAX)
         elif kind == _INT:
             spec.update(min=0, max=_INT_MAX[field])
+        elif kind == _CHOICE:
+            spec["options"] = list(_CHOICES[field])
         else:
             spec.update(min=0, max=str(_MUSD_MAX), decimals=2)
-        data.append(spec)
-    return success_response(request=request, response=response, data=data)
+        fields.append(spec)
+    return success_response(request=request, response=response, data={
+        "fields": fields,
+        "derived": [{"field": f, "from": _INC} for f in _DERIVED],
+    })
 
 
 @router.delete(
@@ -302,6 +373,89 @@ async def reset_airline_edits(
         return error_response(request=request, response=response, exc=ex)
 
 
+_STATUS_SQL = """
+SELECT ls.snapshot_id, ls.refreshed_at, s.as_of, s.created_at AS snapshot_created_at,
+       s.covered_operators, s.edits_applied_at,
+       coalesce((SELECT array_agg(mk.airline ORDER BY mk.airline) FROM forecast.aircraft_info_edit_marks mk
+                 WHERE (ls.refreshed_at IS NULL OR mk.changed_at > ls.refreshed_at)
+                   AND (s.id IS NULL OR mk.airline = ANY(s.covered_operators))),
+                CAST('{}' AS text[])) AS pending_airlines
+FROM forecast.acys_live_state ls
+LEFT JOIN forecast.acys_snapshots s ON s.id = ls.snapshot_id
+WHERE ls.id = 1
+"""
+
+
+def _iso(value) -> Optional[str]:
+    return value.isoformat() if value else None
+
+
+@router.get(
+    "/status",
+    description=(
+        "Is the forecast report behind the fleet-sheet edits? `snapshot_id` is the saved run the "
+        "report shows now (null while a run or restore is rewriting it, or if the last one did not "
+        "finish), `refreshed_at` when the report last took the edits in, and `pending_airlines` the "
+        "airlines of that run edited since — `pending` is true when there are any. Recalculate with "
+        "POST /apply."
+    ),
+    responses=build_responses(include=_OK),
+    dependencies=[Depends(authorize(SCOPE_PREDICTIVE_READ))],
+)
+async def edits_status(request: Request, response: Response):
+    try:
+        async with request.app.state.db_client.read_session(_DB) as session:
+            row = (await session.execute(text(_STATUS_SQL))).mappings().first() or {}
+        pending = list(row.get("pending_airlines") or [])
+        return success_response(request=request, response=response, data={
+            "snapshot_id": row.get("snapshot_id"),
+            "snapshot_created_at": _iso(row.get("snapshot_created_at")),
+            "as_of": _iso(row.get("as_of")),
+            "covered_operators": list(row.get("covered_operators") or []),
+            "refreshed_at": _iso(row.get("refreshed_at")),
+            "edits_applied_at": _iso(row.get("edits_applied_at")),
+            "pending": bool(pending),
+            "pending_airlines": pending,
+        })
+    except Exception as ex:
+        logger.error(f"edits_status failed: {ex}")
+        return error_response(request=request, response=response, exc=ex)
+
+
+@router.post(
+    "/apply",
+    description=(
+        "Bring the forecast report up to date with the fleet-sheet edits: re-renders the saved run "
+        "the report shows now (GET /status), with every current edit laid over it. Nothing is "
+        "fetched and nothing is forecast — the run is already loaded, so only the report is "
+        "refreshed — and the SAME snapshot is updated, no new one is made. Same job and status "
+        "contract as POST /forecast/ with a snapshot_id (which does the same for any saved run). "
+        "409 when a forecast is already in progress, or when the report does not show a saved run."
+    ),
+    status_code=status.HTTP_202_ACCEPTED,
+    responses=build_responses(include={status.HTTP_202_ACCEPTED, status.HTTP_404_NOT_FOUND,
+                                       status.HTTP_409_CONFLICT, status.HTTP_500_INTERNAL_SERVER_ERROR}),
+    dependencies=[Depends(authorize(SCOPE_PREDICTIVE_WRITE))],
+)
+async def apply_edits(request: Request, response: Response):
+    from .Forecast import _start_restore   # lazy: one enqueue path for both entry points
+    try:
+        async with request.app.state.db_client.read_session(_DB) as session:
+            snapshot_id = (await session.execute(text(
+                "SELECT snapshot_id FROM forecast.acys_live_state WHERE id = 1"))).scalar()
+        if snapshot_id is None:
+            return warning_response(
+                request=request, response=response,
+                msg="The report does not show a saved forecast run right now (one is being built, "
+                    "or the last one did not finish). Start a forecast run instead — it picks up "
+                    "every edit by itself.",
+                status_code=status.HTTP_409_CONFLICT)
+        return await _start_restore(int(snapshot_id), request, response)
+    except Exception as ex:
+        logger.error(f"apply_edits failed: {ex}")
+        return error_response(request=request, response=response, exc=ex)
+
+
 @router.get(
     "/{row_id}",
     description="One row of the sheet. The `ETag` header can be sent back as `If-Match` on a PATCH.",
@@ -330,10 +484,14 @@ async def get_aircraft_details(request: Request, response: Response,
     description=(
         "Override fields of one row. The body is `{\"<column>\": value}` using the exact column "
         "names of the sheet (see `/fields`) and MERGES — fields not sent are untouched. `null` or "
-        "an empty string sets the cell to unknown. Sending the source value removes that field's "
+        "an empty string sets the cell to unknown. Sending the model's value removes that field's "
         "override. The source data is never changed. Returns the updated row (Decimal as a "
         "string) and its new `ETag`; an optional `If-Match` refuses the write with 412 when the row "
-        "changed since it was read. Invalid values are a 422 with `data: [{field, msg}]`."
+        "changed since it was read. Invalid values are a 422 with `data: [{field, msg}]`. "
+        "Seats / Agreed Value INC / Lease / Lease Type also change the forecast REPORT once it is "
+        "recalculated (the row then reads `Recalculation Pending`; POST /apply); AVE / AW AVE / EXP "
+        "follow INC and are not editable. Agreed value is not used for a wet lease, so INC is "
+        "refused on one, and turning a wet lease dry needs an INC in the same or an earlier save."
     ),
     responses=build_responses(include=_OK),
 )
@@ -352,6 +510,9 @@ async def update_aircraft_details(
                                 msg="Empty body: nothing to update")
     errors, cleaned = [], {}
     for field, value in body.items():
+        if field in _DERIVED:
+            errors.append((field, f"{field} is calculated from {_INC} — edit that instead"))
+            continue
         if field not in _FIELDS:
             errors.append((field, f"{field} cannot be edited"))
             continue
@@ -378,9 +539,18 @@ async def update_aircraft_details(
                     status_code=status.HTTP_412_PRECONDITION_FAILED)
 
             m = current._mapping
-            source = (await session.execute(
-                text(f"SELECT * FROM {_SOURCE} WHERE id = :id"), {"id": row_id})).first()._mapping
-            put = {f: v for f, v in cleaned.items() if not _same(f, v, source[f])}
+            # What an edit is compared against: the sheet's source, with the fields the report carries
+            # taken from the MODEL (once recalculated, the source already holds the edit itself), plus
+            # the overrides this row already has.
+            base = (await session.execute(text(_BASE_SQL), {"id": row_id})).first()
+            model = {**json.loads(base.src), **json.loads(base.raw or "{}")}
+            existing = json.loads(base.edits) if base.edits else {}
+
+            rule_errors = _lease_rules(cleaned, existing, model)
+            if rule_errors:
+                raise _validation_error(rule_errors)
+
+            put = {f: v for f, v in cleaned.items() if not _same(f, v, model.get(f))}
             drop = [f for f in cleaned if f not in put]
             put_json = json.dumps({f: (float(v) if isinstance(v, Decimal) else v)
                                    for f, v in put.items()})
@@ -415,6 +585,8 @@ async def update_aircraft_details(
         resp = success_response(request=request, response=response, data=data,
                                 msg=("Saved" if put else "Override removed: value equals the source"))
         return _with_etag(resp, response, _etag(data))
+    except RequestValidationError:
+        raise   # nothing was written; the app's handler renders the 422
     except Exception as ex:
         logger.error(f"update_aircraft_details failed: {ex}")
         return error_response(request=request, response=response, exc=ex)
