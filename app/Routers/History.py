@@ -51,6 +51,8 @@ _TABLES = {
     "fleet": {"aircraft_type", "engine_type", "aircraft", "aircraft_engine", "service_info"},
     "leasing": {"agreement", "aircraft_lease"},
     "policy": {"policy", "coverage"},
+    # the manual overrides of the forecast fleet sheet (Routers/AircraftDetails.py)
+    "forecast": {"aircraft_info_edits"},
 }
 _OPERATIONS = {"INSERT", "UPDATE", "DELETE"}
 
@@ -74,7 +76,7 @@ async def _render(session, rows) -> list[dict]:
 )
 async def list_history(
     request: Request, response: Response,
-    schema: Optional[str] = Query(None, description="ref | fleet | leasing | policy"),
+    schema: Optional[str] = Query(None, description="ref | fleet | leasing | policy | forecast"),
     table: Optional[str] = Query(None, description="e.g. aircraft, aircraft_lease, policy"),
     row_id: Optional[int] = Query(None, description="The id of the row within that table."),
     changed_by: Optional[str] = Query(None, description="Actor, as the API recorded it."),

@@ -139,6 +139,12 @@ The **ACYS forecast** projects operator fleet utilisation. This is the most cros
   the panel job by dependency order. On top of them sits the plain view
   `forecast.detailed_aircraft_information` — the per-tail fleet sheet (identity + lease + that year's four
   Agreed-Value columns + a CSL from the static `powerbi.body_type_mapping`); being a view it needs no refresh.
+  It is EDITABLE from the portal without touching the source: `detailed_aircraft_information_source` is
+  the untouched sheet (+ `id`, "Airline"), manual overrides live in `forecast.aircraft_info_edits` (one
+  row per edited sheet row, JSONB keyed by the view's column names, audited into `audit.change_log`),
+  and the sheet view lays them on top with "Edited" / "Edited Fields" / "Original Values" columns. The row
+  `id` is derived from (Airline, Registration, Contract Year). API: `/forecast/aircraft-details`
+  (`Routers/AircraftDetails.py`: list, PATCH merge, per-row and per-airline revert).
 
 ## 7. The Cirium pipeline (ingest → collapse → matviews → forecast)
 
