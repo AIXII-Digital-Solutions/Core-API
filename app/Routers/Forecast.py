@@ -160,7 +160,9 @@ async def _mark_queued(request: Request, job_id: str, label: str, *, ref: str = 
 _SNAPSHOT_COLS = """
     s.id, s.created_at, s.job_id, s.request_type, s.operators, s.registrations,
     s.covered_operators, cardinality(s.covered_registrations) AS covered_registration_count,
-    s.as_of, s.profile, s.row_count, s.restored_at, s.restore_count
+    s.as_of, s.profile, s.row_count, s.restored_at, s.restore_count, s.edits_applied_at,
+    s.id IS NOT DISTINCT FROM (SELECT ls.snapshot_id FROM forecast.acys_live_state ls WHERE ls.id = 1)
+        AS is_live
 """
 
 _SNAPSHOT_ONE_SQL = f"SELECT {_SNAPSHOT_COLS} FROM forecast.acys_snapshots s WHERE s.id = :sid"
@@ -212,6 +214,11 @@ def _snapshot_out(row) -> dict:
         "row_count": int(row["row_count"] or 0),
         "restored_at": row["restored_at"].isoformat() if row["restored_at"] else None,
         "restore_count": int(row["restore_count"] or 0),
+        # when the fleet-sheet edits were last laid over this run (by the run itself, a restore, or
+        # POST /forecast/aircraft-details/apply) — the snapshot is re-stamped, never copied
+        "edits_applied_at": row["edits_applied_at"].isoformat() if row["edits_applied_at"] else None,
+        # the run the report shows right now: POST /forecast/ with this id only refreshes the report
+        "is_live": bool(row["is_live"]),
     }
 
 
