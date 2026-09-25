@@ -5,6 +5,7 @@ import Routers
 from settings import API_TITLE, API_DESCRIPTION, API_VERSION, API_SWAGGER_URL, API_REDOC_URL, API_ROOT_URL, \
     CORS_ORIGINS, CORS_CREDENTIALS, CORS_METHODS, CORS_HEADERS, API_OPENAPI_VERSION
 from middlewares import register_middlewares, lifespan
+from Utils.OpenAPIDocs import install as install_openapi_docs
 
 app = FastAPI(
     title=API_TITLE,
@@ -31,3 +32,7 @@ app.add_middleware(
 for obj in vars(Routers).values():
     if isinstance(obj, APIRouter):
         app.include_router(obj)
+
+# The generated document describes the envelope, the real 422 / 401 / 403 shapes and real examples
+# instead of FastAPI's guesses — see Utils/OpenAPIDocs.
+install_openapi_docs(app)
