@@ -3,7 +3,7 @@ import sys
 from typing import TypeVar, Generic
 
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from uuid import UUID
 
 
@@ -23,7 +23,8 @@ class DefaultResponse(BaseModel, Generic[T]):
 class ErrorResponse(BaseModel):
     status_code: int
     details: DetailField
-    data: list[None] = [None]
+    # always empty: warning_/error_response send `data: []`
+    data: list = Field(default_factory=list)
 
 
 class ErrorValidObject(DetailField):
