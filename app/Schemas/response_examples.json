@@ -1,0 +1,1403 @@
+{
+ "AgreementOut": {
+  "id": 31,
+  "name": "MLA 1",
+  "start_date": "2020-01-01",
+  "lessor": {
+   "id": 3,
+   "name": "Lessor Co",
+   "details": null
+  },
+  "alternative_contract_party": null,
+  "other_contracts": null
+ },
+ "AgreementWithLeases": {
+  "id": 31,
+  "name": "MLA 1",
+  "start_date": "2020-01-01",
+  "lessor": {
+   "id": 3,
+   "name": "Lessor Co",
+   "details": null
+  },
+  "alternative_contract_party": null,
+  "other_contracts": null,
+  "aircraft": [
+   {
+    "id": 41,
+    "aircraft": {
+     "id": 13,
+     "registration": "YL-ABC",
+     "msn": "1234",
+     "aircraft_type": {
+      "id": 9,
+      "manufacturer": "Airbus",
+      "master_series": "A320",
+      "category": "passenger",
+      "label": "Airbus A320 Passenger",
+      "template_url": {
+       "airborne": "https://x/a.svg",
+       "on_the_ground": null
+      }
+     },
+     "airline": {
+      "id": 13,
+      "airline_name": "Air Test",
+      "icao": "ATS",
+      "iata": "AT",
+      "is_asg": true,
+      "logo_url": null
+     },
+     "service": {
+      "id": 11,
+      "agreed_value_fixed": false,
+      "source": "cirium",
+      "status": "insured",
+      "usage_status": "Active",
+      "lease_currency": "USD",
+      "policy_currency": "USD",
+      "recorded": true
+     }
+    },
+    "aircraft_id": 13,
+    "agreement": {
+     "id": 31,
+     "name": "MLA 1",
+     "start_date": "2020-01-01",
+     "lessor": {
+      "id": 3,
+      "name": "Lessor Co",
+      "details": null
+     },
+     "alternative_contract_party": null,
+     "other_contracts": null
+    },
+    "effective_date": "2024-01-01",
+    "agreed_value_preliminary": 40000000.0,
+    "agreed_value_final": null,
+    "agreed_value_calculated": 39960010.0,
+    "agreed_value_as_of": "2026-09-25",
+    "depreciation_ratio": 0.05,
+    "depreciation_start_date": "2024-01-01",
+    "combined_single_limit": 750000000.0,
+    "hull_spares_war_excess_liability": null,
+    "hull_deductible_buy_down": null,
+    "currency": "USD",
+    "created_at": "2026-09-25T10:00:00+00:00",
+    "updated_at": "2026-09-25T10:00:00+00:00"
+   }
+  ]
+ },
+ "AircraftCard": {
+  "id": 13,
+  "registration": "YL-ABC",
+  "msn": "1234",
+  "aircraft_type": {
+   "id": 9,
+   "manufacturer": "Airbus",
+   "master_series": "A320",
+   "category": "passenger",
+   "label": "Airbus A320 Passenger",
+   "template_url": {
+    "airborne": "https://x/a.svg",
+    "on_the_ground": null
+   }
+  },
+  "airline": {
+   "id": 13,
+   "airline_name": "Air Test",
+   "icao": "ATS",
+   "iata": "AT",
+   "is_asg": true,
+   "logo_url": null
+  },
+  "service": {
+   "id": 11,
+   "agreed_value_fixed": false,
+   "source": "cirium",
+   "status": "insured",
+   "usage_status": "Active",
+   "lease_currency": "USD",
+   "policy_currency": "USD",
+   "recorded": true
+  },
+  "engines": [
+   {
+    "id": 21,
+    "position": 1,
+    "engine_type": {
+     "id": 7,
+     "manufacturer": "CFM",
+     "master_series": "CFM56-5"
+    },
+    "msn": "ENG1",
+    "installed_on": "2020-01-01",
+    "details": null,
+    "fitted": true
+   }
+  ],
+  "as_of": "2026-09-25",
+  "lease": {
+   "id": 41,
+   "aircraft": null,
+   "aircraft_id": 13,
+   "agreement": {
+    "id": 31,
+    "name": "MLA 1",
+    "start_date": "2020-01-01",
+    "lessor": {
+     "id": 3,
+     "name": "Lessor Co",
+     "details": null
+    },
+    "alternative_contract_party": null,
+    "other_contracts": null
+   },
+   "effective_date": "2024-01-01",
+   "agreed_value_preliminary": 40000000.0,
+   "agreed_value_final": null,
+   "agreed_value_calculated": 39960010.0,
+   "agreed_value_as_of": "2026-09-25",
+   "depreciation_ratio": 0.05,
+   "depreciation_start_date": "2024-01-01",
+   "combined_single_limit": 750000000.0,
+   "hull_spares_war_excess_liability": null,
+   "hull_deductible_buy_down": null,
+   "currency": "USD",
+   "created_at": "2026-09-25T10:00:00+00:00",
+   "updated_at": "2026-09-25T10:00:00+00:00"
+  },
+  "coverage": {
+   "id": 61,
+   "aircraft_id": 13,
+   "aircraft": null,
+   "policy": {
+    "id": 51,
+    "insured": {
+     "id": 4,
+     "name": "Insured Co",
+     "details": "note"
+    },
+    "reinsured": null,
+    "retrocedent": null,
+    "period_from": "2026-01-01",
+    "period_to": null,
+    "period": "2026-01-01..",
+    "hull_all_risks_deductible": 1000000.0,
+    "spares_deductible": null,
+    "hull_deductible_buy_down": null,
+    "hull_deductible_aggregate": null,
+    "combined_single_limit": 750000000.0,
+    "hull_war_overall_limit": null,
+    "hull_spares_limit": null,
+    "hull_spares_war_excess_liability": null,
+    "hull_war_confiscation_limit": null,
+    "hull_war_confiscation_limit_selected_country": null,
+    "selected_country": null,
+    "reinsured_amount": 0.5,
+    "cut_through_clause": "yes",
+    "created_at": "2026-09-25T10:00:00+00:00",
+    "updated_at": "2026-09-25T10:00:00+00:00"
+   },
+   "covered_from": "2026-01-01",
+   "covered_to": null
+  },
+  "lease_history": [
+   {
+    "id": 41,
+    "aircraft": null,
+    "aircraft_id": 13,
+    "agreement": {
+     "id": 31,
+     "name": "MLA 1",
+     "start_date": "2020-01-01",
+     "lessor": {
+      "id": 3,
+      "name": "Lessor Co",
+      "details": null
+     },
+     "alternative_contract_party": null,
+     "other_contracts": null
+    },
+    "effective_date": "2024-01-01",
+    "agreed_value_preliminary": 40000000.0,
+    "agreed_value_final": null,
+    "agreed_value_calculated": 39960010.0,
+    "agreed_value_as_of": "2026-09-25",
+    "depreciation_ratio": 0.05,
+    "depreciation_start_date": "2024-01-01",
+    "combined_single_limit": 750000000.0,
+    "hull_spares_war_excess_liability": null,
+    "hull_deductible_buy_down": null,
+    "currency": "USD",
+    "created_at": "2026-09-25T10:00:00+00:00",
+    "updated_at": "2026-09-25T10:00:00+00:00"
+   }
+  ],
+  "coverage_history": [
+   {
+    "id": 61,
+    "aircraft_id": 13,
+    "aircraft": null,
+    "policy": {
+     "id": 51,
+     "insured": {
+      "id": 4,
+      "name": "Insured Co",
+      "details": "note"
+     },
+     "reinsured": null,
+     "retrocedent": null,
+     "period_from": "2026-01-01",
+     "period_to": null,
+     "period": "2026-01-01..",
+     "hull_all_risks_deductible": 1000000.0,
+     "spares_deductible": null,
+     "hull_deductible_buy_down": null,
+     "hull_deductible_aggregate": null,
+     "combined_single_limit": 750000000.0,
+     "hull_war_overall_limit": null,
+     "hull_spares_limit": null,
+     "hull_spares_war_excess_liability": null,
+     "hull_war_confiscation_limit": null,
+     "hull_war_confiscation_limit_selected_country": null,
+     "selected_country": null,
+     "reinsured_amount": 0.5,
+     "cut_through_clause": "yes",
+     "created_at": "2026-09-25T10:00:00+00:00",
+     "updated_at": "2026-09-25T10:00:00+00:00"
+    },
+    "covered_from": "2026-01-01",
+    "covered_to": null
+   }
+  ]
+ },
+ "AircraftOut": {
+  "id": 13,
+  "registration": "2-EZBC",
+  "msn": "2866",
+  "aircraft_type": {
+   "id": 16,
+   "manufacturer": "Airbus",
+   "master_series": "A319",
+   "category": "passenger",
+   "label": "Airbus A319 Passenger",
+   "template_url": {
+    "airborne": "https://raw.githubusercontent.com/AIXII-Digital-Solutions/Assets/Aircrafts-Templates/Airborne/Passenger/Airbus%20A319%20Passenger.png",
+    "on_the_ground": "https://raw.githubusercontent.com/AIXII-Digital-Solutions/Assets/Aircrafts-Templates/On%20the%20ground/Passenger/Airbus%20A319%20Passenger.png"
+   }
+  },
+  "airline": {
+   "id": 33,
+   "airline_name": "AviaAM Leasing",
+   "icao": "",
+   "iata": "",
+   "is_asg": true,
+   "logo_url": "https://raw.githubusercontent.com/AIXII-Digital-Solutions/Assets/Airline-Logos/aviaam_leasing.svg"
+  },
+  "service": {
+   "id": 4,
+   "agreed_value_fixed": false,
+   "source": "cirium",
+   "status": "insured",
+   "usage_status": "Storage",
+   "lease_currency": "USD",
+   "policy_currency": "USD",
+   "recorded": true
+  },
+  "engines": [
+   {
+    "id": 39,
+    "position": 1,
+    "engine_type": {
+     "id": 13,
+     "manufacturer": "CFM International",
+     "master_series": "CFM56-5"
+    },
+    "msn": null,
+    "installed_on": null,
+    "details": null,
+    "fitted": true
+   }
+  ]
+ },
+ "AircraftOutPage": {
+  "items": [
+   {
+    "id": 13,
+    "registration": "2-EZBC",
+    "msn": "2866",
+    "aircraft_type": {
+     "id": 16,
+     "manufacturer": "Airbus",
+     "master_series": "A319",
+     "category": "passenger",
+     "label": "Airbus A319 Passenger",
+     "template_url": {
+      "airborne": "https://raw.githubusercontent.com/AIXII-Digital-Solutions/Assets/Aircrafts-Templates/Airborne/Passenger/Airbus%20A319%20Passenger.png",
+      "on_the_ground": "https://raw.githubusercontent.com/AIXII-Digital-Solutions/Assets/Aircrafts-Templates/On%20the%20ground/Passenger/Airbus%20A319%20Passenger.png"
+     }
+    },
+    "airline": {
+     "id": 33,
+     "airline_name": "AviaAM Leasing",
+     "icao": "",
+     "iata": "",
+     "is_asg": true,
+     "logo_url": "https://raw.githubusercontent.com/AIXII-Digital-Solutions/Assets/Airline-Logos/aviaam_leasing.svg"
+    },
+    "service": {
+     "id": 4,
+     "agreed_value_fixed": false,
+     "source": "cirium",
+     "status": "insured",
+     "usage_status": "Storage",
+     "lease_currency": "USD",
+     "policy_currency": "USD",
+     "recorded": true
+    },
+    "engines": [
+     {
+      "id": 39,
+      "position": 1,
+      "engine_type": {
+       "id": 13,
+       "manufacturer": "CFM International",
+       "master_series": "CFM56-5"
+      },
+      "msn": null,
+      "installed_on": null,
+      "details": null,
+      "fitted": true
+     }
+    ]
+   }
+  ],
+  "total": 149
+ },
+ "AircraftTypeOut": {
+  "id": 9,
+  "manufacturer": "Airbus",
+  "master_series": "A320",
+  "category": "passenger",
+  "label": "Airbus A320 Passenger",
+  "template_url": {
+   "airborne": "https://x/a.svg",
+   "on_the_ground": null
+  }
+ },
+ "AircraftTypeOutPage": {
+  "items": [
+   {
+    "id": 330,
+    "manufacturer": "De Havilland Canada",
+    "master_series": "330 200",
+    "category": "cargo",
+    "label": "De Havilland Canada 330 200 Cargo",
+    "template_url": {
+     "airborne": null,
+     "on_the_ground": null
+    }
+   }
+  ],
+  "total": 1355
+ },
+ "AirlineOut": {
+  "id": 13,
+  "airline_name": "AirExplore",
+  "icao": "AXE",
+  "iata": "ED",
+  "is_asg": true,
+  "logo_url": "https://raw.githubusercontent.com/AIXII-Digital-Solutions/Assets/Airline-Logos/airexplore.svg"
+ },
+ "AirlineOutPage": {
+  "items": [
+   {
+    "id": 13,
+    "airline_name": "AirExplore",
+    "icao": "AXE",
+    "iata": "ED",
+    "is_asg": true,
+    "logo_url": "https://raw.githubusercontent.com/AIXII-Digital-Solutions/Assets/Airline-Logos/airexplore.svg"
+   }
+  ],
+  "total": 22
+ },
+ "AirlineSearchHit": {
+  "airline": "Emirates",
+  "icao": "UAE",
+  "iata": "EK"
+ },
+ "AuditEntry": {
+  "id": 5523,
+  "schema": "forecast",
+  "table": "aircraft_info_edits",
+  "row_id": 2881890699388234,
+  "operation": "DELETE",
+  "changed_at": "2026-09-25T01:14:56.400908+00:00",
+  "changed_by": "service-token",
+  "changes": [
+   {
+    "field": "airline",
+    "old": "2Excel Aviation",
+    "new": null
+   }
+  ],
+  "old_row": {
+   "id": 2881890699388234,
+   "edits": {
+    "Lease Type": "Wet",
+    "Agreed Value / INC / mUSD": null
+   },
+   "airline": "2Excel Aviation",
+   "created_at": "2026-09-25T01:14:14.91343",
+   "updated_at": "2026-09-25T01:14:14.91343",
+   "updated_by": "service-token",
+   "registration": "G-FTAI",
+   "contract_year": "CY2025"
+  },
+  "new_row": null
+ },
+ "AuditEntryPage": {
+  "items": [
+   {
+    "id": 5523,
+    "schema": "forecast",
+    "table": "aircraft_info_edits",
+    "row_id": 2881890699388234,
+    "operation": "DELETE",
+    "changed_at": "2026-09-25T01:14:56.400908+00:00",
+    "changed_by": "service-token",
+    "changes": [
+     {
+      "field": "airline",
+      "old": "2Excel Aviation",
+      "new": null
+     }
+    ],
+    "old_row": {
+     "id": 2881890699388234,
+     "edits": {
+      "Lease Type": "Wet",
+      "Agreed Value / INC / mUSD": null
+     },
+     "airline": "2Excel Aviation",
+     "created_at": "2026-09-25T01:14:14.91343",
+     "updated_at": "2026-09-25T01:14:14.91343",
+     "updated_by": "service-token",
+     "registration": "G-FTAI",
+     "contract_year": "CY2025"
+    },
+    "new_row": null
+   }
+  ],
+  "total": 3387
+ },
+ "CapacityState": {
+  "status": "live",
+  "embeddable": true,
+  "_raw_state": "Succeeded",
+  "_provisioning_state": "Succeeded"
+ },
+ "ClaimOut": {
+  "id": 81,
+  "airline": "AirSF",
+  "calendar_year": 2025,
+  "number_of_claims": 10,
+  "claims_amount_total": 6000000.0,
+  "claims_amount_outstanding": 0.0,
+  "currency_rate": 1.0,
+  "claims_amount_total_usd": 6000000.0,
+  "claims_amount_outstanding_usd": 0.0,
+  "currency": "USD",
+  "policy_type": "WXS",
+  "created_at": "2026-09-16T09:55:25.267140",
+  "updated_at": "2026-09-16T09:55:25.267140"
+ },
+ "ClaimWritten": {
+  "id": 1,
+  "airline": "Air Test",
+  "calendar_year": 2024,
+  "number_of_claims": 2,
+  "claims_amount_total": 10.5,
+  "claims_amount_outstanding": 0.0,
+  "currency_rate": 1.0,
+  "claims_amount_total_usd": 10.5,
+  "claims_amount_outstanding_usd": 0.0,
+  "currency": "USD",
+  "policy_type": "HD",
+  "created_at": "2026-09-25T10:00:00+00:00",
+  "updated_at": "2026-09-25T10:00:00+00:00",
+  "airline_resolved_from": "Air Tset"
+ },
+ "ClaimsLoaded": {
+  "received": 2,
+  "inserted": 2,
+  "ids": [
+   101
+  ],
+  "airlines_resolved": [
+   {
+    "typed": "Emirats",
+    "resolved": "Emirates"
+   }
+  ],
+  "airlines_unresolved": [
+   {
+    "typed": "Unknown Air",
+    "reason": "no close match",
+    "rows": 1,
+    "candidates": [
+     "Unity Air"
+    ],
+    "note": "airline 'Unknown Air' is not in the reference data (no close match) — stored as sent."
+   }
+  ],
+  "rates_used": [
+   {
+    "currency": "USD",
+    "calendar_year": 2024,
+    "rate": 1.0
+   }
+  ]
+ },
+ "ClaimsPage": {
+  "total": 3,
+  "limit": 3,
+  "offset": 0,
+  "items": [
+   {
+    "id": 81,
+    "airline": "AirSF",
+    "calendar_year": 2025,
+    "number_of_claims": 10,
+    "claims_amount_total": 6000000.0,
+    "claims_amount_outstanding": 0.0,
+    "currency_rate": 1.0,
+    "claims_amount_total_usd": 6000000.0,
+    "claims_amount_outstanding_usd": 0.0,
+    "currency": "USD",
+    "policy_type": "WXS",
+    "created_at": "2026-09-16T09:55:25.267140",
+    "updated_at": "2026-09-16T09:55:25.267140"
+   }
+  ]
+ },
+ "ContactOut": {
+  "id": 5,
+  "company": "Lessor Co",
+  "contact": "J. Doe",
+  "email": "j@x.com",
+  "phone": null,
+  "note": null
+ },
+ "CoverComparePage": {
+  "items": [
+   {
+    "aircraft": {
+     "id": 13,
+     "registration": "2-EZBC",
+     "msn": "2866",
+     "aircraft_type": {
+      "id": 16,
+      "manufacturer": "Airbus",
+      "master_series": "A319",
+      "category": "passenger",
+      "label": "Airbus A319 Passenger",
+      "template_url": {
+       "airborne": "https://raw.githubusercontent.com/AIXII-Digital-Solutions/Assets/Aircrafts-Templates/Airborne/Passenger/Airbus%20A319%20Passenger.png",
+       "on_the_ground": "https://raw.githubusercontent.com/AIXII-Digital-Solutions/Assets/Aircrafts-Templates/On%20the%20ground/Passenger/Airbus%20A319%20Passenger.png"
+      }
+     },
+     "airline": {
+      "id": 33,
+      "airline_name": "AviaAM Leasing",
+      "icao": "",
+      "iata": "",
+      "is_asg": true,
+      "logo_url": "https://raw.githubusercontent.com/AIXII-Digital-Solutions/Assets/Airline-Logos/aviaam_leasing.svg"
+     },
+     "service": {
+      "id": 4,
+      "agreed_value_fixed": false,
+      "source": "cirium",
+      "status": "insured",
+      "usage_status": "Storage",
+      "lease_currency": "USD",
+      "policy_currency": "USD",
+      "recorded": true
+     }
+    },
+    "has_lease": false,
+    "has_policy": false,
+    "policy_id": null,
+    "lease_id": null,
+    "status": "insured",
+    "usage_status": "Storage",
+    "match": false,
+    "fields": {
+     "combined_single_limit": {
+      "required": null,
+      "provided": null,
+      "match": true
+     },
+     "hull_spares_war_excess_liability": {
+      "required": null,
+      "provided": null,
+      "match": true
+     },
+     "hull_deductible_buy_down": {
+      "required": null,
+      "provided": null,
+      "match": true
+     }
+    }
+   }
+  ],
+  "total": 149,
+  "as_of": "2026-09-25"
+ },
+ "CoverCompareRow": {
+  "aircraft": {
+   "id": 13,
+   "registration": "2-EZBC",
+   "msn": "2866",
+   "aircraft_type": {
+    "id": 16,
+    "manufacturer": "Airbus",
+    "master_series": "A319",
+    "category": "passenger",
+    "label": "Airbus A319 Passenger",
+    "template_url": {
+     "airborne": "https://raw.githubusercontent.com/AIXII-Digital-Solutions/Assets/Aircrafts-Templates/Airborne/Passenger/Airbus%20A319%20Passenger.png",
+     "on_the_ground": "https://raw.githubusercontent.com/AIXII-Digital-Solutions/Assets/Aircrafts-Templates/On%20the%20ground/Passenger/Airbus%20A319%20Passenger.png"
+    }
+   },
+   "airline": {
+    "id": 33,
+    "airline_name": "AviaAM Leasing",
+    "icao": "",
+    "iata": "",
+    "is_asg": true,
+    "logo_url": "https://raw.githubusercontent.com/AIXII-Digital-Solutions/Assets/Airline-Logos/aviaam_leasing.svg"
+   },
+   "service": {
+    "id": 4,
+    "agreed_value_fixed": false,
+    "source": "cirium",
+    "status": "insured",
+    "usage_status": "Storage",
+    "lease_currency": "USD",
+    "policy_currency": "USD",
+    "recorded": true
+   }
+  },
+  "has_lease": false,
+  "has_policy": false,
+  "policy_id": null,
+  "lease_id": null,
+  "status": "insured",
+  "usage_status": "Storage",
+  "match": false,
+  "fields": {
+   "combined_single_limit": {
+    "required": null,
+    "provided": null,
+    "match": true
+   },
+   "hull_spares_war_excess_liability": {
+    "required": null,
+    "provided": null,
+    "match": true
+   },
+   "hull_deductible_buy_down": {
+    "required": null,
+    "provided": null,
+    "match": true
+   }
+  }
+ },
+ "CoverageOut": {
+  "id": 61,
+  "aircraft_id": 13,
+  "aircraft": {
+   "id": 13,
+   "registration": "YL-ABC",
+   "msn": "1234",
+   "aircraft_type": {
+    "id": 9,
+    "manufacturer": "Airbus",
+    "master_series": "A320",
+    "category": "passenger",
+    "label": "Airbus A320 Passenger",
+    "template_url": {
+     "airborne": "https://x/a.svg",
+     "on_the_ground": null
+    }
+   },
+   "airline": {
+    "id": 13,
+    "airline_name": "Air Test",
+    "icao": "ATS",
+    "iata": "AT",
+    "is_asg": true,
+    "logo_url": null
+   },
+   "service": {
+    "id": 11,
+    "agreed_value_fixed": false,
+    "source": "cirium",
+    "status": "insured",
+    "usage_status": "Active",
+    "lease_currency": "USD",
+    "policy_currency": "USD",
+    "recorded": true
+   }
+  },
+  "policy": {
+   "id": 51,
+   "insured": {
+    "id": 4,
+    "name": "Insured Co",
+    "details": "note"
+   },
+   "reinsured": null,
+   "retrocedent": null,
+   "period_from": "2026-01-01",
+   "period_to": null,
+   "period": "2026-01-01..",
+   "hull_all_risks_deductible": 1000000.0,
+   "spares_deductible": null,
+   "hull_deductible_buy_down": null,
+   "hull_deductible_aggregate": null,
+   "combined_single_limit": 750000000.0,
+   "hull_war_overall_limit": null,
+   "hull_spares_limit": null,
+   "hull_spares_war_excess_liability": null,
+   "hull_war_confiscation_limit": null,
+   "hull_war_confiscation_limit_selected_country": null,
+   "selected_country": null,
+   "reinsured_amount": 0.5,
+   "cut_through_clause": "yes",
+   "created_at": "2026-09-25T10:00:00+00:00",
+   "updated_at": "2026-09-25T10:00:00+00:00"
+  },
+  "covered_from": "2026-01-01",
+  "covered_to": null
+ },
+ "EngineOut": {
+  "id": 21,
+  "position": 1,
+  "engine_type": {
+   "id": 7,
+   "manufacturer": "CFM",
+   "master_series": "CFM56-5"
+  },
+  "msn": "ENG1",
+  "installed_on": "2020-01-01",
+  "details": null,
+  "fitted": true
+ },
+ "EngineOutPage": {
+  "items": [
+   {
+    "id": 39,
+    "position": 1,
+    "engine_type": {
+     "id": 13,
+     "manufacturer": "CFM International",
+     "master_series": "CFM56-5"
+    },
+    "msn": null,
+    "installed_on": null,
+    "details": null,
+    "fitted": true
+   }
+  ],
+  "total": 2
+ },
+ "EngineTypeOut": {
+  "id": 235,
+  "manufacturer": "Rolls-Royce Allison",
+  "master_series": "250"
+ },
+ "EngineTypeOutPage": {
+  "items": [
+   {
+    "id": 235,
+    "manufacturer": "Rolls-Royce Allison",
+    "master_series": "250"
+   }
+  ],
+  "total": 365
+ },
+ "FileQueued": {
+  "job_id": "8f14e45fceea167a5a36dedd4bea2543",
+  "kind": "cirium",
+  "filename": "AircraftDetail2109261.xlsx",
+  "group": "8f14e45fceea167a5a36dedd4bea2543"
+ },
+ "FleetEditsReverted": {
+  "airline": "2Excel Aviation",
+  "rows_reverted": 2,
+  "ids": [
+   3803268885066378
+  ]
+ },
+ "FleetEditsStatus": {
+  "snapshot_id": 18,
+  "snapshot_created_at": "2026-09-24T11:36:54.458288+00:00",
+  "as_of": "2026-09-24",
+  "covered_operators": [
+   "2Excel Aviation"
+  ],
+  "refreshed_at": "2026-09-25T01:15:15.341884+00:00",
+  "edits_applied_at": "2026-09-25T01:15:15.341884+00:00",
+  "pending": false,
+  "pending_airlines": [],
+  "pending_since": null,
+  "last_change_at": null
+ },
+ "FleetSheetFields": {
+  "fields": [
+   {
+    "field": "Aircraft Type",
+    "type": "text",
+    "nullable": true,
+    "affects_report": false,
+    "max_length": 200
+   }
+  ],
+  "derived": [
+   {
+    "field": "Agreed Value / AVE / mUSD",
+    "from": "Agreed Value / INC / mUSD"
+   }
+  ]
+ },
+ "FleetSheetPage": {
+  "items": [
+   {
+    "id": 2938598410877886,
+    "Airline": "2Excel Aviation",
+    "Aircraft Type": "757-200",
+    "Manufacturer": "Boeing",
+    "Master Series": "757-200",
+    "Current Family": "757 Family",
+    "Registration": "G-FTAI",
+    "Contract Year": "CY1999",
+    "Data Type": "Actuals",
+    "MSN": "29308",
+    "YOM": "2000",
+    "Seats": 0,
+    "Agreed Value / INC / mUSD": "10.20",
+    "Agreed Value / AVE / mUSD": "10.20",
+    "Agreed Value / AW AVE / mUSD": null,
+    "Agreed Value / EXP / mUSD": "10.20",
+    "CSL / mUSD": 650,
+    "Lessor": "Not Leased",
+    "Manager": "2Excel Aviation",
+    "Owner": "2Excel Aviation",
+    "Lease": "Not Leased",
+    "Lease Type": "Not Leased",
+    "Edited": false,
+    "Edited Fields": [],
+    "Original Values": null,
+    "Edited At": null,
+    "Edited By": null,
+    "Edits Inherited From": null,
+    "Recalculation Pending": false
+   }
+  ],
+  "total": 138,
+  "limit": 3,
+  "offset": 0
+ },
+ "FleetSheetRow": {
+  "id": 2938598410877886,
+  "Airline": "2Excel Aviation",
+  "Aircraft Type": "757-200",
+  "Manufacturer": "Boeing",
+  "Master Series": "757-200",
+  "Current Family": "757 Family",
+  "Registration": "G-FTAI",
+  "Contract Year": "CY1999",
+  "Data Type": "Actuals",
+  "MSN": "29308",
+  "YOM": "2000",
+  "Seats": 0,
+  "Agreed Value / INC / mUSD": "10.20",
+  "Agreed Value / AVE / mUSD": "10.20",
+  "Agreed Value / AW AVE / mUSD": null,
+  "Agreed Value / EXP / mUSD": "10.20",
+  "CSL / mUSD": 650,
+  "Lessor": "Not Leased",
+  "Manager": "2Excel Aviation",
+  "Owner": "2Excel Aviation",
+  "Lease": "Not Leased",
+  "Lease Type": "Not Leased",
+  "Edited": false,
+  "Edited Fields": [],
+  "Original Values": null,
+  "Edited At": null,
+  "Edited By": null,
+  "Edits Inherited From": null,
+  "Recalculation Pending": false
+ },
+ "ForecastLast": {
+  "datetime": "2026-09-25T01:15:15.699632+00:00",
+  "request_type": "ACYS",
+  "request_params": {
+   "date": "2026-09-24",
+   "operators": [
+    "2Excel Aviation"
+   ],
+   "registrations": null,
+   "restored_from_snapshot_id": 18
+  }
+ },
+ "ForecastRestoring": {
+  "job_id": "8f14e45fceea167a5a36dedd4bea2543",
+  "mode": "snapshot",
+  "snapshot": {
+   "id": 18,
+   "created_at": "2026-09-24T11:36:54.458288+00:00",
+   "job_id": "9e293241eb9041e9a865a8848b8ca664",
+   "request_type": "ACYS",
+   "operators": [
+    "2Excel Aviation"
+   ],
+   "registrations": [],
+   "covered_operators": [
+    "2Excel Aviation"
+   ],
+   "covered_registration_count": 20,
+   "as_of": "2026-09-24",
+   "profile": "default",
+   "row_count": 10857,
+   "restored_at": "2026-09-24T23:49:33.313421+00:00",
+   "restore_count": 2,
+   "edits_applied_at": "2026-09-25T01:15:15.341884+00:00",
+   "is_live": true
+  }
+ },
+ "ForecastStarted": {
+  "job_id": "8f14e45fceea167a5a36dedd4bea2543",
+  "operators": [
+   "Emirates"
+  ],
+  "registrations": null,
+  "as_of": "2026-09-25",
+  "profile": null,
+  "force": false
+ },
+ "JobCancelled": {
+  "job_id": "8f14e45fceea167a5a36dedd4bea2543",
+  "aborted": true
+ },
+ "JobStatusOut": {
+  "job_id": "ef2b53c66556429c9b277f39b45155b3",
+  "kind": "external",
+  "ref": "cron_live_flights",
+  "state": "success",
+  "progress": 100,
+  "message": null,
+  "payload": null,
+  "created_at": "2026-09-25T01:28:00.986817+00:00",
+  "updated_at": "2026-09-25T01:28:02.050774+00:00",
+  "finished_at": "2026-09-25T01:28:02.050774+00:00"
+ },
+ "LeaseOut": {
+  "id": 41,
+  "aircraft": {
+   "id": 13,
+   "registration": "YL-ABC",
+   "msn": "1234",
+   "aircraft_type": {
+    "id": 9,
+    "manufacturer": "Airbus",
+    "master_series": "A320",
+    "category": "passenger",
+    "label": "Airbus A320 Passenger",
+    "template_url": {
+     "airborne": "https://x/a.svg",
+     "on_the_ground": null
+    }
+   },
+   "airline": {
+    "id": 13,
+    "airline_name": "Air Test",
+    "icao": "ATS",
+    "iata": "AT",
+    "is_asg": true,
+    "logo_url": null
+   },
+   "service": {
+    "id": 11,
+    "agreed_value_fixed": false,
+    "source": "cirium",
+    "status": "insured",
+    "usage_status": "Active",
+    "lease_currency": "USD",
+    "policy_currency": "USD",
+    "recorded": true
+   }
+  },
+  "aircraft_id": 13,
+  "agreement": {
+   "id": 31,
+   "name": "MLA 1",
+   "start_date": "2020-01-01",
+   "lessor": {
+    "id": 3,
+    "name": "Lessor Co",
+    "details": null
+   },
+   "alternative_contract_party": null,
+   "other_contracts": null
+  },
+  "effective_date": "2024-01-01",
+  "agreed_value_preliminary": 40000000.0,
+  "agreed_value_final": null,
+  "agreed_value_calculated": 39960010.0,
+  "agreed_value_as_of": "2026-09-25",
+  "depreciation_ratio": 0.05,
+  "depreciation_start_date": "2024-01-01",
+  "combined_single_limit": 750000000.0,
+  "hull_spares_war_excess_liability": null,
+  "hull_deductible_buy_down": null,
+  "currency": "USD",
+  "created_at": "2026-09-25T10:00:00+00:00",
+  "updated_at": "2026-09-25T10:00:00+00:00"
+ },
+ "NameOnly": {
+  "name": "cron_asg_regs"
+ },
+ "ParamsSchema": {
+  "model_version": "acys-v1",
+  "groups": [
+   "History"
+  ],
+  "params": [
+   {
+    "name": "history_start",
+    "type": "date",
+    "default": "2022-07-01",
+    "group": "History",
+    "label": "History start",
+    "description": "Facts before this date do not take part in the forecast at all. A hard cutoff: it keeps the post-COVID 2021-2022 ramp-up from being pulled into the model."
+   }
+  ]
+ },
+ "PartyOut": {
+  "id": 3,
+  "name": "Lessor Co",
+  "details": null,
+  "contacts": [
+   {
+    "id": 5,
+    "company": "Lessor Co",
+    "contact": "J. Doe",
+    "email": "j@x.com",
+    "phone": null,
+    "note": null
+   }
+  ]
+ },
+ "PartyOutPage": {
+  "items": [
+   {
+    "id": 47,
+    "name": "AASET 2018-2 ABS Portfolio",
+    "details": null,
+    "contacts": []
+   }
+  ],
+  "total": 97
+ },
+ "PolicyOut": {
+  "id": 51,
+  "insured": {
+   "id": 4,
+   "name": "Insured Co",
+   "details": "note"
+  },
+  "reinsured": null,
+  "retrocedent": null,
+  "period_from": "2026-01-01",
+  "period_to": null,
+  "period": "2026-01-01..",
+  "hull_all_risks_deductible": 1000000.0,
+  "spares_deductible": null,
+  "hull_deductible_buy_down": null,
+  "hull_deductible_aggregate": null,
+  "combined_single_limit": 750000000.0,
+  "hull_war_overall_limit": null,
+  "hull_spares_limit": null,
+  "hull_spares_war_excess_liability": null,
+  "hull_war_confiscation_limit": null,
+  "hull_war_confiscation_limit_selected_country": null,
+  "selected_country": null,
+  "reinsured_amount": 0.5,
+  "cut_through_clause": "yes",
+  "created_at": "2026-09-25T10:00:00+00:00",
+  "updated_at": "2026-09-25T10:00:00+00:00"
+ },
+ "PolicyRenewed": {
+  "id": 51,
+  "insured": {
+   "id": 4,
+   "name": "Insured Co",
+   "details": "note"
+  },
+  "reinsured": null,
+  "retrocedent": null,
+  "period_from": "2026-01-01",
+  "period_to": null,
+  "period": "2026-01-01..",
+  "hull_all_risks_deductible": 1000000.0,
+  "spares_deductible": null,
+  "hull_deductible_buy_down": null,
+  "hull_deductible_aggregate": null,
+  "combined_single_limit": 750000000.0,
+  "hull_war_overall_limit": null,
+  "hull_spares_limit": null,
+  "hull_spares_war_excess_liability": null,
+  "hull_war_confiscation_limit": null,
+  "hull_war_confiscation_limit_selected_country": null,
+  "selected_country": null,
+  "reinsured_amount": 0.5,
+  "cut_through_clause": "yes",
+  "created_at": "2026-09-25T10:00:00+00:00",
+  "updated_at": "2026-09-25T10:00:00+00:00",
+  "aircraft_carried": 3
+ },
+ "PolicyWithAircraft": {
+  "id": 51,
+  "insured": {
+   "id": 4,
+   "name": "Insured Co",
+   "details": "note"
+  },
+  "reinsured": null,
+  "retrocedent": null,
+  "period_from": "2026-01-01",
+  "period_to": null,
+  "period": "2026-01-01..",
+  "hull_all_risks_deductible": 1000000.0,
+  "spares_deductible": null,
+  "hull_deductible_buy_down": null,
+  "hull_deductible_aggregate": null,
+  "combined_single_limit": 750000000.0,
+  "hull_war_overall_limit": null,
+  "hull_spares_limit": null,
+  "hull_spares_war_excess_liability": null,
+  "hull_war_confiscation_limit": null,
+  "hull_war_confiscation_limit_selected_country": null,
+  "selected_country": null,
+  "reinsured_amount": 0.5,
+  "cut_through_clause": "yes",
+  "created_at": "2026-09-25T10:00:00+00:00",
+  "updated_at": "2026-09-25T10:00:00+00:00",
+  "aircraft": [
+   {
+    "coverage_id": 61,
+    "covered_from": "2026-01-01",
+    "covered_to": null,
+    "aircraft": {
+     "id": 13,
+     "registration": "YL-ABC",
+     "msn": "1234",
+     "aircraft_type": {
+      "id": 9,
+      "manufacturer": "Airbus",
+      "master_series": "A320",
+      "category": "passenger",
+      "label": "Airbus A320 Passenger",
+      "template_url": {
+       "airborne": "https://x/a.svg",
+       "on_the_ground": null
+      }
+     },
+     "airline": {
+      "id": 13,
+      "airline_name": "Air Test",
+      "icao": "ATS",
+      "iata": "AT",
+      "is_asg": true,
+      "logo_url": null
+     },
+     "service": {
+      "id": 11,
+      "agreed_value_fixed": false,
+      "source": "cirium",
+      "status": "insured",
+      "usage_status": "Active",
+      "lease_currency": "USD",
+      "policy_currency": "USD",
+      "recorded": true
+     }
+    }
+   }
+  ]
+ },
+ "PrefixOnly": {
+  "prefix": "ak_1a2b3c4d"
+ },
+ "ProfileOut": {
+  "name": "default",
+  "description": "Профиль по умолчанию: параметры модели как в коде. Пустой набор переопределений.",
+  "model_version": "acys-v1",
+  "params": {},
+  "effective": {
+   "history_start": "2022-07-01",
+   "level_window": 15,
+   "level_complete_frac": 0.85,
+   "level_l": 3,
+   "seas_k": 3.0,
+   "frontier_frac": 0.6,
+   "frontier_window": 9,
+   "min_route_pool": 5,
+   "horizon_years": 2,
+   "pax_load_factor": 0.8
+  },
+  "error": null,
+  "is_default": true,
+  "enabled": true,
+  "updated_at": "2026-09-13T15:42:47.248729+00:00",
+  "updated_by": null
+ },
+ "QueueOut": {
+  "queue": "external",
+  "name": "core:external",
+  "queued": 0,
+  "paused": false
+ },
+ "QueuePurged": {
+  "queue": "external",
+  "name": "core:external",
+  "purged": 12
+ },
+ "QueueToggled": {
+  "queue": "external",
+  "name": "core:external",
+  "paused": true
+ },
+ "RegistrationSearchHit": {
+  "registration": "A6-EDA",
+  "operator": "Emirates",
+  "status": "In Service"
+ },
+ "ScheduleOut": {
+  "name": "cron_asg_regs",
+  "queue": "core:external",
+  "func_name": "cron_asg_regs",
+  "kwargs": null,
+  "interval_seconds": null,
+  "cron_expr": "0 9 * * 1",
+  "enabled": true,
+  "paused": false,
+  "run_now": false,
+  "next_run_at": "2026-09-28T09:00:00+00:00",
+  "last_run_at": "2026-09-21T09:00:00.539107+00:00",
+  "last_status": "dispatched",
+  "description": "Refresh cirium.asg + sync ASG registrations (Cirium -> main)."
+ },
+ "ScheduleRun": {
+  "name": "cron_asg_regs",
+  "func_name": "cron_asg_regs",
+  "queue": "core:external",
+  "job_id": "8f14e45fceea167a5a36dedd4bea2543"
+ },
+ "ServiceOut": {
+  "id": 4,
+  "agreed_value_fixed": false,
+  "source": "cirium",
+  "status": "insured",
+  "usage_status": "Storage",
+  "lease_currency": "USD",
+  "policy_currency": "USD",
+  "recorded": true
+ },
+ "SnapshotOut": {
+  "id": 18,
+  "created_at": "2026-09-24T11:36:54.458288+00:00",
+  "job_id": "9e293241eb9041e9a865a8848b8ca664",
+  "request_type": "ACYS",
+  "operators": [
+   "2Excel Aviation"
+  ],
+  "registrations": [],
+  "covered_operators": [
+   "2Excel Aviation"
+  ],
+  "covered_registration_count": 20,
+  "as_of": "2026-09-24",
+  "profile": "default",
+  "row_count": 10857,
+  "restored_at": "2026-09-24T23:49:33.313421+00:00",
+  "restore_count": 2,
+  "edits_applied_at": "2026-09-25T01:15:15.341884+00:00",
+  "is_live": true
+ },
+ "SnapshotsPage": {
+  "total": 7,
+  "limit": 3,
+  "offset": 0,
+  "retention_days": 30,
+  "filters": {
+   "registration": null,
+   "operator": null,
+   "date": null,
+   "as_of": null
+  },
+  "items": [
+   {
+    "id": 18,
+    "created_at": "2026-09-24T11:36:54.458288+00:00",
+    "job_id": "9e293241eb9041e9a865a8848b8ca664",
+    "request_type": "ACYS",
+    "operators": [
+     "2Excel Aviation"
+    ],
+    "registrations": [],
+    "covered_operators": [
+     "2Excel Aviation"
+    ],
+    "covered_registration_count": 20,
+    "as_of": "2026-09-24",
+    "profile": "default",
+    "row_count": 10857,
+    "restored_at": "2026-09-24T23:49:33.313421+00:00",
+    "restore_count": 2,
+    "edits_applied_at": "2026-09-25T01:15:15.341884+00:00",
+    "is_live": true
+   }
+  ]
+ },
+ "TokenCreated": {
+  "prefix": "ak_1234",
+  "name": "portal",
+  "scopes": [
+   "predictive:read"
+  ],
+  "enabled": true,
+  "expires_at": null,
+  "last_used_at": "2026-09-25T10:00:00+00:00",
+  "created_by": "service-token",
+  "created_at": "2026-09-25T10:00:00+00:00",
+  "api_key": "ak_1234.secret"
+ },
+ "TokenOut": {
+  "prefix": "ak_1234",
+  "name": "portal",
+  "scopes": [
+   "predictive:read"
+  ],
+  "enabled": true,
+  "expires_at": null,
+  "last_used_at": "2026-09-25T10:00:00+00:00",
+  "created_by": "service-token",
+  "created_at": "2026-09-25T10:00:00+00:00"
+ }
+}
