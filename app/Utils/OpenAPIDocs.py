@@ -28,9 +28,22 @@ Nothing here changes a response — only how the responses are described.
 """
 import inspect
 import json
+import logging
+import re
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.routing import APIRoute
+from pydantic import BaseModel, TypeAdapter
+
+from Schemas.ResponseData import RESPONSE_DATA
+
+logger = logging.getLogger("openapi_docs")
+
+# One realistic example per data component, taken from real responses and the real serializers (see the
+# file's header in Schemas/ResponseData). Swagger composes a response's example from these, so a success
+# reads like the data it will return instead of `"string"` / `0` placeholders.
+_EXAMPLES_FILE = Path(__file__).resolve().parent.parent / "Schemas" / "response_examples.json"
 
 _REF = "#/components/schemas/"
 _CID = "3fa85f64-5717-4562-b3fc-2c963f66afa6"
@@ -69,9 +82,9 @@ _SCHEMAS = {
         "title": "DetailField",
         "type": "object",
         "properties": {
-            "msg": {"type": "string", "title": "Msg",
+            "msg": {"type": "string", "title": "Msg", "example": "Success",
                     "description": "What happened, written for the person reading it. Safe to show as is."},
-            "correlationId": {"type": "string", "format": "uuid", "title": "Correlationid",
+            "correlationId": {"type": "string", "format": "uuid", "title": "Correlationid", "example": _CID,
                               "description": "Also in the X-Correlation-ID header; quote it when "
                                              "reporting a problem — it finds the server log line."},
         },
@@ -145,6 +158,10 @@ def _validation_example() -> dict:
     return _envelope(422, "Validation error", [
         {"field": "body.Seats", "msg": "Seats must be a whole number", "correlationId": _CID},
     ])
+
+
+# described by _special_cases, not by RESPONSE_DATA
+_SPECIAL_PATHS = {"/status/stream", "/database/{type}"}
 
 
 def _special_cases(spec: dict) -> None:
@@ -236,6 +253,67 @@ def _auth_responses(guard) -> dict:
     return out
 
 
+_PAGE = re.compile(r"^Page_(\w+?)_$")
+
+
+def _data_schemas(schemas: dict) -> dict:
+    """{(METHOD, path): JSON schema of `data`} for every entry of RESPONSE_DATA, with the models they
+    reference added to `schemas` — shared, so one model is one component however many operations use
+    it. pydantic names a generic `Page_AircraftOut_`; it is registered as `AircraftOutPage`."""
+    keys, data, defs = [], [], {}
+    for key, typ in RESPONSE_DATA.items():
+        keys.append(key)
+        if typ is None:
+            data.append(None)
+            continue
+        schema = TypeAdapter(typ).json_schema(mode="serialization", by_alias=True,
+                                              ref_template=_REF + "{model}")
+        defs.update(schema.pop("$defs", {}))
+        if isinstance(typ, type) and issubclass(typ, BaseModel):
+            # a model at the top level is a component too, referenced — not an anonymous object
+            name = _component_name(typ)
+            defs[name] = {**schema, "title": name}
+            schema = _ref(name)
+        data.append(schema)
+    rename = {old: f"{m.group(1)}Page" for old in defs if (m := _PAGE.match(old))}
+    blob = json.dumps({"defs": defs, "data": data})
+    for old, new in rename.items():
+        blob = blob.replace(f'"{_REF}{old}"', f'"{_REF}{new}"')
+    moved = json.loads(blob)
+    for name, schema in moved["defs"].items():
+        new = rename.get(name, name)
+        schemas[new] = {**schema, "title": new} if name in rename else schema
+    try:
+        examples = json.loads(_EXAMPLES_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as ex:
+        logger.warning("response examples not loaded (%s) — Swagger will show placeholders", ex)
+        examples = {}
+    for name, example in examples.items():
+        if name in schemas:
+            schemas[name]["example"] = example
+    return dict(zip(keys, moved["data"]))
+
+
+def _component_name(model: type) -> str:
+    """`Page[AircraftOut]` -> `AircraftOutPage`; any other model keeps its class name."""
+    meta = getattr(model, "__pydantic_generic_metadata__", None) or {}
+    if meta.get("origin") is not None and meta.get("args"):
+        return "".join(a.__name__ for a in meta["args"]) + meta["origin"].__name__
+    return model.__name__
+
+
+def _envelope_schema(code: int, data: dict) -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "status_code": {"type": "integer", "title": "Status Code", "example": code},
+            "details": _DETAILS,
+            "data": data,
+        },
+        "required": ["status_code", "details", "data"],
+    }
+
+
 def polish(spec: dict, auth: dict | None = None) -> dict:
     """Correct a generated OpenAPI document in place (see the module docstring) and return it.
     `auth` is _auth_map(app); without it no 401 / 403 is added."""
@@ -250,6 +328,8 @@ def polish(spec: dict, auth: dict | None = None) -> dict:
         if old in schemas:
             schemas[new] = {**schemas.pop(old), "title": new}
     schemas.update(json.loads(json.dumps(_SCHEMAS)))
+    data_schemas = _data_schemas(schemas)
+    undocumented = []
 
     for path, ops in spec.get("paths", {}).items():
         for method, op in ops.items():
@@ -270,7 +350,15 @@ def polish(spec: dict, auth: dict | None = None) -> dict:
                     msg = _ERROR_MESSAGES.get(status, resp.get("description") or "Error")
                     content["application/json"] = {"schema": _ref("ErrorResponse"),
                                                    "example": _envelope(status, msg, [])}
+                elif 200 <= status < 300 and (method.upper(), path) in data_schemas:
+                    data = data_schemas[(method.upper(), path)]
+                    if data is None:   # the body is literally null — not the envelope
+                        content["application/json"] = {"schema": {"type": "null"}, "example": None}
+                    else:
+                        content["application/json"] = {"schema": _envelope_schema(status, data)}
                 elif 200 <= status < 300:
+                    if body is not None and not body.get("schema") and path not in _SPECIAL_PATHS:
+                        undocumented.append(f"{method.upper()} {path}")
                     if not body or not body.get("schema"):
                         content["application/json"] = {"schema": _ref("SuccessResponse"),
                                                        "example": _envelope(status, "Success", {})}
@@ -293,12 +381,19 @@ def polish(spec: dict, auth: dict | None = None) -> dict:
                                           key=lambda kv: (not kv[0].isdigit(), kv[0])))
 
     _special_cases(spec)
+    if undocumented:
+        logger.warning("no data schema in Schemas.ResponseData.RESPONSE_DATA for: %s", ", ".join(undocumented))
 
-    # FastAPI's own 422 models, now referenced by nothing. In order: HTTPValidationError's definition is
-    # what references ValidationError, so the check is re-run after each removal.
-    for unused in ("HTTPValidationError", "ValidationError"):
-        if f'"{_REF}{unused}"' not in json.dumps(spec):
-            schemas.pop(unused, None)
+    # Drop every component nothing refers to any more — FastAPI's own 422 models, the generic envelopes
+    # the response_model routes used to point at. Repeated until stable: removing one can orphan the
+    # models only it referred to.
+    while True:
+        blob = json.dumps(spec)
+        unused = [name for name in schemas if blob.count(f'"{_REF}{name}"') == 0]
+        if not unused:
+            break
+        for name in unused:
+            schemas.pop(name)
     spec["components"]["schemas"] = dict(sorted(schemas.items()))
     return spec
 

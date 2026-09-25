@@ -16,6 +16,9 @@ app = FastAPI(
     root_path=API_ROOT_URL,
     openapi_version=API_OPENAPI_VERSION,
     lifespan=lifespan,
+    # Open the response schema far enough to show the fields of `data` itself (envelope -> data -> its
+    # fields), not a collapsed `data: object` that reads as if the schema were missing.
+    swagger_ui_parameters={"defaultModelExpandDepth": 3},
 )
 
 register_middlewares(app)
