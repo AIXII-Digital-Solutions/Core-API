@@ -145,10 +145,11 @@ class Country(Base):
     aviation world uses). Reference data loaded by revision ref_country; the API reads
     it and never writes it.
 
-    `name` is the ISO 3166-1 English short name, which is the FULL form — 'Russian Federation',
-    'United Kingdom of Great Britain and Northern Ireland', 'Iran (Islamic Republic of)' — and is
-    what contracts and the portal show. `common_name` is the everyday form ('Russia', 'United
-    Kingdom', 'Iran') where it differs, kept so a search for either finds the country.
+    `name` is the OFFICIAL form in plain English — natural word order, no parentheses or inverted
+    commas, no accents, the longest forms shortened: 'Russian Federation', 'Islamic Republic of
+    Iran', 'Republic of Korea', 'United Kingdom', 'Turkey' (revision country_names_plain). It is
+    what contracts and the portal show. `common_name` is the everyday form ('Russia', 'Iran',
+    'South Korea') where it differs, kept so a search for either finds the country.
     """
     __tablename__ = "country"
 
@@ -163,8 +164,8 @@ class Country(Base):
         UniqueConstraint("name", name="uq_country_name"),
         CheckConstraint("iso2 = upper(iso2) AND length(iso2) = 2", name="ck_country_iso2"),
         CheckConstraint("iso3 = upper(iso3) AND length(iso3) = 3", name="ck_country_iso3"),
-        {"comment": "ISO 3166-1 countries and territories (+ Kosovo, XK). name = the ISO English "
-                    "short name, i.e. the full form; common_name = the everyday form for search."},
+        {"comment": "ISO 3166-1 countries and territories (+ Kosovo, XK). name = the official "
+                    "form in plain English; common_name = the everyday form for search."},
     )
 
 
