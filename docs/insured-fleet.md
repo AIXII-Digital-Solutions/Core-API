@@ -390,6 +390,7 @@ All endpoints are under `/api/v1`. Reads need `insurance:read`, writes `insuranc
 
 ```
 /ref/airlines                     GET (search)  POST  .  /{id} GET PATCH DELETE
+/ref/countries                    GET (search: name, everyday name, ISO2/ISO3)  .  /{id} GET   read-only ISO 3166-1
 /ref/parties                      GET (search)  POST  .  /{id} GET PATCH DELETE
 /ref/parties/{id}/contacts        POST          .  /ref/contacts/{id} PATCH DELETE
 

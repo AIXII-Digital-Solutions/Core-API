@@ -24,7 +24,7 @@ from sqlalchemy.orm import joinedload, selectinload, raiseload
 from sqlalchemy.exc import IntegrityError
 
 from Database import ApiToken
-from Database.RefModels import Airline, Party, PartyContact
+from Database.RefModels import Airline, Party, PartyContact, Country
 from Database.FleetModels import (
     Aircraft, AircraftType, AircraftEngine, EngineType, ServiceInfo, AircraftCategory,
     TEMPLATE_VIEWS,
@@ -539,6 +539,13 @@ def party_json(p: Optional[Party], *, contacts: bool = True) -> Optional[dict]:
     if contacts:
         out["contacts"] = [contact_json(c) for c in p.contacts]
     return out
+
+
+def country_json(c: Optional[Country]) -> Optional[dict]:
+    if c is None:
+        return None
+    return {"id": c.id, "name": c.name, "common_name": c.common_name, "iso2": c.iso2,
+            "iso3": c.iso3}
 
 
 def airline_json(a: Optional[Airline]) -> Optional[dict]:

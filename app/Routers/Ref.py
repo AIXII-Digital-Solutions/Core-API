@@ -25,18 +25,18 @@ from sqlalchemy.orm import selectinload
 from Config import setup_logger
 from settings import Router
 from Database import ApiToken
-from Database.RefModels import Airline, Party, PartyContact
+from Database.RefModels import Airline, Party, PartyContact, Country
 from Database.FleetModels import Aircraft
 from Database.LeasingModels import Agreement
 from Database.PolicyModels import PolicyParty, PartyRole
 from api_auth import authorize, SCOPE_INSURANCE_READ, SCOPE_INSURANCE_WRITE
 from Utils import success_response, warning_response, error_response
 from Utils.ResponsesFunc import build_responses
-from Utils.DomainCache import AIRLINE, PARTY, cached, invalidate
+from Utils.DomainCache import AIRLINE, PARTY, COUNTRY, cached, invalidate
 from Utils.DomainCommon import (
     page_with_total,
     DB, set_actor, apply_sort, typeahead_order, SortError, integrity_error,
-    airline_json, party_json, contact_json,
+    airline_json, party_json, contact_json, country_json,
 )
 
 logger = setup_logger("ref_api")
@@ -114,6 +114,72 @@ class PartyIn(BaseModel):
 class PartyPatch(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=256)
     details: Optional[str] = None
+
+
+# ==============================================================================================
+# countries — read-only ISO 3166-1 reference
+# ==============================================================================================
+
+@router.get(
+    path="/countries",
+    description=(
+        "Countries of the world (ISO 3166-1, plus Kosovo) for a picker. `q` matches the full name "
+        "or the everyday name as a substring ('russia' finds Russian Federation) or an ISO alpha-2 "
+        "/ alpha-3 code as a prefix; an exact code comes first, then name-prefix matches, then the "
+        "rest alphabetically. Without `q` the whole list, alphabetical. `name` is the full form "
+        "to show. Returns `{items, total}`."
+    ),
+    responses=build_responses(include=_OK), dependencies=_READ,
+)
+async def list_countries(
+    request: Request, response: Response,
+    q: str = Query("", description="Name substring, or ISO alpha-2 / alpha-3 prefix."),
+    limit: int = Query(50, ge=1, le=300), offset: int = Query(0, ge=0),
+):
+    try:
+        q = q.strip()
+        conds = []
+        stmt = select(Country)
+        if q:
+            conds.append(or_(Country.name.ilike(f"%{q}%"), Country.common_name.ilike(f"%{q}%"),
+                             Country.iso2.ilike(f"{q}%"), Country.iso3.ilike(f"{q}%")))
+            exact_code = or_(func.upper(Country.iso2) == q.upper(),
+                             func.upper(Country.iso3) == q.upper())
+            prefix = or_(Country.name.ilike(f"{q}%"), Country.common_name.ilike(f"{q}%"))
+            stmt = stmt.where(*conds).order_by(exact_code.desc(), prefix.desc(), Country.name)
+        else:
+            stmt = stmt.order_by(Country.name)
+
+        # 250 rows that only a migration changes: every keystroke of every picker can be served
+        # from the cache
+        async def load():
+            async with request.app.state.db_client.read_session(DB) as session:
+                rows, total = await page_with_total(
+                    session, stmt, limit=limit, offset=offset,
+                    count_stmt=select(func.count()).select_from(Country).where(*conds))
+                return {"items": [country_json(c) for c in rows], "total": total}
+
+        data = await cached(request, COUNTRY, {"q": q.lower(), "limit": limit, "offset": offset},
+                            load)
+        return success_response(request=request, response=response, data=data)
+    except Exception as _ex:
+        return error_response(request=request, exc=_ex, response=response)
+
+
+@router.get(path="/countries/{country_id}", description="One country.",
+            responses=build_responses(include=_OK), dependencies=_READ)
+async def get_country(request: Request, response: Response, country_id: int):
+    try:
+        async with request.app.state.db_client.read_session(DB) as session:
+            row = (await session.execute(
+                select(Country).where(Country.id == country_id))).scalar_one_or_none()
+        if row is None:
+            return warning_response(request=request, response=response,
+                                    msg=f"Country {country_id} not found",
+                                    status_code=status.HTTP_404_NOT_FOUND)
+        return success_response(request=request, response=response, data=country_json(row))
+    except Exception as _ex:
+        return error_response(request=request, exc=_ex, response=response)
 
 
 # ==============================================================================================
