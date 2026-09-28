@@ -594,7 +594,7 @@ def service_json(v: Optional[ServiceInfo]) -> dict:
     creates one with every aircraft, so an absent row means the aircraft predates that, not that
     somebody cleared the fields."""
     if v is None:
-        return {"id": None, "agreed_value_fixed": False, "source": "cirium", "status": "insured",
+        return {"id": None, "agreed_value_fixed": False, "source": "cirium", "status": "not_insured",
                 "usage_status": None, "lease_currency": "USD", "policy_currency": "USD",
                 "recorded": False}
     return {"id": v.id, "agreed_value_fixed": v.agreed_value_fixed,

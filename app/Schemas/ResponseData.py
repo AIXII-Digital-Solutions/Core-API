@@ -430,8 +430,8 @@ class ServiceOut(BaseModel):
     id: Optional[int] = Field(description="null when the aircraft has no row yet (the defaults are shown).")
     agreed_value_fixed: bool
     source: str
-    status: str
-    usage_status: Optional[str]
+    status: str = Field(description="insured | not_insured — whether a policy coverage covers today. Read-only.")
+    usage_status: Optional[str] = Field(description="The airframe's Status in the newest Cirium revision. Read-only.")
     lease_currency: str
     policy_currency: str
     recorded: bool

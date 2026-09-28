@@ -13,8 +13,11 @@ change; nothing is lost, because every change lands in `audit.change_log` with i
 
 THE SERVICE BLOCK is one row per aircraft in `fleet.service_info` — source, insurance status, the
 airframe's usage status as Cirium words it, whether the agreed value depreciates, and the two
-contract currencies. It is created with the aircraft (defaults: source `cirium`, status `insured`)
-and changed at `/fleet/aircraft/{id}/service`. Bookkeeping metadata, not maintenance.
+contract currencies. It is created with the aircraft (default source `cirium`) and changed at
+`/fleet/aircraft/{id}/service`. Bookkeeping metadata, not maintenance. The two STATUSES are shown
+but never accepted: `status` follows the coverage in force today (a trigger on policy.coverage),
+`usage_status` the newest Cirium revision (refreshed for a new aircraft here, and for the whole
+fleet by external-worker after each revision).
 
 ENGINES ARE INSTALLATIONS, not slots. Recording a swap is a POST of a new row at the same position
 with a later date — never a PATCH of the old one — so the position keeps its history and the fitted
@@ -31,7 +34,7 @@ from typing import Optional
 
 from fastapi import Request, Response, Depends, Query, status
 from fastapi.exceptions import RequestValidationError
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select, func, or_, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import joinedload, selectinload
@@ -42,7 +45,7 @@ from Database import ApiToken
 from Database.RefModels import Airline
 from Database.FleetModels import (
     Aircraft, AircraftType, AircraftEngine, EngineType, ServiceInfo,
-    RecordSource, InsuranceStatus, AircraftCategory, MAX_ENGINES,
+    RecordSource, AircraftCategory, MAX_ENGINES,
 )
 from Database.LeasingModels import AircraftLease, Agreement
 from Database.PolicyModels import Coverage, Policy
@@ -171,30 +174,37 @@ class EnginePatch(BaseModel):
     details: Optional[str] = None
 
 
-class ServiceIn(BaseModel):
+class _NoDerivedStatus(BaseModel):
+    """The service block SHOWS `status` and `usage_status`, but nobody sets them: the first is
+    whether a coverage covers today, the second is Cirium's. Sending either is refused rather than
+    silently dropped, so a client still offering them as inputs finds out at once."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _refuse_derived(cls, value):
+        if isinstance(value, dict):
+            sent = sorted({"status", "usage_status"} & value.keys())
+            if sent:
+                raise ValueError(
+                    f"{' and '.join(sent)} cannot be set: `status` follows the policy coverage in "
+                    f"force today and `usage_status` comes from Cirium.")
+        return value
+
+
+class ServiceIn(_NoDerivedStatus):
     """The service block — bookkeeping metadata about the aircraft's record, not maintenance.
     Every field has a default, so sending `{}` (or nothing at all) records the ordinary case."""
     agreed_value_fixed: bool = Field(
         default=False, description="True freezes the agreed value at the preliminary figure.")
     source: RecordSource = Field(
         default=RecordSource.CIRIUM, description="Where the record came from. Defaults to cirium.")
-    status: InsuranceStatus = Field(
-        default=InsuranceStatus.INSURED,
-        description="`not_insured` states a KNOWN gap, which the comparison report reads as "
-                    "deliberate rather than as a missing policy.")
-    usage_status: Optional[str] = Field(
-        default=None, max_length=64,
-        description="The airframe's operational status as Cirium states it — 'In Service', "
-                    "'Storage', 'Retired' ... Stored verbatim.")
     lease_currency: str = Field(default="USD", min_length=3, max_length=3)
     policy_currency: str = Field(default="USD", min_length=3, max_length=3)
 
 
-class ServicePatch(BaseModel):
+class ServicePatch(_NoDerivedStatus):
     agreed_value_fixed: Optional[bool] = None
     source: Optional[RecordSource] = None
-    status: Optional[InsuranceStatus] = None
-    usage_status: Optional[str] = Field(default=None, max_length=64)
     lease_currency: Optional[str] = Field(default=None, min_length=3, max_length=3)
     policy_currency: Optional[str] = Field(default=None, min_length=3, max_length=3)
 
@@ -605,6 +615,8 @@ async def create_aircraft(request: Request, response: Response, body: AircraftIn
                 fields["policy_currency"] = fields["policy_currency"].upper()
                 session.add(ServiceInfo(aircraft_id=row.id, **fields))
             await session.flush()
+            if created:
+                await _refresh_usage_status(session, [row.id])
             row = await reload_with(session, Aircraft, row.id, *_AIRCRAFT_ONE)
             data = aircraft_json(row)
         # creating an aircraft can find-or-create its type, its engines' model and its
@@ -775,7 +787,9 @@ def _lookup_json(r) -> dict:
         "is_asg": bool(r.airline_is_asg),
         "operator": r.operator,
         "engines": engines,
-        "service": {"source": RecordSource.CIRIUM.value, "usage_status": r.usage_status},
+        # shown, not sent back: the service block derives it from Cirium on every read
+        "usage_status": r.usage_status,
+        "service": {"source": RecordSource.CIRIUM.value},
         "in_fleet": r.fleet_id is not None,
         "fleet_aircraft_id": r.fleet_id,
     }
@@ -998,6 +1012,7 @@ async def create_aircraft_bulk(request: Request, response: Response, body: BulkA
                 children.extend(AircraftEngine(aircraft_id=row.id, **e) for e in engines)
             session.add_all(children)
             await session.flush()
+            await _refresh_usage_status(session, [r.id for r in rows])
 
             created = (await session.execute(
                 select(Aircraft).where(Aircraft.id.in_([r.id for r in rows]))
@@ -1023,6 +1038,14 @@ async def create_aircraft_bulk(request: Request, response: Response, body: BulkA
         return warning_response(request=request, response=response, msg=msg, status_code=code)
     except Exception as _ex:
         return error_response(request=request, exc=_ex, response=response)
+
+
+async def _refresh_usage_status(session, aircraft_ids: list[int]) -> None:
+    """Fill a new aircraft's usage status from Cirium's newest revision — the same function the
+    worker runs for the whole fleet after each revision. Nobody types it in. ONE statement for the
+    batch; the reload that follows picks the value up (populate_existing)."""
+    await session.execute(text("SELECT fleet.refresh_usage_status(CAST(:ids AS bigint[]))"),
+                          {"ids": aircraft_ids})
 
 
 async def _aircraft_card(session, row: Aircraft, on: date, history: bool) -> dict:
@@ -1251,8 +1274,8 @@ async def get_service(request: Request, response: Response, aircraft_id: int):
     path="/aircraft/{aircraft_id}/service",
     description=(
         "Change the service block. Only the fields sent are touched, and the row is created with "
-        "the defaults if the aircraft has none. Setting `status` to `not_insured` records a KNOWN "
-        "gap in cover, which /policy/coverage/compare then reads as deliberate."
+        "the defaults if the aircraft has none. `status` and `usage_status` are refused with 422: "
+        "the first follows the policy coverage in force today, the second comes from Cirium."
     ),
     responses=build_responses(include=_OK),
 )
@@ -1279,6 +1302,14 @@ async def update_service(request: Request, response: Response, aircraft_id: int,
             if row is None:
                 row = ServiceInfo(aircraft_id=aircraft_id, **fields)
                 session.add(row)
+                await session.flush()
+                # a row that did not exist has only the column defaults for the two statuses;
+                # set them from the coverage and Cirium like any other row's, then re-read
+                await session.execute(
+                    text("SELECT fleet.refresh_insurance_status(CAST(:ids AS bigint[])), "
+                         "fleet.refresh_usage_status(CAST(:ids AS bigint[]))"),
+                    {"ids": [aircraft_id]})
+                await session.refresh(row)
             else:
                 for key, value in fields.items():
                     setattr(row, key, value)
