@@ -733,15 +733,28 @@ _BY_REGISTRATION = text(_LOOKUP_SQL.format(
 
 # The pre-filter is the airline's own name, which every row the LATERAL can award to it must
 # contain; the LATERAL then decides, so a longer name that also matches still wins its rows.
-_BY_AIRLINE = text(_LOOKUP_SQL.format(
-    match="""c."Operator"   ILIKE '%' || CAST(:airline_name AS text) || '%'
+_NAME_MATCH = """c."Operator"   ILIKE '%' || CAST(:airline_name AS text) || '%'
           OR c."Sub Lessor" ILIKE '%' || CAST(:airline_name AS text) || '%'
-          OR c."Owner"      ILIKE '%' || CAST(:airline_name AS text) || '%'""",
-    keep=f"""al.id = CAST(:airline_id AS integer)
-             AND (CAST(:include_inactive AS boolean)
-                  OR o."Status" IS NULL OR o."Status" NOT IN ({_COMMON['inactive']}))""",
+          OR c."Owner"      ILIKE '%' || CAST(:airline_name AS text) || '%'"""
+_ACTIVE_ONLY = f"""(CAST(:include_inactive AS boolean)
+                  OR o."Status" IS NULL OR o."Status" NOT IN ({_COMMON['inactive']}))"""
+
+_BY_AIRLINE = text(_LOOKUP_SQL.format(
+    match=_NAME_MATCH,
+    keep=f"al.id = CAST(:airline_id AS integer) AND {_ACTIVE_ONLY}",
     **_COMMON))
 
+# A name NOT in ref.airline competes with the names that are, under the LATERAL's own order
+# (longest first, then alphabetical): a row is this name's unless a ref.airline name that also
+# matches it would win. So 'Air Arabia Abu Dhabi' takes rows from 'Air Arabia', never the reverse.
+_BY_AIRLINE_NAME = text(_LOOKUP_SQL.format(
+    match=_NAME_MATCH,
+    keep=f"""(al.id IS NULL
+              OR length(al.airline_name) < length(CAST(:airline_name AS text))
+              OR (length(al.airline_name) = length(CAST(:airline_name AS text))
+                  AND al.airline_name > CAST(:airline_name AS text)))
+             AND {_ACTIVE_ONLY}""",
+    **_COMMON))
 
 def _lookup_json(r) -> dict:
     """One Cirium airframe as a ready `POST /fleet/aircraft` body, plus what the form shows."""
@@ -772,14 +785,20 @@ def _lookup_json(r) -> dict:
     path="/aircraft/lookup",
     description=(
         "Find airframes in Cirium to add to the fleet — the newest revision of each plan type. "
-        "Exactly one of the two parameters:\n\n"
+        "Exactly one of the three parameters:\n\n"
         "* `registration` — one airframe, separator- and case-insensitive ('yl-abc' = 'YLABC'). "
         "Returns the object; 404 when Cirium does not know the tail. A tail reissued to several "
         "airframes answers with the one still flying.\n"
         "* `airline_id` (a `ref.airline` id) — every airframe of that airline, matched the way the "
         "tracking fleet is (Operator, Sub Lessor or Owner contains the name, longest name wins). "
         "Retired, written-off, cancelled and on-order airframes are left out unless "
-        "`include_inactive=true`. Returns `{items, total}`, sorted by registration.\n\n"
+        "`include_inactive=true`. Returns `{items, total}`, sorted by registration.\n"
+        "* `airline` — the same, for an airline NOT yet in ref.airline, named as the Cirium "
+        "catalogue writes it (`GET /airlines/`, field `airline`). The name competes with the "
+        "ref.airline names under the same longest-wins rule, so it gets only the rows no "
+        "ref.airline name would take. Every item carries `airline` = that name, "
+        "`airline_id: null`, `is_asg: false`. A name that IS in ref.airline (case and outer "
+        "spaces ignored) answers exactly as its `airline_id` would.\n\n"
         "Each item is a ready `POST /fleet/aircraft` body — `aircraft_category` and `engines` "
         "included, so sending it back is never ambiguous — plus `in_fleet` / `fleet_aircraft_id` "
         "(already in fleet.aircraft by registration or MSN), `airline_id` (null when no ref.airline "
@@ -793,16 +812,19 @@ async def lookup_aircraft(
     registration: Optional[str] = Query(None, max_length=32,
                                         description="Tail number, any case, any separators."),
     airline_id: Optional[int] = Query(None, description="ref.airline id."),
-    include_inactive: bool = Query(False, description="airline_id only: keep retired, written-off, "
-                                                      "cancelled and on-order airframes."),
+    airline: Optional[str] = Query(None, max_length=256,
+                                   description="An airline name from the Cirium catalogue."),
+    include_inactive: bool = Query(False, description="airline_id / airline only: keep retired, "
+                                                      "written-off, cancelled and on-order airframes."),
     limit: int = Query(500, ge=1, le=2000), offset: int = Query(0, ge=0),
 ):
     try:
         reg_key = norm_reg(registration) if registration else ""
-        if (not reg_key) == (airline_id is None):
+        name = airline.strip() if airline else ""
+        if sum((bool(reg_key), airline_id is not None, bool(name))) != 1:
             return warning_response(
                 request=request, response=response,
-                msg="Send exactly one of `registration` or `airline_id`.")
+                msg="Send exactly one of `registration`, `airline_id` or `airline`.")
 
         async with request.app.state.db_client.read_session(DB) as session:
             if reg_key:
@@ -815,16 +837,29 @@ async def lookup_aircraft(
                 return success_response(request=request, response=response,
                                         data=_lookup_json(row))
 
-            name = (await session.execute(
-                select(Airline.airline_name).where(Airline.id == airline_id))).scalar_one_or_none()
-            if name is None:
-                return warning_response(request=request, response=response,
-                                        msg=f"Airline {airline_id} not found",
-                                        status_code=status.HTTP_404_NOT_FOUND)
-            rows = (await session.execute(_BY_AIRLINE, {
-                "airline_name": name, "airline_id": airline_id,
-                "include_inactive": include_inactive})).all()
-        items = [_lookup_json(r) for r in rows]
+            if name:
+                # already in ref.airline under this name: then it is simply that airline
+                airline_id = (await session.execute(
+                    select(Airline.id)
+                    .where(func.upper(func.btrim(Airline.airline_name)) == norm(name))
+                    .order_by(Airline.id).limit(1))).scalar_one_or_none()
+            if airline_id is None:
+                rows = (await session.execute(_BY_AIRLINE_NAME, {
+                    "airline_name": name, "include_inactive": include_inactive})).all()
+                items = [{**_lookup_json(r), "airline": name, "airline_id": None, "is_asg": False}
+                         for r in rows]
+            else:
+                known = (await session.execute(
+                    select(Airline.airline_name).where(Airline.id == airline_id)
+                )).scalar_one_or_none()
+                if known is None:
+                    return warning_response(request=request, response=response,
+                                            msg=f"Airline {airline_id} not found",
+                                            status_code=status.HTTP_404_NOT_FOUND)
+                rows = (await session.execute(_BY_AIRLINE, {
+                    "airline_name": known, "airline_id": airline_id,
+                    "include_inactive": include_inactive})).all()
+                items = [_lookup_json(r) for r in rows]
         return success_response(request=request, response=response,
                                 data={"items": items[offset:offset + limit], "total": len(items)})
     except Exception as _ex:
