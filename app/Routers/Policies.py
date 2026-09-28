@@ -30,7 +30,6 @@ from Database import ApiToken
 from Database.RefModels import Party
 from Database.FleetModels import Aircraft
 from Database.LeasingModels import AircraftLease
-from Database.FleetModels import InsuranceStatus
 from Database.PolicyModels import Policy, Coverage
 from api_auth import authorize, SCOPE_INSURANCE_READ, SCOPE_INSURANCE_WRITE
 from Utils import success_response, warning_response, error_response
@@ -544,22 +543,18 @@ async def compare_cover(request: Request, response: Response,
                         ok = required == provided
                         agree = agree and ok
                         fields[column] = {"required": required, "provided": provided, "match": ok}
-                    # An aircraft whose service block STATES it is uncovered is not a missing policy.
-                    # It is an answer, so it counts as a match and carries the reason, not a red flag.
+                    # `status` is shown, not consulted: it only restates whether a coverage covers
+                    # today (revision service_status_sync), so it cannot excuse a missing policy.
                     service = a.service
-                    declared_uncovered = (
-                        service is not None
-                        and enum_value(service.status) == InsuranceStatus.NOT_INSURED.value)
                     row = {
                         "aircraft": aircraft_json(a, engines=False),
                         "has_lease": lease is not None,
                         "has_policy": policy is not None,
                         "policy_id": policy.id if policy else None,
                         "lease_id": lease.id if lease else None,
-                        "status": enum_value(service.status) if service else "insured",
+                        "status": enum_value(service.status) if service else "not_insured",
                         "usage_status": service.usage_status if service else None,
-                        "match": declared_uncovered or (
-                            agree and lease is not None and policy is not None),
+                        "match": agree and lease is not None and policy is not None,
                         "fields": fields,
                     }
                     if not mismatches_only or not row["match"]:

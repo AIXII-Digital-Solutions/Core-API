@@ -268,9 +268,9 @@ class RecordSource(PyEnum):
 
 
 class InsuranceStatus(PyEnum):
-    """Whether the aircraft is covered. `not_insured` states a KNOWN gap — somebody decided this
-    aircraft carries no cover — which is a different fact from an aircraft nobody has entered a
-    policy for yet, and the comparison report reads it as such."""
+    """Whether a policy.coverage row covers the aircraft TODAY. Kept by the system — a trigger on
+    policy.coverage and fleet.sync_service_status() (revision service_status_sync) — and not
+    editable through the API."""
     INSURED = "insured"
     NOT_INSURED = "not_insured"
 
@@ -295,6 +295,11 @@ class ServiceInfo(Base):
     that vocabulary (In Service, Storage, Retired, Written off, Type swap, Reengineered, ...) and
     adds to it, and an enum would turn each new value into a migration that blocks an import.
 
+    `status` AND `usage_status` ARE KEPT BY THE SYSTEM, not typed in (revision service_status_sync):
+    `status` follows the coverage in force today (a trigger on policy.coverage), `usage_status` the
+    newest Cirium revision (fleet.sync_service_status(), run by external-worker after the fleet
+    matviews are refreshed). The API shows both and accepts neither.
+
     WHAT HOLDING THE CURRENCIES HERE GIVES UP. They are properties of a CONTRACT — one lease
     agreement covers several aircraft in one currency, one policy likewise. Per aircraft, nothing
     stops two aircraft on the same agreement recording different currencies for it; the schema can
@@ -316,17 +321,15 @@ class ServiceInfo(Base):
                 "the feed.",
     )
     status: Mapped[InsuranceStatus] = mapped_column(
-        _STATUS_ENUM, nullable=False, server_default=text("'insured'"), index=True,
-        comment="Whether the aircraft is covered. not_insured states a KNOWN gap, which is "
-                "different from an aircraft nobody has entered a policy for - "
-                "/policy/coverage/compare reads it so a deliberate gap is not reported as a "
-                "mistake.",
+        _STATUS_ENUM, nullable=False, server_default=text("'not_insured'"), index=True,
+        comment="Whether a policy.coverage row covers today. Kept by the system (trigger on "
+                "policy.coverage, fleet.sync_service_status()); not editable through the API.",
     )
     usage_status: Mapped[Optional[str]] = mapped_column(
         String, nullable=True, default=None,
-        comment="The airframe's operational status as Cirium states it (In Service, Storage, "
-                "Retired, Written off, Type swap, ...). Text, not an enum: Cirium owns the "
-                "vocabulary and adds to it.",
+        comment="The airframe's Status in the newest Cirium revision, refreshed by "
+                "fleet.sync_service_status() after each revision; not editable through the API. "
+                "A tail Cirium no longer lists keeps its last value.",
     )
     lease_currency: Mapped[str] = mapped_column(
         String(3), nullable=False, server_default=text("'USD'"),
