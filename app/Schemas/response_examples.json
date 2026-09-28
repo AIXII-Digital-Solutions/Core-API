@@ -445,6 +445,11 @@
   "operation": "DELETE",
   "changed_at": "2026-09-25T01:14:56.400908+00:00",
   "changed_by": "service-token",
+  "changed_by_user": {
+   "id": "3f2c9a4e-8d1b-4c7a-9e55-0b6d2f1a7c90",
+   "email": "anna.ivanova@example.com",
+   "name": "Анна Иванова"
+  },
   "changes": [
    {
     "field": "airline",
@@ -477,6 +482,11 @@
     "operation": "DELETE",
     "changed_at": "2026-09-25T01:14:56.400908+00:00",
     "changed_by": "service-token",
+    "changed_by_user": {
+     "id": "3f2c9a4e-8d1b-4c7a-9e55-0b6d2f1a7c90",
+     "email": "anna.ivanova@example.com",
+     "name": "Анна Иванова"
+    },
     "changes": [
      {
       "field": "airline",

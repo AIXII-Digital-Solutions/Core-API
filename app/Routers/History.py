@@ -33,7 +33,7 @@ from Database.PolicyModels import Coverage
 from api_auth import authorize, SCOPE_INSURANCE_READ
 from Utils import success_response, warning_response, error_response
 from Utils.ResponsesFunc import build_responses
-from Utils.DomainCommon import DB, resolve_fk_labels, audit_entry, page_with_total
+from Utils.DomainCommon import DB, resolve_fk_labels, audit_entry, page_with_total, SYSTEM_USER
 
 logger = setup_logger("history_api")
 
@@ -68,9 +68,13 @@ async def _render(session, rows) -> list[dict]:
     path="/",
     description=(
         "The change log, newest first. Filter by `schema` / `table` / `row_id` for one object's "
-        "history, by `changed_by` for one actor, by `operation`, and by `since` / `until`. "
-        "Each entry carries `changes` (field-level, foreign keys resolved to names) plus the raw "
-        "snapshots. Returns `{items, total}`."
+        "history, by `changed_by` for one API credential, by `changed_by_user_id` for one portal "
+        "user (`system` for the System entries), by `operation`, and by `since` / `until`. Each "
+        "entry carries `changed_by_user` — `{id, email, name}` of the portal user, "
+        "`{id: null, email: null, name: \"System\"}` for migrations, loaders, system jobs and "
+        "everything recorded before users were, null for another API client — plus `changes` "
+        "(field-level, foreign keys resolved to names) and the raw snapshots. Returns "
+        "`{items, total}`."
     ),
     responses=build_responses(include=_OK), dependencies=_READ,
 )
@@ -80,6 +84,8 @@ async def list_history(
     table: Optional[str] = Query(None, description="e.g. aircraft, aircraft_lease, policy"),
     row_id: Optional[int] = Query(None, description="The id of the row within that table."),
     changed_by: Optional[str] = Query(None, description="Actor, as the API recorded it."),
+    changed_by_user_id: Optional[str] = Query(
+        None, max_length=64, description="A portal user's UUID, or `system`."),
     operation: Optional[str] = Query(None, description="INSERT | UPDATE | DELETE"),
     since: Optional[datetime] = Query(None), until: Optional[datetime] = Query(None),
     limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0),
@@ -103,6 +109,13 @@ async def list_history(
             conds.append(ChangeLog.row_id == row_id)
         if changed_by:
             conds.append(ChangeLog.changed_by == changed_by.strip())
+        if changed_by_user_id:
+            who = changed_by_user_id.strip()
+            if who.lower() == "system":
+                conds.append(ChangeLog.changed_by_user_id.is_(None))
+                conds.append(ChangeLog.changed_by_user_name == SYSTEM_USER)
+            else:
+                conds.append(ChangeLog.changed_by_user_id == who.lower())
         if operation:
             op = operation.strip().upper()
             if op not in _OPERATIONS:

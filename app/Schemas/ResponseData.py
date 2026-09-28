@@ -629,6 +629,13 @@ class FieldChange(BaseModel):
     new: Any
 
 
+class ChangedByUser(BaseModel):
+    id: Optional[str] = Field(description="The portal user's UUID; null for System.")
+    email: Optional[str]
+    name: Optional[str] = Field(description="Full name; \"System\" for migrations, loaders, system "
+                                            "jobs and entries recorded before users were.")
+
+
 class AuditEntry(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     id: int
@@ -637,7 +644,9 @@ class AuditEntry(BaseModel):
     row_id: Optional[int]
     operation: str = Field(description="INSERT | UPDATE | DELETE")
     changed_at: Optional[DateTime]
-    changed_by: Optional[str]
+    changed_by: Optional[str] = Field(description="The API credential: an API key's name or 'service-token'.")
+    changed_by_user: Optional[ChangedByUser] = Field(
+        description="Who, as a person: the portal user, System, or null for another API client.")
     changes: List[FieldChange]
     old_row: Optional[dict[str, Any]]
     new_row: Optional[dict[str, Any]]
