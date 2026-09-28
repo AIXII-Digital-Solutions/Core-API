@@ -74,6 +74,9 @@ ENGINE_LOAD = (joinedload(AircraftEngine.engine_type),)
 # A policy's parties are a COLLECTION (several per role), so selectin — one extra statement for a
 # whole page of policies — with the party joined onto each link row. `policy_json` reads them.
 POLICY_LOAD = (selectinload(Policy.parties).joinedload(PolicyParty.party),)
+# ONE policy: nothing to multiply without a LIMIT, so the parties join too and the policy is a
+# single statement. Needs `.unique()` on the result.
+POLICY_ONE = (joinedload(Policy.parties).joinedload(PolicyParty.party),)
 COVERAGE_LOAD = (joinedload(Coverage.policy).selectinload(Policy.parties)
                  .joinedload(PolicyParty.party),)
 
@@ -117,39 +120,61 @@ async def get_or_create_airline(session, name: Optional[str], *,
     return row
 
 
-class PartyRefError(ValueError):
-    """Party references that cannot be resolved: `errors` is a list of (index, message)."""
+async def resolve_party_lists(session, lists: Sequence[Sequence]) -> tuple[list, list]:
+    """Several lists of party references — each entry an id (int) or a name (str) — resolved
+    together: ONE query finds every id and every name across all the lists, and the names nobody
+    has yet are inserted in ONE statement. A policy names up to three lists (insured, reinsured,
+    retrocedent) and a dozen parties; resolving them one at a time was a round trip per name.
 
-    def __init__(self, errors: list[tuple[int, str]]):
-        super().__init__("; ".join(m for _, m in errors))
-        self.errors = errors
-
-
-async def resolve_parties(session, refs: Sequence) -> list[Party]:
-    """A list of party references — each an id (int) or a name (str, found or created) — as the
-    Party rows, in the order given. An unknown id or a party named twice is collected, not raised
-    one at a time, so the caller can report every bad entry at once."""
-    errors: list[tuple[int, str]] = []
-    ids = [r for r in refs if isinstance(r, int)]
-    known = {}
+    Returns `(resolved, errors)`: `resolved[k]` is list k's Party rows in order (entries in error
+    left out), `errors` a list of `(k, index, message)` — an unknown id, an empty name, or the same
+    party twice in one list — so the caller can report every bad entry at once.
+    """
+    ids = {r for refs in lists for r in refs if isinstance(r, int)}
+    names = {norm(r) for refs in lists for r in refs if isinstance(r, str) and r.strip()}
+    conds = []
     if ids:
-        known = {p.id: p for p in (await session.execute(
-            select(Party).where(Party.id.in_(ids)))).scalars().all()}
-    out, seen = [], {}
-    for i, ref in enumerate(refs):
-        party = known.get(ref) if isinstance(ref, int) else await get_or_create_party(session, ref)
-        if party is None:
-            errors.append((i, f"Party {ref} not found" if isinstance(ref, int)
-                           else "A party name must not be empty."))
-            continue
-        if party.id in seen:
-            errors.append((i, f"'{party.name}' is already listed at position {seen[party.id] + 1}."))
-            continue
-        seen[party.id] = i
-        out.append(party)
-    if errors:
-        raise PartyRefError(errors)
-    return out
+        conds.append(Party.id.in_(ids))
+    if names:
+        conds.append(Party.name_normalized.in_(names))
+    found = (await session.execute(select(Party).where(or_(*conds)))).scalars().all() if conds else []
+    by_id = {p.id: p for p in found}
+    by_name = {p.name_normalized: p for p in found}
+
+    # the first spelling a caller used is the one stored
+    missing: dict[str, Party] = {}
+    for refs in lists:
+        for ref in refs:
+            if isinstance(ref, str) and ref.strip() and norm(ref) not in by_name \
+                    and norm(ref) not in missing:
+                missing[norm(ref)] = Party(name=ref.strip())
+    if missing:
+        session.add_all(missing.values())
+        await session.flush()
+        by_name.update(missing)
+
+    resolved, errors = [], []
+    for k, refs in enumerate(lists):
+        out, seen = [], {}
+        for i, ref in enumerate(refs):
+            if isinstance(ref, int):
+                party = by_id.get(ref)
+                if party is None:
+                    errors.append((k, i, f"Party {ref} not found"))
+                    continue
+            elif ref.strip():
+                party = by_name[norm(ref)]
+            else:
+                errors.append((k, i, "A party name must not be empty."))
+                continue
+            if party.id in seen:
+                errors.append((k, i, f"'{party.name}' is already listed at position "
+                                     f"{seen[party.id] + 1}."))
+                continue
+            seen[party.id] = i
+            out.append(party)
+        resolved.append(out)
+    return resolved, errors
 
 
 async def get_or_create_party(session, name: Optional[str]) -> Optional[Party]:
