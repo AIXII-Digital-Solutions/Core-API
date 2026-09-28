@@ -388,6 +388,14 @@ class AirlineOut(BaseModel):
     logo_url: Optional[str]
 
 
+class CountryOut(BaseModel):
+    id: int
+    name: str = Field(description="ISO 3166-1 English short name — the full form, e.g. 'Russian Federation'.")
+    common_name: Optional[str] = Field(description="The everyday form when it differs, e.g. 'Russia'.")
+    iso2: str
+    iso3: str
+
+
 class ContactOut(BaseModel):
     id: int
     company: Optional[str]
@@ -740,6 +748,8 @@ RESPONSE_DATA: dict[tuple[str, str], Any] = {
     ("PATCH", "/leasing/leases/{lease_id}"): LeaseOut,
     ("DELETE", "/leasing/leases/{lease_id}"): LeaseOut,
 
+    ("GET", "/ref/countries"): Page[CountryOut],
+    ("GET", "/ref/countries/{country_id}"): CountryOut,
     ("GET", "/policy/policies"): Page[PolicyOut],
     ("POST", "/policy/policies"): PolicyWithAircraft,
     ("GET", "/policy/policies/{policy_id}"): PolicyWithAircraft,

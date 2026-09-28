@@ -1,7 +1,8 @@
 """Shared reference data — schema `ref` in the aixii database.
 
-The two things every other schema in the insured-aircraft domain points at: the AIRLINE that
-operates an aircraft, and the COUNTERPARTIES a contract names.
+The things every other schema in the insured-aircraft domain points at: the AIRLINE that
+operates an aircraft, the COUNTERPARTIES a contract names, and the list of COUNTRIES the portal
+picks from.
 
 `ref.airline` moved here from `api.airlines` (revision `airlines_to_ref`) once the domain was
 rebuilt around it. It is deliberately NOT merged into `ref.party`: an airline carries an ICAO and
@@ -26,7 +27,8 @@ import sys
 from typing import Optional, List
 
 from sqlalchemy import (
-    String, Text, BigInteger, Boolean, ForeignKey, Computed, UniqueConstraint, Index, text,
+    String, Text, BigInteger, Boolean, ForeignKey, Computed, UniqueConstraint, CheckConstraint,
+    Index, text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -135,6 +137,34 @@ class PartyContact(Base):
 
     __table_args__ = (
         Index("ix_party_contact_email", "email"),
+    )
+
+
+class Country(Base):
+    """Every country and territory of ISO 3166-1, plus Kosovo (XK, the user-assigned code the
+    aviation world uses). Reference data loaded by revision ref_country; the API reads
+    it and never writes it.
+
+    `name` is the ISO 3166-1 English short name, which is the FULL form — 'Russian Federation',
+    'United Kingdom of Great Britain and Northern Ireland', 'Iran (Islamic Republic of)' — and is
+    what contracts and the portal show. `common_name` is the everyday form ('Russia', 'United
+    Kingdom', 'Iran') where it differs, kept so a search for either finds the country.
+    """
+    __tablename__ = "country"
+
+    iso2: Mapped[str] = mapped_column(String(2), nullable=False)
+    iso3: Mapped[str] = mapped_column(String(3), nullable=False)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    common_name: Mapped[Optional[str]] = mapped_column(String, nullable=True, default=None)
+
+    __table_args__ = (
+        UniqueConstraint("iso2", name="uq_country_iso2"),
+        UniqueConstraint("iso3", name="uq_country_iso3"),
+        UniqueConstraint("name", name="uq_country_name"),
+        CheckConstraint("iso2 = upper(iso2) AND length(iso2) = 2", name="ck_country_iso2"),
+        CheckConstraint("iso3 = upper(iso3) AND length(iso3) = 3", name="ck_country_iso3"),
+        {"comment": "ISO 3166-1 countries and territories (+ Kosovo, XK). name = the ISO English "
+                    "short name, i.e. the full form; common_name = the everyday form for search."},
     )
 
 

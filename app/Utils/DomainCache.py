@@ -39,11 +39,12 @@ AIRLINE = "airline"
 PARTY = "party"
 AIRCRAFT_TYPE = "aircraft_type"
 ENGINE_TYPE = "engine_type"
+COUNTRY = "country"   # reference data the API never writes: only a TTL or a manual bump moves it
 # The whole domain, as ONE generation. The reference listings are invalidated precisely, by the
 # handler that changed them; the fleet reads are invalidated COARSELY, by any write to any of
 # these tables. See `invalidate_fleet` for why that is the safer of the two designs here.
 FLEET = "fleet"
-ENTITIES = frozenset({AIRLINE, PARTY, AIRCRAFT_TYPE, ENGINE_TYPE, FLEET})
+ENTITIES = frozenset({AIRLINE, PARTY, AIRCRAFT_TYPE, ENGINE_TYPE, COUNTRY, FLEET})
 
 # The URL prefixes whose writes change what a fleet read returns. An aircraft embeds its type, its
 # airline and its service block, a comparison reads leases and coverage, so all five count.
