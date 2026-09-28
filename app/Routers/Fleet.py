@@ -197,7 +197,9 @@ class ServiceIn(_NoDerivedStatus):
     agreed_value_fixed: bool = Field(
         default=False, description="True freezes the agreed value at the preliminary figure.")
     source: RecordSource = Field(
-        default=RecordSource.CIRIUM, description="Where the record came from. Defaults to cirium.")
+        default=RecordSource.CIRIUM,
+        description="Where the record came from. Left out: `cirium` when Cirium knows the tail, "
+                    "`manual` when it does not.")
     lease_currency: str = Field(default="USD", min_length=3, max_length=3)
     policy_currency: str = Field(default="USD", min_length=3, max_length=3)
 
@@ -616,7 +618,9 @@ async def create_aircraft(request: Request, response: Response, body: AircraftIn
                 session.add(ServiceInfo(aircraft_id=row.id, **fields))
             await session.flush()
             if created:
-                await _refresh_usage_status(session, [row.id])
+                await _refresh_usage_status(
+                    session, [row.id],
+                    unsourced=[] if "source" in body.service.model_fields_set else [row.id])
             row = await reload_with(session, Aircraft, row.id, *_AIRCRAFT_ONE)
             data = aircraft_json(row)
         # creating an aircraft can find-or-create its type, its engines' model and its
@@ -906,7 +910,9 @@ def _row_error(loc: tuple, msg: str) -> dict:
     description=(
         "Add up to 500 airframes in ONE transaction: all of them or none. Each item is a "
         "`POST /fleet/aircraft` body, and types, engine models and airlines are found-or-created "
-        "the same way.\n\n"
+        "the same way. Nothing has to be in Cirium: a tail, a type or an airline Cirium does not "
+        "know is created as sent (only `registration` is required), and filed as source `manual` "
+        "unless the item says otherwise.\n\n"
         "Unlike the single POST this only ADDS. An item whose registration or MSN is already in "
         "the fleet is a 409 naming every such aircraft — nothing is updated in place. Rows that "
         "cannot be resolved (a series several manufacturers build or that exists in several "
@@ -1012,7 +1018,10 @@ async def create_aircraft_bulk(request: Request, response: Response, body: BulkA
                 children.extend(AircraftEngine(aircraft_id=row.id, **e) for e in engines)
             session.add_all(children)
             await session.flush()
-            await _refresh_usage_status(session, [r.id for r in rows])
+            await _refresh_usage_status(
+                session, [r.id for r in rows],
+                unsourced=[r.id for r, (item, *_) in zip(rows, resolved)
+                           if "source" not in item.service.model_fields_set])
 
             created = (await session.execute(
                 select(Aircraft).where(Aircraft.id.in_([r.id for r in rows]))
@@ -1040,12 +1049,22 @@ async def create_aircraft_bulk(request: Request, response: Response, body: BulkA
         return error_response(request=request, exc=_ex, response=response)
 
 
-async def _refresh_usage_status(session, aircraft_ids: list[int]) -> None:
+async def _refresh_usage_status(session, aircraft_ids: list[int], *,
+                                unsourced: list[int]) -> None:
     """Fill a new aircraft's usage status from Cirium's newest revision — the same function the
     worker runs for the whole fleet after each revision. Nobody types it in. ONE statement for the
-    batch; the reload that follows picks the value up (populate_existing)."""
+    batch; the reload that follows picks the value up (populate_existing).
+
+    `unsourced` are the aircraft whose body did not say where the record came from. The default is
+    `cirium`, which is wrong for an airframe entered by hand — so one Cirium did not answer for is
+    filed as `manual` instead. A source the caller DID send is never second-guessed."""
     await session.execute(text("SELECT fleet.refresh_usage_status(CAST(:ids AS bigint[]))"),
                           {"ids": aircraft_ids})
+    if unsourced:
+        await session.execute(
+            text("UPDATE fleet.service_info SET source = 'manual' "
+                 "WHERE aircraft_id = ANY (CAST(:ids AS bigint[])) AND usage_status IS NULL"),
+            {"ids": unsourced})
 
 
 async def _aircraft_card(session, row: Aircraft, on: date, history: bool) -> dict:
