@@ -918,7 +918,11 @@ async def create_aircraft_bulk(request: Request, response: Response, body: BulkA
                         errors.append(_row_error((i, "engines", j, "engine_type"), str(ex)))
                 airline_key = norm(item.airline) if item.airline and item.airline.strip() else None
                 if airline_key and airline_key not in airlines:
-                    airlines[airline_key] = await get_or_create_airline(session, item.airline)
+                    # An airline first met here is one we insure, not an ASG airline, so it is
+                    # filed under cirium.non_asg_insured_* rather than asg_*. Either way its whole
+                    # Cirium fleet enters the tracking matviews at the next refresh.
+                    airlines[airline_key] = await get_or_create_airline(session, item.airline,
+                                                                        is_asg=False)
                 resolved.append((item, ac_type, airlines.get(airline_key), engines))
             if errors:
                 raise _RowErrors(errors)
