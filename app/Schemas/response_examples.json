@@ -56,7 +56,6 @@
       "status": "insured",
       "usage_status": "Active",
       "lease_currency": "USD",
-      "policy_currency": "USD",
       "recorded": true
      }
     },
@@ -120,7 +119,6 @@
    "status": "insured",
    "usage_status": "Active",
    "lease_currency": "USD",
-   "policy_currency": "USD",
    "recorded": true
   },
   "engines": [
@@ -187,6 +185,7 @@
     "period_from": "2026-01-01",
     "period_to": null,
     "period": "2026-01-01..",
+    "currency": "USD",
     "hull_all_risks_deductible": 1000000.0,
     "spares_deductible": null,
     "hull_deductible_buy_down": null,
@@ -258,6 +257,7 @@
      "period_from": "2026-01-01",
      "period_to": null,
      "period": "2026-01-01..",
+     "currency": "USD",
      "hull_all_risks_deductible": 1000000.0,
      "spares_deductible": null,
      "hull_deductible_buy_down": null,
@@ -311,7 +311,6 @@
    "status": "insured",
    "usage_status": "Storage",
    "lease_currency": "USD",
-   "policy_currency": "USD",
    "recorded": true
   },
   "engines": [
@@ -363,7 +362,6 @@
      "status": "insured",
      "usage_status": "Storage",
      "lease_currency": "USD",
-     "policy_currency": "USD",
      "recorded": true
     },
     "engines": [
@@ -635,7 +633,6 @@
       "status": "insured",
       "usage_status": "Storage",
       "lease_currency": "USD",
-      "policy_currency": "USD",
       "recorded": true
      }
     },
@@ -700,7 +697,6 @@
     "status": "insured",
     "usage_status": "Storage",
     "lease_currency": "USD",
-    "policy_currency": "USD",
     "recorded": true
    }
   },
@@ -763,7 +759,6 @@
     "status": "insured",
     "usage_status": "Active",
     "lease_currency": "USD",
-    "policy_currency": "USD",
     "recorded": true
    }
   },
@@ -781,6 +776,7 @@
    "period_from": "2026-01-01",
    "period_to": null,
    "period": "2026-01-01..",
+   "currency": "USD",
    "hull_all_risks_deductible": 1000000.0,
    "spares_deductible": null,
    "hull_deductible_buy_down": null,
@@ -1056,7 +1052,6 @@
     "status": "insured",
     "usage_status": "Active",
     "lease_currency": "USD",
-    "policy_currency": "USD",
     "recorded": true
    }
   },
@@ -1146,6 +1141,7 @@
   "period_from": "2026-01-01",
   "period_to": null,
   "period": "2026-01-01..",
+  "currency": "USD",
   "hull_all_risks_deductible": 1000000.0,
   "spares_deductible": null,
   "hull_deductible_buy_down": null,
@@ -1177,6 +1173,7 @@
   "period_from": "2026-01-01",
   "period_to": null,
   "period": "2026-01-01..",
+  "currency": "USD",
   "hull_all_risks_deductible": 1000000.0,
   "spares_deductible": null,
   "hull_deductible_buy_down": null,
@@ -1209,6 +1206,7 @@
   "period_from": "2026-01-01",
   "period_to": null,
   "period": "2026-01-01..",
+  "currency": "USD",
   "hull_all_risks_deductible": 1000000.0,
   "spares_deductible": null,
   "hull_deductible_buy_down": null,
@@ -1261,7 +1259,6 @@
       "status": "insured",
       "usage_status": "Active",
       "lease_currency": "USD",
-      "policy_currency": "USD",
       "recorded": true
      }
     }
@@ -1343,7 +1340,6 @@
   "status": "insured",
   "usage_status": "Storage",
   "lease_currency": "USD",
-  "policy_currency": "USD",
   "recorded": true
  },
  "SnapshotOut": {
@@ -1490,7 +1486,6 @@
      "status": "insured",
      "usage_status": "Storage",
      "lease_currency": "USD",
-     "policy_currency": "USD",
      "recorded": true
     },
     "engines": [

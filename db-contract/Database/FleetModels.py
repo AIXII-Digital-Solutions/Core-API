@@ -291,10 +291,11 @@ class ServiceInfo(Base):
     """The specification's SERVICE BLOCK, one row per aircraft — bookkeeping metadata, not
     maintenance.
 
-    These six fields used to be scattered: `agreed_value_fixed`, `source`, `status` and
-    `usage_status` on the lease record, the lease currency on the agreement, the policy currency on
-    the policy. They are one block about one aircraft, so they live together, next to the airframe
-    they describe.
+    These fields used to be scattered: `agreed_value_fixed`, `source`, `status` and `usage_status`
+    on the lease record, the lease currency on the agreement. They are one block about one
+    aircraft, so they live together, next to the airframe they describe. The POLICY currency was
+    here too and went back onto `policy.policy.currency` (revision policy_currency_on_policy): it
+    is a term of the contract, and per aircraft two airframes on one policy could disagree.
 
     `source` DEFAULTS TO CIRIUM — most records arrive from the feed, and a default matching the
     common case is one less field to fill in. `usage_status` is free text on purpose: Cirium owns
@@ -306,12 +307,10 @@ class ServiceInfo(Base):
     newest Cirium revision (fleet.sync_service_status(), run by external-worker after the fleet
     matviews are refreshed). The API shows both and accepts neither.
 
-    WHAT HOLDING THE CURRENCIES HERE GIVES UP. They are properties of a CONTRACT — one lease
-    agreement covers several aircraft in one currency, one policy likewise. Per aircraft, nothing
-    stops two aircraft on the same agreement recording different currencies for it; the schema can
-    no longer state that they must agree, so whoever writes them must. Moving `currency` back onto
-    `leasing.agreement` / `policy.policy` would restore that and leaves the rest of this table
-    alone.
+    WHAT HOLDING THE LEASE CURRENCY HERE GIVES UP. It is a property of a CONTRACT — one lease
+    agreement covers several aircraft in one currency. Per aircraft, nothing stops two aircraft on
+    the same agreement recording different currencies for it. Moving it onto `leasing.agreement`,
+    as the policy currency was moved onto the policy, would restore that.
     """
     __tablename__ = "service_info"
 
@@ -343,12 +342,6 @@ class ServiceInfo(Base):
                 "service_info_table, so nothing stops two aircraft on one agreement disagreeing - "
                 "whoever writes them must keep them consistent.",
     )
-    policy_currency: Mapped[str] = mapped_column(
-        String(3), nullable=False, server_default=text("'USD'"),
-        comment="The policy's currency. Held per aircraft since revision service_info_table, so "
-                "nothing stops two aircraft on one policy disagreeing - whoever writes them must "
-                "keep them consistent.",
-    )
 
     aircraft: Mapped["Aircraft"] = relationship("Aircraft", back_populates="service")
 
@@ -357,13 +350,10 @@ class ServiceInfo(Base):
         CheckConstraint(
             f"lease_currency IN ({CURRENCY_VALUES}) AND lease_currency = upper(lease_currency)",
             name="ck_service_info_lease_currency"),
-        CheckConstraint(
-            f"policy_currency IN ({CURRENCY_VALUES}) AND policy_currency = upper(policy_currency)",
-            name="ck_service_info_policy_currency"),
         {"comment": "The specification's service block, one row per aircraft: how the record came "
                     "to be (source), whether it is covered (status), what Cirium says the airframe "
-                    "is doing (usage_status), whether the agreed value depreciates, and the two "
-                    "contract currencies. Bookkeeping metadata, NOT maintenance."},
+                    "is doing (usage_status), whether the agreed value depreciates, and the lease "
+                    "currency. Bookkeeping metadata, NOT maintenance."},
     )
 
 

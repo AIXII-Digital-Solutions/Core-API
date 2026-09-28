@@ -46,7 +46,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .config import PolicyBase as Base
 # A ForeignKey STRING is resolved inside the OWNING MetaData, which cannot see another
 # Base's tables, so every CROSS-SCHEMA link below is made with the Column object.
-from .RefModels import Party
+from .RefModels import Party, CURRENCY_VALUES
 from .FleetModels import Aircraft
 
 
@@ -74,9 +74,9 @@ class Policy(Base):
     to flights into the one territory named in `selected_country`, e.g. Russia. Both are limits on
     the same peril, which is why they sit side by side rather than in separate rows.
 
-    The policy's CURRENCY is not here: it moved to `fleet.service_info.policy_currency` with the
-    rest of the service block (revision `service_info_table`), so it is recorded per aircraft
-    rather than per contract — see that model for what the move gives up.
+    `currency` is the contract's: every amount on the policy is in it. It was held per aircraft in
+    `fleet.service_info.policy_currency` for a while and came back here in revision
+    policy_currency_on_policy, so the aircraft on one policy can no longer disagree about it.
 
     `cut_through_clause` is the clause text itself — it is quoted in full in correspondence, and
     what matters is the wording, not a flag saying one exists.
@@ -85,6 +85,10 @@ class Policy(Base):
 
     period_from: Mapped[date] = mapped_column(Date, nullable=False)
     period_to: Mapped[Optional[date]] = mapped_column(Date, nullable=True, default=None)
+    currency: Mapped[str] = mapped_column(
+        String(3), nullable=False, server_default=text("'USD'"),
+        comment="The currency every amount on this policy is in.",
+    )
 
     # --- deductibles
     hull_all_risks_deductible: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True, default=None)
@@ -125,6 +129,8 @@ class Policy(Base):
 
     __table_args__ = (
         CheckConstraint("period_to IS NULL OR period_to >= period_from", name="ck_policy_period"),
+        CheckConstraint(f"currency IN ({CURRENCY_VALUES}) AND currency = upper(currency)",
+                        name="ck_policy_currency"),
         CheckConstraint(
             "reinsured_amount IS NULL OR reinsured_amount BETWEEN 0 AND 100",
             name="ck_policy_reinsured_amount",
