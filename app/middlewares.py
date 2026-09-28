@@ -126,11 +126,23 @@ class RequestContextMiddleware:
         state["db_proxy"] = db_proxy
         status_code = 500   # what gets logged if the app raises before sending anything
         cid_header = correlation_id.encode("ascii")
+        path_only = scope.get("path", "")
+        # A 2xx to a non-GET under a domain prefix means something changed; anything else means
+        # nothing did. Decided once, here, so no write handler can forget it.
+        domain_write = (scope.get("method") not in ("GET", "HEAD", "OPTIONS")
+                        and any(f"{p}/" in path_only or path_only.endswith(p)
+                                for p in FLEET_WRITE_PREFIXES))
 
         async def send_with_context(message):
             nonlocal status_code
             if message["type"] == "http.response.start":
                 status_code = message["status"]
+                # The fleet cache is invalidated BEFORE the client sees the answer. The handler has
+                # committed by now, and a client that saves and immediately reads back must find
+                # the new generation — bumping after the response went out left a window in which
+                # that read was served the version it had just replaced.
+                if domain_write and status_code < 400:
+                    await invalidate_fleet(getattr(app_state, "redis", None))
                 elapsed_ms = (time.perf_counter() - started) * 1000
                 message["headers"] = [
                     *message.get("headers", []),
@@ -171,14 +183,6 @@ class RequestContextMiddleware:
                        correlation_id)
             # Name the query only when the request was worth complaining about. Logging every
             # statement of every request is how a log becomes something nobody reads.
-            # One place, so a new write handler cannot forget it. A 2xx to a non-GET under a
-            # domain prefix means something changed; anything else means nothing did.
-            if (scope.get("method") not in ("GET", "HEAD", "OPTIONS")
-                    and status_code < 400
-                    and any(f"{p}/" in scope.get("path", "") or scope.get("path", "").endswith(p)
-                            for p in FLEET_WRITE_PREFIXES)):
-                await invalidate_fleet(getattr(app_state, "redis", None))
-
             if level >= logging.WARNING and cost.slowest_statement:
                 logger.log(level, "  slowest statement of %s: %.1fms  %s",
                            correlation_id, cost.slowest_seconds * 1000, cost.slowest_statement)

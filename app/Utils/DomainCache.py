@@ -1,11 +1,17 @@
 """Redis cache for the insured-fleet reference reads.
 
-WHAT IS CACHED, AND WHY ONLY THAT. The four reference listings — airlines, counterparties, aircraft
-types, engine models — are read constantly (every typeahead keystroke), are large (806 aircraft
-types, 365 engine models) and change rarely. Everything else in the domain is deliberately NOT
-cached: an aircraft, a lease, a policy, the coverage comparison and the change log are all read
-immediately after somebody writes them, and a portal user who saves a lease and is then shown the
-old one is worse off than one who waits for a query.
+WHAT IS CACHED. Two kinds, invalidated differently:
+
+  * the reference listings — airlines, counterparties, aircraft types, engine models, countries —
+    read on every typeahead keystroke and changed rarely; each has its own generation, bumped by
+    the handler that changed it;
+  * the FLEET reads — the aircraft grid, the coverage comparison, the policy list, one policy with
+    its aircraft, the coverage list — under ONE generation that the middleware bumps before the
+    answer to any write under the domain prefixes goes out (`invalidate_fleet`), so a user who
+    saves and reads straight back is never shown the version they just replaced.
+
+Not cached: one aircraft's card and the change log, which are opened right after a write and read
+too rarely for a cache to pay.
 
 INVALIDATION IS EXPLICIT, NOT A TTL. The TTL is a backstop; the correctness comes from a
 GENERATION counter per entity. A cached payload's key contains the generation, so bumping it makes
