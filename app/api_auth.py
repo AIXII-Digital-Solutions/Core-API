@@ -29,8 +29,13 @@ import hashlib
 import hmac
 import os
 import time
+import unicodedata
+import uuid
+from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Mapping, Optional
+from urllib.parse import unquote
 
 from fastapi import Depends, Request, HTTPException, status
 from fastapi.security import APIKeyHeader
@@ -173,6 +178,64 @@ async def _lookup_api_token(request: Request, x_api_key: Optional[str]) -> Optio
     return row
 
 
+# ==============================================================================================
+# who is behind a portal request
+# ==============================================================================================
+# The portal calls with the master service token on behalf of a signed-in user and says who in
+# three headers. They are believed ONLY next to a valid service token: the token proves the caller
+# is the portal, and the portal vouches for the user. From an API key — or no credential — the same
+# headers are ignored, so no other client can write history in somebody else's name.
+
+PORTAL_USER_ID = "x-portal-user-id"
+PORTAL_USER_EMAIL = "x-portal-user-email"
+PORTAL_USER_NAME = "x-portal-user-name"   # percent-encoded UTF-8
+
+
+@dataclass(frozen=True)
+class PortalUser:
+    id: str                      # the portal user's UUID, canonical form
+    email: Optional[str] = None
+    name: Optional[str] = None
+
+
+# How the current request is attributed. `set_actor` hands both to the database, where the audit
+# trigger reads them. `system` (the default) is anything that did not come through authorize().
+ACTOR_PORTAL, ACTOR_SERVICE, ACTOR_API_KEY, ACTOR_SYSTEM = "portal", "service", "api_key", "system"
+_actor_kind: ContextVar[str] = ContextVar("actor_kind", default=ACTOR_SYSTEM)
+_portal_user: ContextVar[Optional[PortalUser]] = ContextVar("portal_user", default=None)
+
+
+def _clean(value: Optional[str], limit: int) -> Optional[str]:
+    """Trimmed, control characters removed, capped. Empty -> None."""
+    if not value:
+        return None
+    value = "".join(ch for ch in value if unicodedata.category(ch)[0] != "C").strip()
+    return value[:limit] or None
+
+
+def portal_user_from_headers(headers: Mapping[str, str]) -> Optional[PortalUser]:
+    """The user a portal request is made for, or None. No id, or an id that is not a UUID, is no
+    user at all — an e-mail or a name on its own identifies nobody. The name arrives
+    percent-encoded UTF-8 (a header cannot carry Cyrillic as it is) and is decoded here."""
+    raw_id = (headers.get(PORTAL_USER_ID) or "").strip()
+    if not raw_id:
+        return None
+    try:
+        user_id = str(uuid.UUID(raw_id))
+    except ValueError:
+        logger.warning("ignoring X-Portal-User-Id that is not a UUID: %r", raw_id[:64])
+        return None
+    raw_name = headers.get(PORTAL_USER_NAME)
+    name = unquote(raw_name, encoding="utf-8", errors="replace") if raw_name else None
+    return PortalUser(id=user_id, email=_clean(headers.get(PORTAL_USER_EMAIL), 320),
+                      name=_clean(name, 256))
+
+
+def current_actor() -> tuple[str, Optional[PortalUser]]:
+    """(kind, portal user) for the request being served — what `set_actor` records."""
+    return _actor_kind.get(), _portal_user.get()
+
+
 def authorize(*required_scopes: str):
     """FastAPI dependency factory. Allows the request if EITHER a valid service token is
     presented (internal, full access) OR a valid API key whose scopes cover ``required_scopes``
@@ -186,7 +249,16 @@ def authorize(*required_scopes: str):
         x_api_key: Optional[str] = Depends(API_KEY_HEADER),
     ) -> Optional[ApiToken]:
         if _service_token_ok(x_service_token):
-            return None  # trusted internal caller — full access
+            # trusted internal caller — full access, and the only one whose user headers count
+            user = portal_user_from_headers(request.headers)
+            _actor_kind.set(ACTOR_PORTAL if user else ACTOR_SERVICE)
+            _portal_user.set(user)
+            request.state.portal_user = user
+            return None
+        # anything else says nothing about a portal user, whatever headers it sends
+        _actor_kind.set(ACTOR_API_KEY)
+        _portal_user.set(None)
+        request.state.portal_user = None
         token = await _lookup_api_token(request, x_api_key)
         if token is None:
             raise HTTPException(
@@ -206,6 +278,8 @@ def authorize(*required_scopes: str):
 
 __all__ = [
     "hash_secret", "authorize", "forget_cached_tokens", "ALL_SCOPES",
+    "PortalUser", "portal_user_from_headers", "current_actor",
+    "ACTOR_PORTAL", "ACTOR_SERVICE", "ACTOR_API_KEY", "ACTOR_SYSTEM",
     "SERVICE_TOKEN_HEADER", "API_KEY_HEADER",
     "SCOPE_FLIGHTS_READ", "SCOPE_STATUS_READ", "SCOPE_FILES_WRITE",
     "SCOPE_SCHEDULER_READ", "SCOPE_SCHEDULER_WRITE", "SCOPE_QUEUES_ADMIN",

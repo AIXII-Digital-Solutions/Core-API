@@ -24,6 +24,7 @@ from sqlalchemy.orm import joinedload, selectinload, raiseload
 from sqlalchemy.exc import IntegrityError
 
 from Database import ApiToken
+from api_auth import current_actor, ACTOR_API_KEY
 from Database.RefModels import Airline, Party, PartyContact, Country
 from Database.FleetModels import (
     Aircraft, AircraftType, AircraftEngine, EngineType, ServiceInfo, AircraftCategory,
@@ -376,9 +377,25 @@ async def set_actor(session, token: Optional[ApiToken]) -> None:
 
     EVERY write path must call this before it writes. Without it `audit.change_log.changed_by`
     records the database login — `svc_api` — which tells nobody anything.
+
+    Five settings, ONE statement: the API credential (`app.actor`), what kind of caller it is
+    (`app.actor_kind`: portal / service / api_key), and the portal user the request was made for
+    (`portal.user_id` / `user_email` / `user_name`), which `authorize()` took from the X-Portal-User-*
+    headers — and only when they came with the service token. The trigger turns them into
+    `changed_by_user`; a caller that is not an API key and names no user is recorded as System.
     """
-    actor = token.name if token is not None else "service-token"
-    await session.execute(text("SELECT set_config('app.actor', :actor, true)"), {"actor": actor})
+    kind, user = current_actor()
+    if token is not None:        # an API key is an API key, whatever the context says
+        kind, user = ACTOR_API_KEY, None
+    await session.execute(
+        text("SELECT set_config('app.actor', :actor, true), "
+             "set_config('app.actor_kind', :kind, true), "
+             "set_config('portal.user_id', :uid, true), "
+             "set_config('portal.user_email', :email, true), "
+             "set_config('portal.user_name', :name, true)"),
+        {"actor": token.name if token is not None else "service-token", "kind": kind,
+         "uid": user.id if user else "", "email": (user.email or "") if user else "",
+         "name": (user.name or "") if user else ""})
 
 
 # ==============================================================================================
@@ -925,6 +942,21 @@ def diff_rows(old_row: Optional[dict], new_row: Optional[dict], labels: dict) ->
     return out
 
 
+SYSTEM_USER = "System"
+
+
+def changed_by_user_json(row) -> Optional[dict]:
+    """The portal user behind a change: `{id, email, name}`. System — migrations, loaders, the
+    status sync, the service token used without a user, and every entry written before users were
+    recorded — is `{id: null, email: null, name: "System"}`. null only for another API client."""
+    if row.changed_by_user_id:
+        return {"id": row.changed_by_user_id, "email": row.changed_by_user_email,
+                "name": row.changed_by_user_name}
+    if row.changed_by_user_name == SYSTEM_USER:
+        return {"id": None, "email": None, "name": SYSTEM_USER}
+    return None
+
+
 def audit_entry(row, labels: dict) -> dict:
     """One change-log row as the API returns it: the readable diff plus the raw snapshots, so a
     client that wants a field the diff skipped can still reach it."""
@@ -936,6 +968,7 @@ def audit_entry(row, labels: dict) -> dict:
         "operation": row.operation,
         "changed_at": iso(row.changed_at),
         "changed_by": row.changed_by,
+        "changed_by_user": changed_by_user_json(row),
         "changes": diff_rows(row.old_row, row.new_row, labels),
         "old_row": row.old_row,
         "new_row": row.new_row,

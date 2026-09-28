@@ -22,6 +22,12 @@ DELETE leaves its own pre-image behind and the history of a deleted object still
 `changed_by` is the `app.actor` GUC when the API sets it (`set_config('app.actor', …, true)` per
 transaction), falling back to the database login for anything done outside the API.
 
+`changed_by_user_*` is the PORTAL USER the change was made for (revision audit_portal_user): the
+`portal.user_id` / `user_email` / `user_name` GUCs, which the API sets from the X-Portal-User-*
+headers only when they arrive with the service token. With no user, the trigger records
+`changed_by_user_name = 'System'` (id and e-mail null) — unless the caller is another API client
+(`app.actor_kind = 'api_key'`), which leaves all three null.
+
 Alembic reads THIS file (db-contract); `app/Database/AuditModels.py` is core-api's runtime copy.
 The trigger function and the triggers themselves are raw SQL in the migration — autogenerate
 cannot see them, which is also what stops it from proposing to drop them.
@@ -56,6 +62,9 @@ class ChangeLog(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now(),
     )
     changed_by: Mapped[Optional[str]] = mapped_column(String, nullable=True, default=None)
+    changed_by_user_id: Mapped[Optional[str]] = mapped_column(String, nullable=True, default=None)
+    changed_by_user_email: Mapped[Optional[str]] = mapped_column(String, nullable=True, default=None)
+    changed_by_user_name: Mapped[Optional[str]] = mapped_column(String, nullable=True, default=None)
     old_row: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True, default=None)
     new_row: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True, default=None)
 
@@ -68,6 +77,8 @@ class ChangeLog(Base):
         # each group of equal timestamps, which it does, visibly, as an Incremental Sort.
         Index("ix_change_log_changed_at", changed_at.desc(), id.desc()),
         Index("ix_change_log_changed_by", "changed_by"),
+        Index("ix_change_log_changed_by_user_id", "changed_by_user_id",
+              postgresql_where=text("changed_by_user_id IS NOT NULL")),
         # "Everything that happened to aircraft 13" has to reach the child tables, and the log
         # stores the CHILD's id — the aircraft is only named inside the snapshot. Without these
         # the query reads every engine and coverage entry ever written to throw almost all of
