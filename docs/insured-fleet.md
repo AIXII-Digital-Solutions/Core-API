@@ -405,9 +405,10 @@ All endpoints are under `/api/v1`. Reads need `insurance:read`, writes `insuranc
 /leasing/agreements               GET  POST  .  /{id} GET PATCH DELETE
 /leasing/leases                   GET  POST  .  /{id} GET PATCH DELETE
 
-/policy/policies                  GET  POST  .  /{id} GET PATCH DELETE
+/policy/policies                  GET  POST  .  /{id} GET PATCH DELETE   (parties are lists; `aircraft` rides along on POST/PATCH)
 /policy/policies/{id}/renew       POST
 /policy/coverage                  GET  POST  .  /{id} PATCH DELETE
+/policy/coverage/bulk             POST   many aircraft onto one policy, all-or-nothing
 /policy/coverage/compare          GET    required vs provided, per aircraft
 
 /history                          GET    the change log, filtered

@@ -9,6 +9,13 @@ it is written; `policy.coverage` says which airframes it covers and over what wi
 holds ONE policy at a time — a second overlapping coverage is refused by the database, not by a
 check here.
 
+A POLICY NAMES SEVERAL PARTIES. Insured, reinsured and retrocedent are each a LIST — co-insured
+group companies, a panel of reinsurers — held in policy.policy_party in schedule order.
+
+ONE REQUEST PER POLICY. The aircraft a policy covers are sent WITH it (`aircraft` on POST and
+PATCH) or added in one go at POST /policy/coverage/bulk: all in one transaction, never one request
+per airframe.
+
 RENEWAL IS THE NORMAL CASE. `POST /policy/policies/{id}/renew` creates next year's policy with the
 same terms and carries the chosen aircraft onto it, leaving the expiring policy and its coverage
 rows untouched. That is what makes an aircraft's insurance history readable years later: a chain of
@@ -16,28 +23,29 @@ coverage rows, each pointing at the contract that was in force.
 """
 from datetime import date, timedelta
 from decimal import Decimal
-from typing import Optional
+from typing import Annotated, Optional, Union
 
 from fastapi import Request, Response, Depends, Query, status
-from pydantic import BaseModel, Field, model_validator
-from sqlalchemy import select, func
+from fastapi.exceptions import RequestValidationError
+from pydantic import BaseModel, Field, StrictInt, StringConstraints, field_validator, model_validator
+from sqlalchemy import select, func, or_, exists
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import joinedload, raiseload
 
 from Config import setup_logger
 from settings import Router
 from Database import ApiToken
-from Database.RefModels import Party
 from Database.FleetModels import Aircraft
 from Database.LeasingModels import AircraftLease
-from Database.PolicyModels import Policy, Coverage
+from Database.PolicyModels import Policy, Coverage, PolicyParty, PartyRole
 from api_auth import authorize, SCOPE_INSURANCE_READ, SCOPE_INSURANCE_WRITE
 from Utils import success_response, warning_response, error_response
 from Utils.ResponsesFunc import build_responses
 from Utils.DomainCache import FLEET, PARTY, cached, invalidate
 from Utils.DomainCommon import (
-    reload_with, AIRCRAFT_BRIEF, page_with_total,
-    DB, set_actor, apply_sort, SortError, integrity_error, find_aircraft, get_or_create_party,
+    reload_with, AIRCRAFT_BRIEF, POLICY_LOAD, COVERAGE_LOAD, page_with_total,
+    DB, set_actor, apply_sort, SortError, integrity_error, find_aircraft, norm_reg,
+    resolve_parties, PartyRefError, policy_parties,
     policy_json, coverage_json, aircraft_json, lease_in_force, num, enum_value,
 )
 
@@ -65,12 +73,10 @@ _READ = [Depends(authorize(SCOPE_INSURANCE_READ))]
 _OK = {status.HTTP_200_OK, status.HTTP_400_BAD_REQUEST, status.HTTP_404_NOT_FOUND,
        status.HTTP_409_CONFLICT, status.HTTP_500_INTERNAL_SERVER_ERROR}
 
-# three to-one parties — three round trips as selectin, none as a join
-_POLICY_LOAD = (joinedload(Policy.insured), joinedload(Policy.reinsured),
-                joinedload(Policy.retrocedent))
-_COVERAGE_LOAD = (joinedload(Coverage.policy).joinedload(Policy.insured),
-                  joinedload(Coverage.policy).joinedload(Policy.reinsured),
-                  joinedload(Coverage.policy).joinedload(Policy.retrocedent))
+# the parties are a collection per policy: selectin, declared once in DomainCommon
+_POLICY_LOAD = POLICY_LOAD
+_COVERAGE_LOAD = COVERAGE_LOAD
+_ROLES = (PartyRole.INSURED, PartyRole.REINSURED, PartyRole.RETROCEDENT)
 
 # The three columns that exist on BOTH the lease and the policy, so required and provided cover can
 # be compared. Kept in one place so /coverage/compare and the docs cannot drift apart.
@@ -81,17 +87,39 @@ COMPARED = ("combined_single_limit", "hull_spares_war_excess_liability", "hull_d
 # bodies
 # ==============================================================================================
 
-class PolicyIn(BaseModel):
-    """Parties are NAMES, found or created in ref.party — the insured on an aviation policy is
-    routinely a lessor or a holding company rather than the operating airline."""
-    insured: Optional[str] = Field(default=None, max_length=256)
-    insured_id: Optional[int] = None
-    reinsured: Optional[str] = Field(default=None, max_length=256)
-    retrocedent: Optional[str] = Field(default=None, max_length=256)
+PartyRef = Union[StrictInt, Annotated[str, StringConstraints(strip_whitespace=True, min_length=1,
+                                                              max_length=256)]]
 
-    period_from: date
-    period_to: Optional[date] = None
+_PARTY_DESC = ("A LIST, in the order the schedule gives them. Each entry is a ref.party id (a "
+               "number) or a name (a string, found or created). A single value is accepted too.")
 
+
+def _listify(value):
+    """One party where a list is expected is still one party: accept it, as the API used to."""
+    if value is None or isinstance(value, list):
+        return value
+    return [value]
+
+
+class CoverageItem(BaseModel):
+    """One aircraft to put on a policy: by id, or looked up by MSN / registration. The window
+    defaults to the policy period — set it for a mid-term delivery or a redelivery."""
+    aircraft_id: Optional[int] = None
+    registration: Optional[str] = Field(default=None, max_length=32)
+    msn: Optional[str] = Field(default=None, max_length=64)
+    covered_from: Optional[date] = Field(default=None, description="Defaults to period_from.")
+    covered_to: Optional[date] = Field(default=None, description="Defaults to period_to.")
+
+    @model_validator(mode="after")
+    def _check(self):
+        if self.aircraft_id is None and not (self.registration or self.msn):
+            raise ValueError("give `aircraft_id`, or `registration` / `msn` to look one up")
+        if self.covered_from and self.covered_to and self.covered_to < self.covered_from:
+            raise ValueError("`covered_to` must not be earlier than `covered_from`")
+        return self
+
+
+class _PolicyTerms(BaseModel):
     hull_all_risks_deductible: Optional[Decimal] = Field(default=None, ge=0)
     spares_deductible: Optional[Decimal] = Field(default=None, ge=0)
     hull_deductible_buy_down: Optional[Decimal] = Field(default=None, ge=0)
@@ -106,37 +134,78 @@ class PolicyIn(BaseModel):
         default=None, max_length=128,
         description="The one territory the reduced confiscation limit applies to, e.g. 'Russia'.")
     reinsured_amount: Optional[Decimal] = Field(
-        default=None, ge=0, le=100, description="PERCENT of the risk ceded (97.5 = 97.5 %).")
+        default=None, ge=0, le=100,
+        description="PERCENT ceded, of `reinsured_amount_of` (97.5 of 100 = 97.5 %).")
+    reinsured_amount_of: Optional[Decimal] = Field(
+        default=None, ge=0, le=100,
+        description="The share, in percent, that `reinsured_amount` is taken of (the 100 in "
+                    "'97.5 of 100').")
     cut_through_clause: Optional[str] = None
+
+
+class PolicyIn(_PolicyTerms):
+    """Parties are ids or NAMES, found or created in ref.party — the insured on an aviation policy
+    is routinely a lessor or a holding company rather than the operating airline."""
+    insured: list[PartyRef] = Field(min_length=1, max_length=50, description=_PARTY_DESC)
+    reinsured: list[PartyRef] = Field(default_factory=list, max_length=50, description=_PARTY_DESC)
+    retrocedent: list[PartyRef] = Field(default_factory=list, max_length=50,
+                                        description=_PARTY_DESC)
+    period_from: date
+    period_to: Optional[date] = None
+    aircraft: list[CoverageItem] = Field(
+        default_factory=list, max_length=1000,
+        description="The aircraft this policy covers, created with it in the same transaction.")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy(cls, value):
+        # `insured_id` and single values are how the API used to take parties
+        if isinstance(value, dict):
+            value = dict(value)
+            legacy = value.pop("insured_id", None)
+            for key in ("insured", "reinsured", "retrocedent"):
+                value[key] = _listify(value.get(key))
+            if legacy is not None and not value.get("insured"):
+                value["insured"] = [legacy]
+            for key in ("insured", "reinsured", "retrocedent"):
+                if value.get(key) is None:
+                    value.pop(key, None)
+        return value
 
     @model_validator(mode="after")
     def _check(self):
-        if self.insured_id is None and not self.insured:
-            raise ValueError("give `insured` (a name) or `insured_id`")
         if self.period_to is not None and self.period_to < self.period_from:
             raise ValueError("`period_to` must not be earlier than `period_from`")
         return self
 
 
-class PolicyPatch(BaseModel):
-    insured: Optional[str] = Field(default=None, max_length=256)
-    reinsured: Optional[str] = Field(default=None, max_length=256)
-    retrocedent: Optional[str] = Field(default=None, max_length=256)
+class PolicyPatch(_PolicyTerms):
+    """Only the fields sent are touched. A party list that is sent REPLACES that role's list
+    (`[]` empties reinsured or retrocedent; insured cannot be empty)."""
+    insured: Optional[list[PartyRef]] = Field(default=None, min_length=1, max_length=50,
+                                              description=_PARTY_DESC)
+    reinsured: Optional[list[PartyRef]] = Field(default=None, max_length=50, description=_PARTY_DESC)
+    retrocedent: Optional[list[PartyRef]] = Field(default=None, max_length=50,
+                                                  description=_PARTY_DESC)
     period_from: Optional[date] = None
     period_to: Optional[date] = None
-    hull_all_risks_deductible: Optional[Decimal] = Field(default=None, ge=0)
-    spares_deductible: Optional[Decimal] = Field(default=None, ge=0)
-    hull_deductible_buy_down: Optional[Decimal] = Field(default=None, ge=0)
-    hull_deductible_aggregate: Optional[Decimal] = Field(default=None, ge=0)
-    combined_single_limit: Optional[Decimal] = Field(default=None, ge=0)
-    hull_war_overall_limit: Optional[Decimal] = Field(default=None, ge=0)
-    hull_spares_limit: Optional[Decimal] = Field(default=None, ge=0)
-    hull_spares_war_excess_liability: Optional[Decimal] = Field(default=None, ge=0)
-    hull_war_confiscation_limit: Optional[Decimal] = Field(default=None, ge=0)
-    hull_war_confiscation_limit_selected_country: Optional[Decimal] = Field(default=None, ge=0)
-    selected_country: Optional[str] = Field(default=None, max_length=128)
-    reinsured_amount: Optional[Decimal] = Field(default=None, ge=0, le=100)
-    cut_through_clause: Optional[str] = None
+    aircraft: Optional[list[CoverageItem]] = Field(
+        default=None, max_length=1000,
+        description="The COMPLETE set of aircraft on this policy. Aircraft not yet on it are "
+                    "added, aircraft left out are taken off (their coverage rows on THIS policy "
+                    "are deleted), aircraft already on it keep their window unless the item sets "
+                    "`covered_from` / `covered_to`. Omit the field to leave the aircraft alone.")
+
+    @field_validator("insured", "reinsured", "retrocedent", mode="before")
+    @classmethod
+    def _one_or_many(cls, value):
+        return _listify(value)
+
+    @model_validator(mode="after")
+    def _check(self):
+        if "insured" in self.model_fields_set and not self.insured:
+            raise ValueError("a policy must keep at least one insured")
+        return self
 
 
 class CoverageIn(BaseModel):
@@ -156,6 +225,11 @@ class CoverageIn(BaseModel):
         return self
 
 
+class CoverageBulkIn(BaseModel):
+    policy_id: int
+    aircraft: list[CoverageItem] = Field(min_length=1, max_length=1000)
+
+
 class CoveragePatch(BaseModel):
     covered_from: Optional[date] = None
     covered_to: Optional[date] = None
@@ -168,7 +242,203 @@ class RenewIn(BaseModel):
     period_to: Optional[date] = None
     carry_aircraft: bool = Field(
         default=True, description="Move the expiring policy's aircraft onto the new one.")
-    overrides: PolicyPatch = Field(default_factory=PolicyPatch)
+    overrides: PolicyPatch = Field(
+        default_factory=PolicyPatch,
+        description="Anything to change on the new policy. `aircraft` is not accepted here — "
+                    "`carry_aircraft` decides that.")
+
+    @model_validator(mode="after")
+    def _check(self):
+        if self.overrides.aircraft is not None:
+            raise ValueError("`overrides.aircraft` is not accepted: use `carry_aircraft`, then "
+                             "PATCH the new policy's `aircraft`")
+        return self
+
+
+# ==============================================================================================
+# writing the parts of a policy that are lists
+# ==============================================================================================
+
+class _ItemErrors(Exception):
+    """Entries of a list the write cannot resolve, collected so every one is reported at once.
+    Raised INSIDE the session, which rolls the whole write back, then rendered as the ordinary
+    422 with `field` = `body.<list>.<index>...`."""
+
+    def __init__(self, errors: list[dict]):
+        super().__init__(f"{len(errors)} error(s)")
+        self.errors = errors
+
+
+class _Overlap(Exception):
+    def __init__(self, clashes: list[str]):
+        super().__init__(", ".join(clashes))
+        self.clashes = clashes
+
+
+def _err(loc: tuple, msg: str) -> dict:
+    return {"loc": loc, "msg": msg, "type": "value_error"}
+
+
+async def _write_parties(session, policy_id: int, role: PartyRole, refs: list,
+                         existing: list[PolicyParty], errors: list[dict]) -> None:
+    """Make `role` on the policy exactly `refs`, in that order. Rows already right are left
+    alone and only the difference is written, so resending an unchanged list adds nothing to the
+    audit log."""
+    try:
+        parties = await resolve_parties(session, refs)
+    except PartyRefError as ex:
+        errors.extend(_err(("body", role.value, i), msg) for i, msg in ex.errors)
+        return
+    wanted = {party.id: position for position, party in enumerate(parties, 1)}
+    held = set()
+    for link in existing:
+        if link.party_id not in wanted:
+            await session.delete(link)
+            continue
+        held.add(link.party_id)
+        if link.position != wanted[link.party_id]:
+            link.position = wanted[link.party_id]
+    session.add_all(PolicyParty(policy_id=policy_id, party_id=pid, role=role, position=pos)
+                    for pid, pos in wanted.items() if pid not in held)
+
+
+async def _resolve_items(session, policy: Policy, items: list[CoverageItem], loc: tuple):
+    """Each item as (aircraft_id, registration, covered_from, covered_to), the aircraft found in
+    ONE query whatever mix of ids, MSNs and registrations was sent. Raises _ItemErrors."""
+    ids = [it.aircraft_id for it in items if it.aircraft_id is not None]
+    regs = [norm_reg(it.registration) for it in items
+            if it.aircraft_id is None and it.registration]
+    msns = [it.msn.strip() for it in items if it.aircraft_id is None and it.msn and it.msn.strip()]
+    conds = [c for c in (Aircraft.id.in_(ids) if ids else None,
+                         Aircraft.registration_normalized.in_(regs) if regs else None,
+                         Aircraft.msn.in_(msns) if msns else None) if c is not None]
+    rows = (await session.execute(
+        select(Aircraft.id, Aircraft.registration, Aircraft.registration_normalized, Aircraft.msn)
+        .where(or_(*conds)))).all()
+    by_id = {r.id: r for r in rows}
+    by_reg = {r.registration_normalized: r for r in rows}
+    by_msn = {r.msn: r for r in rows if r.msn}
+
+    errors, out, seen = [], [], {}
+    for i, it in enumerate(items):
+        if it.aircraft_id is not None:
+            hit, field = by_id.get(it.aircraft_id), "aircraft_id"
+        else:
+            # MSN first, as everywhere in this domain: a tail number can be reissued
+            hit = by_msn.get(it.msn.strip()) if it.msn and it.msn.strip() else None
+            hit = hit or (by_reg.get(norm_reg(it.registration)) if it.registration else None)
+            field = "registration" if it.registration else "msn"
+        if hit is None:
+            errors.append(_err((*loc, i, field),
+                               "No such aircraft. Add the airframe at POST /fleet/aircraft first."))
+            continue
+        if hit.id in seen:
+            errors.append(_err((*loc, i, field), f"{hit.registration} is already row {seen[hit.id]}."))
+            continue
+        seen[hit.id] = i
+        start = it.covered_from or policy.period_from
+        end = it.covered_to if it.covered_to is not None else policy.period_to
+        if end is not None and end < start:
+            errors.append(_err((*loc, i, "covered_to"),
+                               "The window ends before it starts (check the policy period)."))
+            continue
+        out.append((hit.id, hit.registration, start, end, it))
+    if errors:
+        raise _ItemErrors(errors)
+    return out
+
+
+def _overlaps(a_from, a_to, b_from, b_to) -> bool:
+    """Inclusive ranges, NULL end = open — the same test as ex_coverage_no_overlap."""
+    return (b_to is None or a_from <= b_to) and (a_to is None or b_from <= a_to)
+
+
+async def _insert_coverages(session, policy: Policy, resolved: list) -> int:
+    """Insert coverage rows, having first checked — in ONE query — that none overlaps a coverage
+    the aircraft already holds. The database would refuse it anyway (ex_coverage_no_overlap), but
+    only for the first clash and without saying which aircraft; this names all of them."""
+    if not resolved:
+        return 0
+    held = (await session.execute(
+        select(Coverage.aircraft_id, Coverage.policy_id, Coverage.covered_from, Coverage.covered_to)
+        .where(Coverage.aircraft_id.in_([r[0] for r in resolved])))).all()
+    by_aircraft: dict[int, list] = {}
+    for h in held:
+        by_aircraft.setdefault(h.aircraft_id, []).append(h)
+    clashes = [
+        f"{reg} (policy {h.policy_id}, {h.covered_from.isoformat()}.."
+        f"{h.covered_to.isoformat() if h.covered_to else ''})"
+        for aid, reg, start, end, _ in resolved
+        for h in by_aircraft.get(aid, [])
+        if _overlaps(start, end, h.covered_from, h.covered_to)
+    ]
+    if clashes:
+        raise _Overlap(clashes)
+    session.add_all(Coverage(aircraft_id=aid, policy_id=policy.id, covered_from=start,
+                             covered_to=end) for aid, _, start, end, _ in resolved)
+    await session.flush()
+    return len(resolved)
+
+
+async def _sync_coverages(session, policy: Policy, items: list[CoverageItem]) -> None:
+    """Make the policy cover exactly `items`: add, take off, and re-window only what differs."""
+    resolved = await _resolve_items(session, policy, items, ("body", "aircraft"))
+    wanted = {r[0]: r for r in resolved}
+    current = (await session.execute(
+        select(Coverage).where(Coverage.policy_id == policy.id))).scalars().all()
+    on_policy = set()
+    for c in current:
+        want = wanted.get(c.aircraft_id)
+        if want is None:
+            await session.delete(c)
+            continue
+        on_policy.add(c.aircraft_id)
+        item = want[4]
+        if item.covered_from is not None:
+            c.covered_from = item.covered_from
+        if "covered_to" in item.model_fields_set:
+            c.covered_to = item.covered_to
+    await session.flush()
+    await _insert_coverages(session, policy, [r for r in resolved if r[0] not in on_policy])
+
+
+async def _policy_detail(session, policy_id: int) -> dict:
+    """The policy with every aircraft it covers — what GET /policies/{id} returns, and what every
+    write that can change either hands back."""
+    row = (await session.execute(
+        select(Policy).where(Policy.id == policy_id).options(*_POLICY_LOAD)
+        .execution_options(populate_existing=True))).scalar_one()
+    covered = (await session.execute(
+        select(Coverage, Aircraft).join(Aircraft, Aircraft.id == Coverage.aircraft_id)
+        .where(Coverage.policy_id == policy_id).options(*AIRCRAFT_BRIEF)
+        .order_by(Aircraft.registration, Coverage.covered_from)
+        .execution_options(populate_existing=True)
+    )).all()
+    data = policy_json(row)
+    data["aircraft"] = [
+        {"coverage_id": c.id, "covered_from": c.covered_from.isoformat(),
+         "covered_to": c.covered_to.isoformat() if c.covered_to else None,
+         "aircraft": aircraft_json(a, engines=False)}
+        for c, a in covered
+    ]
+    return data
+
+
+def _write_failed(request, response, ex):
+    """The shared translation of a failed policy/coverage write."""
+    if isinstance(ex, _ItemErrors):
+        raise RequestValidationError(ex.errors)
+    if isinstance(ex, _Overlap):
+        return warning_response(
+            request=request, response=response,
+            msg=("Already covered over part of this period — an aircraft holds one policy at a "
+                 f"time. Nothing was saved: {', '.join(ex.clashes)}"),
+            status_code=status.HTTP_409_CONFLICT)
+    code, msg = integrity_error(ex)
+    return warning_response(request=request, response=response, msg=msg, status_code=code)
+
+
+_WRITE_ERRORS = (_ItemErrors, _Overlap, IntegrityError)
 
 
 # ==============================================================================================
@@ -178,13 +448,15 @@ class RenewIn(BaseModel):
 @router.get(
     path="/policies",
     description=(
-        "Insurance policies. `insured_id` narrows to one party; `on_date` keeps only the policies "
-        "in force that day; `active` is shorthand for on_date=today. Returns `{items, total}`."
+        "Insurance policies. `insured_id` narrows to the policies that party is insured on, "
+        "`party_id` to those it appears on in any role; `on_date` keeps only the policies in force "
+        "that day; `active` is shorthand for on_date=today. Returns `{items, total}`."
     ),
     responses=build_responses(include=_OK), dependencies=_READ,
 )
 async def list_policies(request: Request, response: Response,
                         insured_id: Optional[int] = Query(None),
+                        party_id: Optional[int] = Query(None, description="Any role."),
                         on_date: Optional[date] = Query(None),
                         active: bool = Query(False, description="Shorthand for on_date=today."),
                         limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0),
@@ -192,7 +464,12 @@ async def list_policies(request: Request, response: Response,
     try:
         conds = []
         if insured_id is not None:
-            conds.append(Policy.insured_id == insured_id)
+            conds.append(exists().where(PolicyParty.policy_id == Policy.id,
+                                        PolicyParty.party_id == insured_id,
+                                        PolicyParty.role == PartyRole.INSURED))
+        if party_id is not None:
+            conds.append(exists().where(PolicyParty.policy_id == Policy.id,
+                                        PolicyParty.party_id == party_id))
         on = on_date or (date.today() if active else None)
         if on is not None:
             conds.append(Policy.period_from <= on)
@@ -215,10 +492,13 @@ async def list_policies(request: Request, response: Response,
 @router.post(
     path="/policies",
     description=(
-        "Add a policy. Identified by insured and period — sending the same pair twice is a 409, "
-        "not a duplicate. `reinsured_amount` is a percent. Put the aircraft on it afterwards with "
-        "POST /policy/coverage, or renew an existing policy to carry them across."
+        "Add a policy — with its aircraft, in ONE request. `insured` (at least one), `reinsured` "
+        "and `retrocedent` are lists of party ids or names. `aircraft` puts airframes on it in "
+        "the same transaction: all saved or none, and an aircraft already covered over part of "
+        "the period is a 409 naming every such aircraft. `reinsured_amount` is a percent of "
+        "`reinsured_amount_of`. Returns the policy with its aircraft."
     ),
+    status_code=status.HTTP_201_CREATED,
     responses=build_responses(include=_OK | {status.HTTP_201_CREATED}),
 )
 async def create_policy(request: Request, response: Response, body: PolicyIn,
@@ -226,31 +506,26 @@ async def create_policy(request: Request, response: Response, body: PolicyIn,
     try:
         async with request.app.state.db_client.session(DB) as session:
             await set_actor(session, token)
-            if body.insured_id is not None:
-                insured = await session.get(Party, body.insured_id)
-                if insured is None:
-                    return warning_response(request=request, response=response,
-                                            msg=f"Party {body.insured_id} not found",
-                                            status_code=status.HTTP_404_NOT_FOUND)
-            else:
-                insured = await get_or_create_party(session, body.insured)
-            reinsured = await get_or_create_party(session, body.reinsured)
-            retrocedent = await get_or_create_party(session, body.retrocedent)
-
-            fields = body.model_dump(exclude={"insured", "insured_id", "reinsured", "retrocedent"})
-            row = Policy(insured_id=insured.id,
-                         reinsured_id=reinsured.id if reinsured else None,
-                         retrocedent_id=retrocedent.id if retrocedent else None, **fields)
+            row = Policy(**body.model_dump(
+                exclude={"insured", "reinsured", "retrocedent", "aircraft"}))
             session.add(row)
             await session.flush()
-            row = await reload_with(session, Policy, row.id, *_POLICY_LOAD)
-            data = policy_json(row)
+            errors: list[dict] = []
+            for role in _ROLES:
+                await _write_parties(session, row.id, role, getattr(body, role.value), [], errors)
+            if errors:
+                raise _ItemErrors(errors)
+            await session.flush()
+            if body.aircraft:
+                resolved = await _resolve_items(session, row, body.aircraft, ("body", "aircraft"))
+                await _insert_coverages(session, row, resolved)
+            data = await _policy_detail(session, row.id)
         await invalidate(request, PARTY)   # a counterparty may have been created
         return success_response(request=request, response=response, data=data,
+                                msg=f"Policy created with {len(data['aircraft'])} aircraft",
                                 status_code=status.HTTP_201_CREATED)
-    except IntegrityError as _ex:
-        code, msg = integrity_error(_ex)
-        return warning_response(request=request, response=response, msg=msg, status_code=code)
+    except _WRITE_ERRORS as _ex:
+        return _write_failed(request, response, _ex)
     except Exception as _ex:
         return error_response(request=request, exc=_ex, response=response)
 
@@ -261,34 +536,25 @@ async def create_policy(request: Request, response: Response, body: PolicyIn,
 async def get_policy(request: Request, response: Response, policy_id: int):
     try:
         async with request.app.state.db_client.read_session(DB) as session:
-            row = (await session.execute(
-                select(Policy).where(Policy.id == policy_id).options(*_POLICY_LOAD)
-            )).scalar_one_or_none()
-            if row is None:
+            found = (await session.execute(
+                select(Policy.id).where(Policy.id == policy_id))).scalar_one_or_none()
+            if found is None:
                 return warning_response(request=request, response=response,
                                         msg=f"Policy {policy_id} not found",
                                         status_code=status.HTTP_404_NOT_FOUND)
-            covered = (await session.execute(
-                select(Coverage, Aircraft).join(Aircraft, Aircraft.id == Coverage.aircraft_id)
-                .where(Coverage.policy_id == policy_id).options(*AIRCRAFT_BRIEF)
-                .order_by(Aircraft.registration)
-            )).all()
-            data = policy_json(row)
-            data["aircraft"] = [
-                {"coverage_id": c.id, "covered_from": c.covered_from.isoformat(),
-                 "covered_to": c.covered_to.isoformat() if c.covered_to else None,
-                 "aircraft": aircraft_json(a, engines=False)}
-                for c, a in covered
-            ]
+            data = await _policy_detail(session, policy_id)
         return success_response(request=request, response=response, data=data)
     except Exception as _ex:
         return error_response(request=request, exc=_ex, response=response)
 
 
 @router.patch(path="/policies/{policy_id}",
-              description="Endorse or correct a policy. Only the fields sent are touched and the "
-                          "previous values stay in the audit log. A RENEWAL is not a patch — use "
-                          "/renew, so the expiring contract keeps its own terms.",
+              description="Endorse or correct a policy — terms, parties and aircraft in ONE "
+                          "request. Only the fields sent are touched; a party list sent replaces "
+                          "that role, and `aircraft` sent is the complete set (added / taken off "
+                          "to match), all in one transaction. Previous values stay in the audit "
+                          "log. A RENEWAL is not a patch — use /renew, so the expiring contract "
+                          "keeps its own terms. Returns the policy with its aircraft.",
               responses=build_responses(include=_OK))
 async def update_policy(request: Request, response: Response, policy_id: int, body: PolicyPatch,
                         token: Optional[ApiToken] = Depends(authorize(SCOPE_INSURANCE_WRITE))):
@@ -303,24 +569,26 @@ async def update_policy(request: Request, response: Response, policy_id: int, bo
                 return warning_response(request=request, response=response,
                                         msg=f"Policy {policy_id} not found",
                                         status_code=status.HTTP_404_NOT_FOUND)
-            for name, column in (("insured", "insured_id"), ("reinsured", "reinsured_id"),
-                                 ("retrocedent", "retrocedent_id")):
-                if name in fields:
-                    party = await get_or_create_party(session, fields.pop(name))
-                    setattr(row, column, party.id if party else None)
+            fields.pop("aircraft", None)
+            errors: list[dict] = []
+            for role in _ROLES:
+                if role.value in fields:
+                    await _write_parties(session, row.id, role, fields.pop(role.value) or [],
+                                         policy_parties(row, role), errors)
+            if errors:
+                raise _ItemErrors(errors)
             for key, value in fields.items():
                 setattr(row, key, value)
             await session.flush()
+            if body.aircraft is not None:
+                await _sync_coverages(session, row, body.aircraft)
             # `updated_at` is computed by the database on UPDATE, so SQLAlchemy expires it after
-            # the flush. Read it here, inside the session, or serializing the row later triggers
-            # lazy IO outside the greenlet context and the request 500s.
-            row = await reload_with(session, Policy, row.id, *_POLICY_LOAD)
-            data = policy_json(row)
+            # the flush; the re-read below (populate_existing) is what makes serializing it safe.
+            data = await _policy_detail(session, row.id)
         await invalidate(request, PARTY)   # a counterparty may have been created
         return success_response(request=request, response=response, data=data)
-    except IntegrityError as _ex:
-        code, msg = integrity_error(_ex)
-        return warning_response(request=request, response=response, msg=msg, status_code=code)
+    except _WRITE_ERRORS as _ex:
+        return _write_failed(request, response, _ex)
     except Exception as _ex:
         return error_response(request=request, exc=_ex, response=response)
 
@@ -365,15 +633,21 @@ async def renew_policy(request: Request, response: Response, policy_id: int, bod
             values = {name: getattr(old, name) for name in carried}
             values.update(body.overrides.model_dump(exclude_unset=True,
                                                     exclude={"insured", "reinsured", "retrocedent",
-                                                             "period_from", "period_to"}))
-            for name, column in (("insured", "insured_id"), ("reinsured", "reinsured_id"),
-                                 ("retrocedent", "retrocedent_id")):
-                override = getattr(body.overrides, name, None)
-                if override:
-                    party = await get_or_create_party(session, override)
-                    values[column] = party.id if party else None
+                                                             "period_from", "period_to",
+                                                             "aircraft"}))
             new = Policy(period_from=period_from, period_to=period_to, **values)
             session.add(new)
+            await session.flush()
+            # the parties carry across in their order, unless an override names a role afresh
+            errors: list[dict] = []
+            sent = body.overrides.model_fields_set
+            for role in _ROLES:
+                refs = (getattr(body.overrides, role.value) or [] if role.value in sent
+                        else [x.party_id for x in policy_parties(old, role)])
+                await _write_parties(session, new.id, role, refs, [], errors)
+            if errors:
+                raise _ItemErrors([{**e, "loc": ("body", "overrides", *e["loc"][1:])}
+                                   for e in errors])
             await session.flush()
 
             moved = 0
@@ -615,6 +889,41 @@ async def create_coverage(request: Request, response: Response, body: CoverageIn
     except IntegrityError as _ex:
         code, msg = integrity_error(_ex)
         return warning_response(request=request, response=response, msg=msg, status_code=code)
+    except Exception as _ex:
+        return error_response(request=request, exc=_ex, response=response)
+
+
+@router.post(
+    path="/coverage/bulk",
+    description=(
+        "Put many aircraft on one policy in ONE request: up to 1000 items, each `aircraft_id` or "
+        "`registration` / `msn`, with an optional window (defaults to the policy period). All are "
+        "saved or none. An aircraft already covered over part of its window is a 409 naming every "
+        "such aircraft; an item that matches no aircraft, or repeats another, is a 422 per item "
+        "(`body.aircraft.<index>.<field>`). Returns the policy with all its aircraft."
+    ),
+    status_code=status.HTTP_201_CREATED,
+    responses=build_responses(include=_OK | {status.HTTP_201_CREATED}),
+)
+async def create_coverage_bulk(request: Request, response: Response, body: CoverageBulkIn,
+                               token: Optional[ApiToken] = Depends(authorize(SCOPE_INSURANCE_WRITE))):
+    try:
+        async with request.app.state.db_client.session(DB) as session:
+            await set_actor(session, token)
+            policy = (await session.execute(
+                select(Policy).where(Policy.id == body.policy_id))).scalar_one_or_none()
+            if policy is None:
+                return warning_response(request=request, response=response,
+                                        msg=f"Policy {body.policy_id} not found",
+                                        status_code=status.HTTP_404_NOT_FOUND)
+            resolved = await _resolve_items(session, policy, body.aircraft, ("body", "aircraft"))
+            added = await _insert_coverages(session, policy, resolved)
+            data = await _policy_detail(session, policy.id)
+        return success_response(request=request, response=response, data=data,
+                                msg=f"{added} aircraft added to the policy",
+                                status_code=status.HTTP_201_CREATED)
+    except _WRITE_ERRORS as _ex:
+        return _write_failed(request, response, _ex)
     except Exception as _ex:
         return error_response(request=request, exc=_ex, response=response)
 

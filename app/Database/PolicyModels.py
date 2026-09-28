@@ -6,8 +6,10 @@ both sides on purpose, so the two can be compared. Never collapse them.
 
 Two levels:
 
-    policy.policy     the contract — one row per (insured, period). Every limit and deductible
-                      lives here, once, because they are written for the fleet and not per tail.
+    policy.policy     the contract. Every limit and deductible lives here, once, because they
+                      are written for the fleet and not per tail.
+    policy.policy_party  who is party to it, and as what: any number of insured, reinsured and
+                      retrocedent entities per policy, in the order the schedule lists them.
     policy.coverage   one row per aircraft per policy: which airframe that contract covers, and
                       over which window inside the policy period.
 
@@ -21,7 +23,9 @@ force in 2025" is the first, "who changed this deductible and when" is the secon
 
 `insured` / `reinsured` / `retrocedent` are `ref.party`, not `api.airlines` — the insured on an
 aviation policy is routinely a lessor, a holding company or a group entity rather than the
-operating airline, and the reinsurance chain is never an airline at all. The operating airline is
+operating airline, and the reinsurance chain is never an airline at all. Each role can name SEVERAL
+entities (co-insured group companies, a panel of reinsurers), which is why they are rows of
+`policy.policy_party` rather than three columns (revision policy_parties_mtow). The operating airline is
 reachable through `policy.coverage -> fleet.aircraft.airline_id`.
 
 Alembic reads THIS file (db-contract); `app/Database/PolicyModels.py` is core-api's runtime copy.
@@ -30,10 +34,11 @@ import inspect
 import sys
 from datetime import date
 from decimal import Decimal
+from enum import Enum as PyEnum
 from typing import Optional, List
 
 from sqlalchemy import (
-    String, Text, BigInteger, Numeric, Date, ForeignKey,
+    String, Text, BigInteger, SmallInteger, Numeric, Date, ForeignKey, Enum,
     UniqueConstraint, CheckConstraint, Index, text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -45,13 +50,24 @@ from .RefModels import Party
 from .FleetModels import Aircraft
 
 
+class PartyRole(PyEnum):
+    """The part an entity plays in one policy. Stored as the VALUE."""
+    INSURED = "insured"
+    REINSURED = "reinsured"
+    RETROCEDENT = "retrocedent"
+
+
+_ROLE_ENUM = Enum(PartyRole, name="party_role", schema="policy",
+                  values_callable=lambda e: [m.value for m in e])
+
+
 class Policy(Base):
     """One insurance contract over one period.
 
-    Natural key (insured_id, period_from, period_to) with NULLS NOT DISTINCT, so an open-ended
-    policy collides with itself instead of being inserted twice by a find-or-create write path.
-    There is no policy number column: the source schedules identify a policy by insured and period,
-    and a number that is only sometimes present cannot carry the identity.
+    NO NATURAL KEY. It used to be (insured, period), which stopped meaning anything once a policy
+    could name several insured entities (revision policy_parties_mtow). Nothing else identifies a
+    policy either — the schedules carry no number — so two policies with the same parties and
+    period are possible, and the write path is where duplicates have to be avoided.
 
     THE WAR COLUMNS. `hull_war_confiscation_limit` is the general confiscation limit;
     `hull_war_confiscation_limit_selected_country` is the (usually much lower) limit that applies
@@ -66,19 +82,6 @@ class Policy(Base):
     what matters is the wording, not a flag saying one exists.
     """
     __tablename__ = "policy"
-
-    insured_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey(Party.__table__.c.id, ondelete="RESTRICT"), nullable=False,
-        index=False,   # uq_policy_insured_period leads with it
-    )
-    reinsured_id: Mapped[Optional[int]] = mapped_column(
-        BigInteger, ForeignKey(Party.__table__.c.id, ondelete="RESTRICT"),
-        nullable=True, default=None, index=True,
-    )
-    retrocedent_id: Mapped[Optional[int]] = mapped_column(
-        BigInteger, ForeignKey(Party.__table__.c.id, ondelete="RESTRICT"),
-        nullable=True, default=None, index=True,
-    )
 
     period_from: Mapped[date] = mapped_column(Date, nullable=False)
     period_to: Mapped[Optional[date]] = mapped_column(Date, nullable=True, default=None)
@@ -100,27 +103,35 @@ class Policy(Base):
     )
     selected_country: Mapped[Optional[str]] = mapped_column(String, nullable=True, default=None)
 
-    # --- reinsurance. A PERCENT of the risk ceded (97.5 = 97.5 %), not a fraction.
+    # --- reinsurance. PERCENTS, not fractions: `reinsured_amount` of `reinsured_amount_of` —
+    # 97.5 of 100 reads "97.5 % of the 100 % share" — so a cession off a partial share is stated
+    # as the schedule states it, not pre-multiplied.
     reinsured_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 3), nullable=True, default=None)
+    reinsured_amount_of: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(6, 3), nullable=True, default=None,
+        comment="The share, in percent, that reinsured_amount is a percentage of (97.5 of 100).",
+    )
 
     cut_through_clause: Mapped[Optional[str]] = mapped_column(Text, nullable=True, default=None)
 
-    insured: Mapped["Party"] = relationship(Party, foreign_keys=[insured_id], lazy="raise_on_sql")
-    reinsured: Mapped[Optional["Party"]] = relationship(Party, foreign_keys=[reinsured_id], lazy="raise_on_sql")
-    retrocedent: Mapped[Optional["Party"]] = relationship(Party, foreign_keys=[retrocedent_id], lazy="raise_on_sql")
+    parties: Mapped[List["PolicyParty"]] = relationship(
+        "PolicyParty", back_populates="policy", lazy="raise_on_sql",
+        order_by="(PolicyParty.role, PolicyParty.position, PolicyParty.id)",
+        cascade="all, delete-orphan",
+    )
     coverages: Mapped[List["Coverage"]] = relationship(
         "Coverage", back_populates="policy", lazy="raise_on_sql",
     )
 
     __table_args__ = (
-        UniqueConstraint(
-            "insured_id", "period_from", "period_to", name="uq_policy_insured_period",
-            postgresql_nulls_not_distinct=True,
-        ),
         CheckConstraint("period_to IS NULL OR period_to >= period_from", name="ck_policy_period"),
         CheckConstraint(
             "reinsured_amount IS NULL OR reinsured_amount BETWEEN 0 AND 100",
             name="ck_policy_reinsured_amount",
+        ),
+        CheckConstraint(
+            "reinsured_amount_of IS NULL OR reinsured_amount_of BETWEEN 0 AND 100",
+            name="ck_policy_reinsured_amount_of",
         ),
         CheckConstraint(
             "LEAST(hull_all_risks_deductible, spares_deductible, hull_deductible_buy_down,"
@@ -130,6 +141,31 @@ class Policy(Base):
             name="ck_policy_amounts_non_negative",
         ),
         Index("ix_policy_period", "period_from", "period_to"),
+    )
+
+
+class PolicyParty(Base):
+    """One entity in one role on one policy. `position` is the order the schedule lists them in,
+    1-based per role; the first insured is the one a one-line summary shows."""
+    __tablename__ = "policy_party"
+
+    policy_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("policy.policy.id", ondelete="CASCADE"), nullable=False,
+        index=False,   # uq_policy_party leads with it
+    )
+    party_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey(Party.__table__.c.id, ondelete="RESTRICT"), nullable=False,
+        index=True,
+    )
+    role: Mapped[PartyRole] = mapped_column(_ROLE_ENUM, nullable=False)
+    position: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default=text("1"))
+
+    policy: Mapped["Policy"] = relationship("Policy", back_populates="parties", lazy="raise_on_sql")
+    party: Mapped["Party"] = relationship(Party, lazy="raise_on_sql")
+
+    __table_args__ = (
+        UniqueConstraint("policy_id", "role", "party_id", name="uq_policy_party"),
+        CheckConstraint("position >= 1", name="ck_policy_party_position"),
     )
 
 

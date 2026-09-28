@@ -28,7 +28,7 @@ from Database import ApiToken
 from Database.RefModels import Airline, Party, PartyContact
 from Database.FleetModels import Aircraft
 from Database.LeasingModels import Agreement
-from Database.PolicyModels import Policy
+from Database.PolicyModels import PolicyParty, PartyRole
 from api_auth import authorize, SCOPE_INSURANCE_READ, SCOPE_INSURANCE_WRITE
 from Utils import success_response, warning_response, error_response
 from Utils.ResponsesFunc import build_responses
@@ -61,9 +61,12 @@ _PARTY_SORTS = {
 # disagree with reality the way a stored flag eventually does.
 _PARTY_ROLE_LINKS = {
     "lessor": lambda: exists().where(Agreement.lessor_id == Party.id),
-    "insured": lambda: exists().where(Policy.insured_id == Party.id),
-    "reinsured": lambda: exists().where(Policy.reinsured_id == Party.id),
-    "retrocedent": lambda: exists().where(Policy.retrocedent_id == Party.id),
+    "insured": lambda: exists().where(PolicyParty.party_id == Party.id,
+                                      PolicyParty.role == PartyRole.INSURED),
+    "reinsured": lambda: exists().where(PolicyParty.party_id == Party.id,
+                                        PolicyParty.role == PartyRole.REINSURED),
+    "retrocedent": lambda: exists().where(PolicyParty.party_id == Party.id,
+                                          PolicyParty.role == PartyRole.RETROCEDENT),
 }
 
 _READ = [Depends(authorize(SCOPE_INSURANCE_READ))]

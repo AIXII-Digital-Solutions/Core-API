@@ -48,7 +48,7 @@ from Database.FleetModels import (
     RecordSource, AircraftCategory, MAX_ENGINES,
 )
 from Database.LeasingModels import AircraftLease, Agreement
-from Database.PolicyModels import Coverage, Policy
+from Database.PolicyModels import Coverage
 from api_auth import authorize, SCOPE_INSURANCE_READ, SCOPE_INSURANCE_WRITE
 from Utils import success_response, warning_response, error_response
 from Utils.ResponsesFunc import build_responses
@@ -59,7 +59,7 @@ from Utils.DomainCommon import (
     DB, norm, norm_reg, set_actor, apply_sort, SortError, AmbiguousType, integrity_error, find_aircraft,
     get_or_create_airline, get_or_create_aircraft_type, get_or_create_engine_type,
     aircraft_json, type_json, engine_json, fitted_engine_ids, service_json,
-    lease_json, coverage_json, lease_in_force, covers,
+    lease_json, coverage_json, lease_in_force, covers, COVERAGE_LOAD,
 )
 
 logger = setup_logger("fleet_api")
@@ -225,6 +225,10 @@ class AircraftIn(BaseModel):
                     "series are separate types. Omit it when only one exists; a 400 lists the "
                     "choices when several do. A type that has to be CREATED defaults to passenger.")
     airline: Optional[str] = Field(default=None, max_length=256)
+    mtow_kg: Optional[int] = Field(
+        default=None, gt=0, le=1_000_000,
+        description="Maximum take-off weight of this airframe, kg. The lookup pre-fills it from "
+                    "Cirium (Operating MTOW, else Certified, converted from lbs).")
     is_asg: bool = Field(
         default=False,
         description="Only for an airline this call CREATES: TRUE files it as an ASG airline "
@@ -252,6 +256,10 @@ class AircraftPatch(BaseModel):
                                   "moves the aircraft to that role of its current series, which "
                                   "is how a converted freighter is recorded.")
     airline: Optional[str] = Field(default=None, max_length=256)
+    mtow_kg: Optional[int] = Field(
+        default=None, gt=0, le=1_000_000,
+        description="Maximum take-off weight of this airframe, kg. The lookup pre-fills it from "
+                    "Cirium (Operating MTOW, else Certified, converted from lbs).")
 
 
 # ==============================================================================================
@@ -596,6 +604,8 @@ async def create_aircraft(request: Request, response: Response, body: AircraftIn
                     row.msn = body.msn.strip()
                 if norm_reg(body.registration) != row.registration_normalized:
                     row.registration = body.registration.strip()
+            if body.mtow_kg is not None:
+                row.mtow_kg = body.mtow_kg
             if ac_type is not None:
                 row.aircraft_type_id = ac_type.id
             if airline is not None:
@@ -713,6 +723,8 @@ SELECT o."Registration"                                   AS registration,
        o."Number Of Engines"                              AS engine_count,
        o."Engine Manufacturer"                            AS engine_manufacturer,
        o."Engine Master Series"                           AS engine_master_series,
+       round(coalesce(o."Operating MTOW (lbs)", o."Certified MTOW (lbs)") * 0.45359237)
+                                                          AS mtow_kg,
        al.id                                              AS airline_id,
        al.airline_name                                    AS airline_name,
        al.is_asg                                          AS airline_is_asg,
@@ -785,6 +797,7 @@ def _lookup_json(r) -> dict:
         "aircraft_type": r.master_series,
         "manufacturer": r.manufacturer,
         "aircraft_category": r.category,
+        "mtow_kg": int(r.mtow_kg) if r.mtow_kg else None,
         "airline": r.airline_name or r.operator,
         "airline_id": r.airline_id,
         # the matched airline's own flag; for one posting would create, the default it gets
@@ -1005,7 +1018,8 @@ async def create_aircraft_bulk(request: Request, response: Response, body: BulkA
                     registration=item.registration.strip(),
                     msn=item.msn.strip() if item.msn and item.msn.strip() else None,
                     aircraft_type_id=ac_type.id if ac_type else None,
-                    airline_id=airline.id if airline else None))
+                    airline_id=airline.id if airline else None,
+                    mtow_kg=item.mtow_kg))
             session.add_all(rows)
             await session.flush()
 
@@ -1081,9 +1095,7 @@ async def _aircraft_card(session, row: Aircraft, on: date, history: bool) -> dic
     )).scalars().all()
     coverages = (await session.execute(
         select(Coverage).where(Coverage.aircraft_id == row.id)
-        .options(joinedload(Coverage.policy).joinedload(Policy.insured),
-                 joinedload(Coverage.policy).joinedload(Policy.reinsured),
-                 joinedload(Coverage.policy).joinedload(Policy.retrocedent))
+        .options(*COVERAGE_LOAD)
         .order_by(Coverage.covered_from.desc(), Coverage.id.desc())
     )).scalars().all()
 

@@ -236,6 +236,11 @@ class Aircraft(Base):
         BigInteger, ForeignKey(Airline.__table__.c.id, ondelete="RESTRICT"),
         index=True, nullable=True, default=None,
     )
+    mtow_kg: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True, default=None,
+        comment="Maximum take-off weight, kg, of THIS airframe. Pre-filled from Cirium's "
+                "Operating MTOW (else Certified), converted from lbs; editable.",
+    )
 
     aircraft_type: Mapped[Optional["AircraftType"]] = relationship("AircraftType", lazy="raise_on_sql")
     airline: Mapped[Optional["Airline"]] = relationship(Airline, lazy="raise_on_sql")
@@ -254,6 +259,7 @@ class Aircraft(Base):
     __table_args__ = (
         Index("ix_aircraft_registration_normalized", "registration_normalized"),
         Index("uq_aircraft_msn", "msn", unique=True, postgresql_where=text("msn IS NOT NULL")),
+        CheckConstraint("mtow_kg IS NULL OR mtow_kg > 0", name="ck_aircraft_mtow_kg"),
     )
 
 
