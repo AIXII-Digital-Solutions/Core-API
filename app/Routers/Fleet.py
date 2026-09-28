@@ -1108,6 +1108,9 @@ async def _aircraft_card(session, row: Aircraft, on: date, history: bool) -> dic
     out["as_of"] = on.isoformat()
     out["lease"] = lease_json(current_lease, on=on, service=row.service)
     out["coverage"] = coverage_json(current_cover)
+    # The currency is the POLICY's (policy.policy.currency), not the aircraft's; the card names the
+    # one of the policy in force on `as_of` so the portal need not dig it out of `coverage`.
+    out["policy_currency"] = current_cover.policy.currency if current_cover else None
     if history:
         out["lease_history"] = [lease_json(l, on=on, service=row.service) for l in leases]
         out["coverage_history"] = [coverage_json(c) for c in coverages]

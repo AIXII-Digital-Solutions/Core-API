@@ -592,6 +592,9 @@ class AircraftCard(AircraftOut):
     as_of: Date
     lease: Optional[LeaseOut] = Field(description="The lease terms in force on `as_of`.")
     coverage: Optional[CoverageOut] = Field(description="The coverage in force on `as_of`.")
+    policy_currency: Optional[str] = Field(
+        description="USD | EUR | GBP — the currency of the policy in force on `as_of` (the policy's "
+                    "own `currency`); null when no policy covers the aircraft that day.")
     lease_history: Optional[List[LeaseOut]] = Field(None, description="Absent with history=false.")
     coverage_history: Optional[List[CoverageOut]] = Field(None, description="Absent with history=false.")
 
