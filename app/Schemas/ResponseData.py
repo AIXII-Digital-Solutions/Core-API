@@ -390,7 +390,7 @@ class AirlineOut(BaseModel):
 
 class CountryOut(BaseModel):
     id: int
-    name: str = Field(description="ISO 3166-1 English short name — the full form, e.g. 'Russian Federation'.")
+    name: str = Field(description="The official form in plain English, e.g. 'Russian Federation', 'Islamic Republic of Iran', 'United Kingdom'.")
     common_name: Optional[str] = Field(description="The everyday form when it differs, e.g. 'Russia'.")
     iso2: str
     iso3: str
