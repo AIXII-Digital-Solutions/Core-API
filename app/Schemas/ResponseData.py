@@ -451,6 +451,7 @@ class AircraftBrief(BaseModel):
     id: int
     registration: Optional[str]
     msn: Optional[str]
+    mtow_kg: Optional[int] = Field(description="Maximum take-off weight, kg.")
     aircraft_type: Optional[AircraftTypeOut]
     airline: Optional[AirlineOut]
     service: ServiceOut
@@ -478,6 +479,7 @@ class AircraftLookup(BaseModel):
     aircraft_type: Optional[str] = Field(description="Master series, as POST /fleet/aircraft takes it.")
     manufacturer: Optional[str]
     aircraft_category: str = Field(description="passenger | cargo | other, from Cirium's Primary Usage.")
+    mtow_kg: Optional[int] = Field(description="Operating MTOW (else Certified) from Cirium, lbs converted to kg.")
     airline: Optional[str] = Field(description="The ref.airline name when one matched, else Cirium's Operator.")
     airline_id: Optional[int] = Field(description="null when no ref.airline name matched — posting creates the airline.")
     is_asg: bool = Field(description="The matched airline's own flag; false (the creation default) when none matched.")
@@ -530,9 +532,9 @@ class AgreementWithLeases(AgreementOut):
 
 class PolicyOut(BaseModel):
     id: int
-    insured: Optional[PartyBrief]
-    reinsured: Optional[PartyBrief]
-    retrocedent: Optional[PartyBrief]
+    insured: List[PartyBrief] = Field(description="Every insured entity, in schedule order (at least one).")
+    reinsured: List[PartyBrief] = Field(description="Every reinsurer, in schedule order; may be empty.")
+    retrocedent: List[PartyBrief] = Field(description="Every retrocedent, in schedule order; may be empty.")
     period_from: Optional[Date]
     period_to: Optional[Date]
     period: str = Field(description="`from..to`, open-ended when there is no end date.")
@@ -547,7 +549,8 @@ class PolicyOut(BaseModel):
     hull_war_confiscation_limit: Optional[float]
     hull_war_confiscation_limit_selected_country: Optional[float]
     selected_country: Optional[str]
-    reinsured_amount: Optional[float]
+    reinsured_amount: Optional[float] = Field(description="Percent ceded, of reinsured_amount_of.")
+    reinsured_amount_of: Optional[float] = Field(description="The share, in percent, reinsured_amount is taken of (97.5 of 100).")
     cut_through_clause: Optional[str]
     created_at: Optional[DateTime]
     updated_at: Optional[DateTime]
@@ -738,13 +741,14 @@ RESPONSE_DATA: dict[tuple[str, str], Any] = {
     ("DELETE", "/leasing/leases/{lease_id}"): LeaseOut,
 
     ("GET", "/policy/policies"): Page[PolicyOut],
-    ("POST", "/policy/policies"): PolicyOut,
+    ("POST", "/policy/policies"): PolicyWithAircraft,
     ("GET", "/policy/policies/{policy_id}"): PolicyWithAircraft,
-    ("PATCH", "/policy/policies/{policy_id}"): PolicyOut,
+    ("PATCH", "/policy/policies/{policy_id}"): PolicyWithAircraft,
     ("DELETE", "/policy/policies/{policy_id}"): PolicyOut,
     ("POST", "/policy/policies/{policy_id}/renew"): PolicyRenewed,
     ("GET", "/policy/coverage"): Page[CoverageOut],
     ("POST", "/policy/coverage"): CoverageOut,
+    ("POST", "/policy/coverage/bulk"): PolicyWithAircraft,
     ("GET", "/policy/coverage/compare"): CoverComparePage,
     ("PATCH", "/policy/coverage/{coverage_id}"): CoverageOut,
     ("DELETE", "/policy/coverage/{coverage_id}"): CoverageOut,

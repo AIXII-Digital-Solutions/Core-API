@@ -50,7 +50,7 @@ _TABLES = {
     "ref": {"airline", "party", "party_contact"},
     "fleet": {"aircraft_type", "engine_type", "aircraft", "aircraft_engine", "service_info"},
     "leasing": {"agreement", "aircraft_lease"},
-    "policy": {"policy", "coverage"},
+    "policy": {"policy", "policy_party", "coverage"},
     # the manual overrides of the forecast fleet sheet (Routers/AircraftDetails.py)
     "forecast": {"aircraft_info_edits"},
 }

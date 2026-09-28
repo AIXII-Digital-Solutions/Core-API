@@ -29,6 +29,7 @@
      "id": 13,
      "registration": "YL-ABC",
      "msn": "1234",
+     "mtow_kg": 78000,
      "aircraft_type": {
       "id": 9,
       "manufacturer": "Airbus",
@@ -92,6 +93,7 @@
   "id": 13,
   "registration": "YL-ABC",
   "msn": "1234",
+  "mtow_kg": 78000,
   "aircraft_type": {
    "id": 9,
    "manufacturer": "Airbus",
@@ -173,13 +175,15 @@
    "aircraft": null,
    "policy": {
     "id": 51,
-    "insured": {
-     "id": 4,
-     "name": "Insured Co",
-     "details": "note"
-    },
-    "reinsured": null,
-    "retrocedent": null,
+    "insured": [
+     {
+      "id": 4,
+      "name": "Insured Co",
+      "details": "note"
+     }
+    ],
+    "reinsured": [],
+    "retrocedent": [],
     "period_from": "2026-01-01",
     "period_to": null,
     "period": "2026-01-01..",
@@ -195,6 +199,7 @@
     "hull_war_confiscation_limit_selected_country": null,
     "selected_country": null,
     "reinsured_amount": 0.5,
+    "reinsured_amount_of": 100.0,
     "cut_through_clause": "yes",
     "created_at": "2026-09-25T10:00:00+00:00",
     "updated_at": "2026-09-25T10:00:00+00:00"
@@ -241,13 +246,15 @@
     "aircraft": null,
     "policy": {
      "id": 51,
-     "insured": {
-      "id": 4,
-      "name": "Insured Co",
-      "details": "note"
-     },
-     "reinsured": null,
-     "retrocedent": null,
+     "insured": [
+      {
+       "id": 4,
+       "name": "Insured Co",
+       "details": "note"
+      }
+     ],
+     "reinsured": [],
+     "retrocedent": [],
      "period_from": "2026-01-01",
      "period_to": null,
      "period": "2026-01-01..",
@@ -263,6 +270,7 @@
      "hull_war_confiscation_limit_selected_country": null,
      "selected_country": null,
      "reinsured_amount": 0.5,
+     "reinsured_amount_of": 100.0,
      "cut_through_clause": "yes",
      "created_at": "2026-09-25T10:00:00+00:00",
      "updated_at": "2026-09-25T10:00:00+00:00"
@@ -276,6 +284,7 @@
   "id": 13,
   "registration": "2-EZBC",
   "msn": "2866",
+  "mtow_kg": 78000,
   "aircraft_type": {
    "id": 16,
    "manufacturer": "Airbus",
@@ -327,6 +336,7 @@
     "id": 13,
     "registration": "2-EZBC",
     "msn": "2866",
+    "mtow_kg": 78000,
     "aircraft_type": {
      "id": 16,
      "manufacturer": "Airbus",
@@ -598,6 +608,7 @@
      "id": 13,
      "registration": "2-EZBC",
      "msn": "2866",
+     "mtow_kg": 78000,
      "aircraft_type": {
       "id": 16,
       "manufacturer": "Airbus",
@@ -662,6 +673,7 @@
    "id": 13,
    "registration": "2-EZBC",
    "msn": "2866",
+   "mtow_kg": 78000,
    "aircraft_type": {
     "id": 16,
     "manufacturer": "Airbus",
@@ -724,6 +736,7 @@
    "id": 13,
    "registration": "YL-ABC",
    "msn": "1234",
+   "mtow_kg": 78000,
    "aircraft_type": {
     "id": 9,
     "manufacturer": "Airbus",
@@ -756,13 +769,15 @@
   },
   "policy": {
    "id": 51,
-   "insured": {
-    "id": 4,
-    "name": "Insured Co",
-    "details": "note"
-   },
-   "reinsured": null,
-   "retrocedent": null,
+   "insured": [
+    {
+     "id": 4,
+     "name": "Insured Co",
+     "details": "note"
+    }
+   ],
+   "reinsured": [],
+   "retrocedent": [],
    "period_from": "2026-01-01",
    "period_to": null,
    "period": "2026-01-01..",
@@ -778,6 +793,7 @@
    "hull_war_confiscation_limit_selected_country": null,
    "selected_country": null,
    "reinsured_amount": 0.5,
+   "reinsured_amount_of": 100.0,
    "cut_through_clause": "yes",
    "created_at": "2026-09-25T10:00:00+00:00",
    "updated_at": "2026-09-25T10:00:00+00:00"
@@ -1013,6 +1029,7 @@
    "id": 13,
    "registration": "YL-ABC",
    "msn": "1234",
+   "mtow_kg": 78000,
    "aircraft_type": {
     "id": 9,
     "manufacturer": "Airbus",
@@ -1117,13 +1134,15 @@
  },
  "PolicyOut": {
   "id": 51,
-  "insured": {
-   "id": 4,
-   "name": "Insured Co",
-   "details": "note"
-  },
-  "reinsured": null,
-  "retrocedent": null,
+  "insured": [
+   {
+    "id": 4,
+    "name": "Insured Co",
+    "details": "note"
+   }
+  ],
+  "reinsured": [],
+  "retrocedent": [],
   "period_from": "2026-01-01",
   "period_to": null,
   "period": "2026-01-01..",
@@ -1139,19 +1158,22 @@
   "hull_war_confiscation_limit_selected_country": null,
   "selected_country": null,
   "reinsured_amount": 0.5,
+  "reinsured_amount_of": 100.0,
   "cut_through_clause": "yes",
   "created_at": "2026-09-25T10:00:00+00:00",
   "updated_at": "2026-09-25T10:00:00+00:00"
  },
  "PolicyRenewed": {
   "id": 51,
-  "insured": {
-   "id": 4,
-   "name": "Insured Co",
-   "details": "note"
-  },
-  "reinsured": null,
-  "retrocedent": null,
+  "insured": [
+   {
+    "id": 4,
+    "name": "Insured Co",
+    "details": "note"
+   }
+  ],
+  "reinsured": [],
+  "retrocedent": [],
   "period_from": "2026-01-01",
   "period_to": null,
   "period": "2026-01-01..",
@@ -1167,6 +1189,7 @@
   "hull_war_confiscation_limit_selected_country": null,
   "selected_country": null,
   "reinsured_amount": 0.5,
+  "reinsured_amount_of": 100.0,
   "cut_through_clause": "yes",
   "created_at": "2026-09-25T10:00:00+00:00",
   "updated_at": "2026-09-25T10:00:00+00:00",
@@ -1174,13 +1197,15 @@
  },
  "PolicyWithAircraft": {
   "id": 51,
-  "insured": {
-   "id": 4,
-   "name": "Insured Co",
-   "details": "note"
-  },
-  "reinsured": null,
-  "retrocedent": null,
+  "insured": [
+   {
+    "id": 4,
+    "name": "Insured Co",
+    "details": "note"
+   }
+  ],
+  "reinsured": [],
+  "retrocedent": [],
   "period_from": "2026-01-01",
   "period_to": null,
   "period": "2026-01-01..",
@@ -1196,6 +1221,7 @@
   "hull_war_confiscation_limit_selected_country": null,
   "selected_country": null,
   "reinsured_amount": 0.5,
+  "reinsured_amount_of": 100.0,
   "cut_through_clause": "yes",
   "created_at": "2026-09-25T10:00:00+00:00",
   "updated_at": "2026-09-25T10:00:00+00:00",
@@ -1208,6 +1234,7 @@
      "id": 13,
      "registration": "YL-ABC",
      "msn": "1234",
+     "mtow_kg": 78000,
      "aircraft_type": {
       "id": 9,
       "manufacturer": "Airbus",
@@ -1403,6 +1430,7 @@
  "AircraftLookup": {
   "registration": "A6-ANA",
   "msn": "4468",
+  "mtow_kg": 78000,
   "aircraft_type": "A320",
   "manufacturer": "Airbus",
   "aircraft_category": "passenger",
@@ -1435,6 +1463,7 @@
     "id": 13,
     "registration": "2-EZBC",
     "msn": "2866",
+    "mtow_kg": 78000,
     "aircraft_type": {
      "id": 16,
      "manufacturer": "Airbus",

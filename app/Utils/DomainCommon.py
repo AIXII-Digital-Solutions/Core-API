@@ -30,7 +30,7 @@ from Database.FleetModels import (
     TEMPLATE_VIEWS,
 )
 from Database.LeasingModels import Agreement, AircraftLease
-from Database.PolicyModels import Policy, Coverage
+from Database.PolicyModels import Policy, Coverage, PolicyParty, PartyRole
 
 DB = "aixii"
 
@@ -71,6 +71,12 @@ AIRCRAFT_ONE = (
 )
 ENGINE_LOAD = (joinedload(AircraftEngine.engine_type),)
 
+# A policy's parties are a COLLECTION (several per role), so selectin — one extra statement for a
+# whole page of policies — with the party joined onto each link row. `policy_json` reads them.
+POLICY_LOAD = (selectinload(Policy.parties).joinedload(PolicyParty.party),)
+COVERAGE_LOAD = (joinedload(Coverage.policy).selectinload(Policy.parties)
+                 .joinedload(PolicyParty.party),)
+
 
 # ==============================================================================================
 # normalisation — must mirror the STORED generated columns exactly
@@ -109,6 +115,41 @@ async def get_or_create_airline(session, name: Optional[str], *,
         session.add(row)
         await session.flush()
     return row
+
+
+class PartyRefError(ValueError):
+    """Party references that cannot be resolved: `errors` is a list of (index, message)."""
+
+    def __init__(self, errors: list[tuple[int, str]]):
+        super().__init__("; ".join(m for _, m in errors))
+        self.errors = errors
+
+
+async def resolve_parties(session, refs: Sequence) -> list[Party]:
+    """A list of party references — each an id (int) or a name (str, found or created) — as the
+    Party rows, in the order given. An unknown id or a party named twice is collected, not raised
+    one at a time, so the caller can report every bad entry at once."""
+    errors: list[tuple[int, str]] = []
+    ids = [r for r in refs if isinstance(r, int)]
+    known = {}
+    if ids:
+        known = {p.id: p for p in (await session.execute(
+            select(Party).where(Party.id.in_(ids)))).scalars().all()}
+    out, seen = [], {}
+    for i, ref in enumerate(refs):
+        party = known.get(ref) if isinstance(ref, int) else await get_or_create_party(session, ref)
+        if party is None:
+            errors.append((i, f"Party {ref} not found" if isinstance(ref, int)
+                           else "A party name must not be empty."))
+            continue
+        if party.id in seen:
+            errors.append((i, f"'{party.name}' is already listed at position {seen[party.id] + 1}."))
+            continue
+        seen[party.id] = i
+        out.append(party)
+    if errors:
+        raise PartyRefError(errors)
+    return out
 
 
 async def get_or_create_party(session, name: Optional[str]) -> Optional[Party]:
@@ -612,6 +653,7 @@ def aircraft_json(a: Optional[Aircraft], *, engines: bool = True) -> Optional[di
         "msn": a.msn,
         "aircraft_type": aircraft_type_json(a.aircraft_type),
         "airline": airline_json(a.airline),
+        "mtow_kg": a.mtow_kg,
         "service": service_json(a.service),
     }
     if engines:
@@ -671,14 +713,20 @@ def lease_json(l: Optional[AircraftLease], *, on: Optional[date] = None,
     }
 
 
+def policy_parties(p: Policy, role: PartyRole) -> list[PolicyParty]:
+    return [x for x in p.parties if x.role == role]
+
+
 def policy_json(p: Optional[Policy]) -> Optional[dict]:
+    """Needs `parties` loaded (POLICY_LOAD). Each role is a LIST in schedule order — a policy can
+    name several insured, reinsured and retrocedent entities."""
     if p is None:
         return None
+    roles = {role.value: [party_json(x.party, contacts=False) for x in policy_parties(p, role)]
+             for role in PartyRole}
     return {
         "id": p.id,
-        "insured": party_json(p.insured, contacts=False),
-        "reinsured": party_json(p.reinsured, contacts=False),
-        "retrocedent": party_json(p.retrocedent, contacts=False),
+        **roles,
         "period_from": iso(p.period_from),
         "period_to": iso(p.period_to),
         "period": f"{iso(p.period_from)}..{iso(p.period_to) or ''}",
@@ -694,6 +742,7 @@ def policy_json(p: Optional[Policy]) -> Optional[dict]:
         "hull_war_confiscation_limit_selected_country": num(p.hull_war_confiscation_limit_selected_country),
         "selected_country": p.selected_country,
         "reinsured_amount": num(p.reinsured_amount),
+        "reinsured_amount_of": num(p.reinsured_amount_of),
         "cut_through_clause": p.cut_through_clause,
         "created_at": iso(p.created_at),
         "updated_at": iso(p.updated_at),
