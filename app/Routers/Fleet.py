@@ -213,6 +213,12 @@ class AircraftIn(BaseModel):
                     "series are separate types. Omit it when only one exists; a 400 lists the "
                     "choices when several do. A type that has to be CREATED defaults to passenger.")
     airline: Optional[str] = Field(default=None, max_length=256)
+    is_asg: bool = Field(
+        default=False,
+        description="Only for an airline this call CREATES: TRUE files it as an ASG airline "
+                    "(cirium.asg_*), FALSE — the default — as insured but not ASG "
+                    "(cirium.non_asg_insured_*). An airline that already exists keeps its own flag; "
+                    "change that at PATCH /ref/airlines/{id}.")
     engines: list[EngineIn] = Field(default_factory=list)
     service: ServiceIn = Field(default_factory=ServiceIn,
                                description="The service block. Omit it for the defaults.")
@@ -564,7 +570,7 @@ async def create_aircraft(request: Request, response: Response, body: AircraftIn
             await set_actor(session, token)
             ac_type = await get_or_create_aircraft_type(
                 session, body.aircraft_type, body.manufacturer, body.aircraft_category)
-            airline = await get_or_create_airline(session, body.airline)
+            airline = await get_or_create_airline(session, body.airline, is_asg=body.is_asg)
 
             row = await find_aircraft(session, registration=body.registration, msn=body.msn)
             created = row is None
@@ -693,10 +699,11 @@ SELECT o."Registration"                                   AS registration,
        o."Engine Master Series"                           AS engine_master_series,
        al.id                                              AS airline_id,
        al.airline_name                                    AS airline_name,
+       al.is_asg                                          AS airline_is_asg,
        fa.id                                              AS fleet_id
 FROM one o
 LEFT JOIN LATERAL (
-    SELECT a.id, a.airline_name
+    SELECT a.id, a.airline_name, a.is_asg
     FROM ref.airline a
     WHERE o."Operator"   ILIKE '%' || a.airline_name || '%'
        OR o."Sub Lessor" ILIKE '%' || a.airline_name || '%'
@@ -751,6 +758,8 @@ def _lookup_json(r) -> dict:
         "aircraft_category": r.category,
         "airline": r.airline_name or r.operator,
         "airline_id": r.airline_id,
+        # the matched airline's own flag; for one posting would create, the default it gets
+        "is_asg": bool(r.airline_is_asg),
         "operator": r.operator,
         "engines": engines,
         "service": {"source": RecordSource.CIRIUM.value, "usage_status": r.usage_status},
@@ -864,7 +873,7 @@ def _row_error(loc: tuple, msg: str) -> dict:
 async def create_aircraft_bulk(request: Request, response: Response, body: BulkAircraftIn,
                                token: Optional[ApiToken] = Depends(authorize(SCOPE_INSURANCE_WRITE))):
     # Rows that contradict each other are caught before the database is touched.
-    errors, by_reg, by_msn = [], {}, {}
+    errors, by_reg, by_msn, asg_asked = [], {}, {}, {}
     for i, item in enumerate(body.aircraft):
         key = norm_reg(item.registration)
         if not key:
@@ -879,6 +888,14 @@ async def create_aircraft_bulk(request: Request, response: Response, body: BulkA
             errors.append(_row_error((i, "msn"), f"Same MSN as row {by_msn[msn]}."))
         elif msn:
             by_msn[msn] = i
+        # Rows naming the same airline must agree on the flag it would be created with — else
+        # which row wins would depend on the order they were sent in.
+        if item.airline and item.airline.strip():
+            first = asg_asked.setdefault(norm(item.airline), (i, item.is_asg))
+            if first[1] != item.is_asg:
+                errors.append(_row_error((i, "is_asg"),
+                                         f"Row {first[0]} names the same airline with "
+                                         f"is_asg={str(first[1]).lower()}."))
     if errors:
         raise RequestValidationError(errors)
 
@@ -918,11 +935,11 @@ async def create_aircraft_bulk(request: Request, response: Response, body: BulkA
                         errors.append(_row_error((i, "engines", j, "engine_type"), str(ex)))
                 airline_key = norm(item.airline) if item.airline and item.airline.strip() else None
                 if airline_key and airline_key not in airlines:
-                    # An airline first met here is one we insure, not an ASG airline, so it is
-                    # filed under cirium.non_asg_insured_* rather than asg_*. Either way its whole
-                    # Cirium fleet enters the tracking matviews at the next refresh.
+                    # The flag only matters if the airline is CREATED here. Either way its whole
+                    # Cirium fleet enters the tracking matviews (asg_* or non_asg_insured_*) at
+                    # the next refresh.
                     airlines[airline_key] = await get_or_create_airline(session, item.airline,
-                                                                        is_asg=False)
+                                                                        is_asg=item.is_asg)
                 resolved.append((item, ac_type, airlines.get(airline_key), engines))
             if errors:
                 raise _RowErrors(errors)

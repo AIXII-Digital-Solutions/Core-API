@@ -480,6 +480,7 @@ class AircraftLookup(BaseModel):
     aircraft_category: str = Field(description="passenger | cargo | other, from Cirium's Primary Usage.")
     airline: Optional[str] = Field(description="The ref.airline name when one matched, else Cirium's Operator.")
     airline_id: Optional[int] = Field(description="null when no ref.airline name matched — posting creates the airline.")
+    is_asg: bool = Field(description="The matched airline's own flag; false (the creation default) when none matched.")
     operator: Optional[str] = Field(description="Cirium's Operator verbatim.")
     engines: List[LookupEngine]
     service: LookupService
