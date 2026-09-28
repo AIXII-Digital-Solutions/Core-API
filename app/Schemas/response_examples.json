@@ -206,6 +206,7 @@
    "covered_from": "2026-01-01",
    "covered_to": null
   },
+  "policy_currency": "USD",
   "lease_history": [
    {
     "id": 41,
