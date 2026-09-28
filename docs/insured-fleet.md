@@ -131,13 +131,15 @@ they live together beside the airframe they describe.
 | spec | column | default |
 |---|---|---|
 | Agreed Value Fixed | `agreed_value_fixed` | `false` |
+| Source | `source` — manual / lease_agreement / cirium | **`cirium`** |
 | Status | `status` — insured / not_insured, kept by the system (coverage in force today) | `not_insured` |
 | Usage Status | `usage_status` — Cirium's `Status`, kept by the system | — |
-| Usage Status | `usage_status` — Cirium's `Status`, verbatim | — |
-| Policy Currency | on the POLICY: `policy.policy.currency` (not the service block) | `USD` |
-| Policy Currency | `policy_currency` | `USD` |
+| Lease Agreement Currency | `lease_currency` | `USD` |
 
-`source` defaults to `cirium` because most records arrive from the feed. Both currencies are
+The **Policy Currency** is not in this block: it is a term of the contract and lives on the policy
+(`policy.policy.currency`, revision `policy_currency_on_policy`).
+
+`source` defaults to `cirium` because most records arrive from the feed. The currencies are
 `VARCHAR(3)` with a CHECK of `USD` / `EUR` / `GBP`, not an enum: adding a currency is then one
 migration that touches no type shared by two schemas.
 
