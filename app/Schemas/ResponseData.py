@@ -460,6 +460,38 @@ class AircraftOut(AircraftBrief):
     engines: List[EngineOut]
 
 
+class LookupEngine(BaseModel):
+    position: int
+    engine_type: str = Field(description="Cirium's Engine Master Series.")
+    engine_manufacturer: Optional[str]
+
+
+class LookupService(BaseModel):
+    source: str = Field(description="Always `cirium`.")
+    usage_status: Optional[str] = Field(description="Cirium's Status verbatim — 'In Service', 'Storage' …")
+
+
+class AircraftLookup(BaseModel):
+    """A Cirium airframe as a ready `POST /fleet/aircraft` body, plus what the form shows."""
+    registration: str
+    msn: Optional[str]
+    aircraft_type: Optional[str] = Field(description="Master series, as POST /fleet/aircraft takes it.")
+    manufacturer: Optional[str]
+    aircraft_category: str = Field(description="passenger | cargo | other, from Cirium's Primary Usage.")
+    airline: Optional[str] = Field(description="The ref.airline name when one matched, else Cirium's Operator.")
+    airline_id: Optional[int] = Field(description="null when no ref.airline name matched — posting creates the airline.")
+    operator: Optional[str] = Field(description="Cirium's Operator verbatim.")
+    engines: List[LookupEngine]
+    service: LookupService
+    in_fleet: bool = Field(description="Already in fleet.aircraft, by registration or MSN.")
+    fleet_aircraft_id: Optional[int]
+
+
+class AircraftBulkCreated(BaseModel):
+    created: List[AircraftOut] = Field(description="The aircraft added, sorted by registration.")
+    count: int
+
+
 # ── insured fleet: leasing & policy ───────────────────────────────────────────────────────────
 
 class AgreementOut(BaseModel):
@@ -680,6 +712,8 @@ RESPONSE_DATA: dict[tuple[str, str], Any] = {
     ("DELETE", "/fleet/engine-types/{type_id}"): EngineTypeOut,
     ("GET", "/fleet/aircraft"): Page[AircraftOut],
     ("POST", "/fleet/aircraft"): AircraftOut,
+    ("GET", "/fleet/aircraft/lookup"): Union[AircraftLookup, Page[AircraftLookup]],
+    ("POST", "/fleet/aircraft/bulk"): AircraftBulkCreated,
     ("GET", "/fleet/aircraft/by-registration/{registration}"): AircraftCard,
     ("GET", "/fleet/aircraft/{aircraft_id}"): AircraftCard,
     ("PATCH", "/fleet/aircraft/{aircraft_id}"): AircraftOut,

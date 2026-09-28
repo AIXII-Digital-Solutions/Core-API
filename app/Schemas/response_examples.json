@@ -1399,5 +1399,87 @@
   "last_used_at": "2026-09-25T10:00:00+00:00",
   "created_by": "service-token",
   "created_at": "2026-09-25T10:00:00+00:00"
+ },
+ "AircraftLookup": {
+  "registration": "A6-ANA",
+  "msn": "4468",
+  "aircraft_type": "A320",
+  "manufacturer": "Airbus",
+  "aircraft_category": "passenger",
+  "airline": "Air Arabia",
+  "airline_id": null,
+  "operator": "Air Arabia",
+  "engines": [
+   {
+    "position": 1,
+    "engine_type": "CFM56-5",
+    "engine_manufacturer": "CFM International"
+   },
+   {
+    "position": 2,
+    "engine_type": "CFM56-5",
+    "engine_manufacturer": "CFM International"
+   }
+  ],
+  "service": {
+   "source": "cirium",
+   "usage_status": "In Service"
+  },
+  "in_fleet": false,
+  "fleet_aircraft_id": null
+ },
+ "AircraftBulkCreated": {
+  "created": [
+   {
+    "id": 13,
+    "registration": "2-EZBC",
+    "msn": "2866",
+    "aircraft_type": {
+     "id": 16,
+     "manufacturer": "Airbus",
+     "master_series": "A319",
+     "category": "passenger",
+     "label": "Airbus A319 Passenger",
+     "template_url": {
+      "airborne": "https://raw.githubusercontent.com/AIXII-Digital-Solutions/Assets/Aircrafts-Templates/Airborne/Passenger/Airbus%20A319%20Passenger.png",
+      "on_the_ground": "https://raw.githubusercontent.com/AIXII-Digital-Solutions/Assets/Aircrafts-Templates/On%20the%20ground/Passenger/Airbus%20A319%20Passenger.png"
+     }
+    },
+    "airline": {
+     "id": 33,
+     "airline_name": "AviaAM Leasing",
+     "icao": "",
+     "iata": "",
+     "is_asg": true,
+     "logo_url": "https://raw.githubusercontent.com/AIXII-Digital-Solutions/Assets/Airline-Logos/aviaam_leasing.svg"
+    },
+    "service": {
+     "id": 4,
+     "agreed_value_fixed": false,
+     "source": "cirium",
+     "status": "insured",
+     "usage_status": "Storage",
+     "lease_currency": "USD",
+     "policy_currency": "USD",
+     "recorded": true
+    },
+    "engines": [
+     {
+      "id": 39,
+      "position": 1,
+      "engine_type": {
+       "id": 13,
+       "manufacturer": "CFM International",
+       "master_series": "CFM56-5"
+      },
+      "msn": null,
+      "installed_on": null,
+      "details": null,
+      "fitted": true
+     }
+    ]
+   }
+  ],
+  "count": 1
  }
 }

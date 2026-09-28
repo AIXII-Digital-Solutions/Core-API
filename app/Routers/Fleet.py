@@ -30,14 +30,16 @@ from datetime import date
 from typing import Optional
 
 from fastapi import Request, Response, Depends, Query, status
+from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, Field
-from sqlalchemy import select, func, or_
+from sqlalchemy import select, func, or_, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import joinedload, selectinload
 
 from Config import setup_logger
 from settings import Router
 from Database import ApiToken
+from Database.RefModels import Airline
 from Database.FleetModels import (
     Aircraft, AircraftType, AircraftEngine, EngineType, ServiceInfo,
     RecordSource, InsuranceStatus, AircraftCategory, MAX_ENGINES,
@@ -51,7 +53,7 @@ from Utils.DomainCache import AIRCRAFT_TYPE, AIRLINE, ENGINE_TYPE, FLEET, cached
 from Utils.DomainCommon import (
     normalize_template_urls, merge_template_urls, reload_with, page_with_total,
     AIRCRAFT_GRID, AIRCRAFT_ONE, AIRCRAFT_BRIEF, ENGINE_LOAD,
-    DB, norm_reg, set_actor, apply_sort, SortError, AmbiguousType, integrity_error, find_aircraft,
+    DB, norm, norm_reg, set_actor, apply_sort, SortError, AmbiguousType, integrity_error, find_aircraft,
     get_or_create_airline, get_or_create_aircraft_type, get_or_create_engine_type,
     aircraft_json, type_json, engine_json, fitted_engine_ids, service_json,
     lease_json, coverage_json, lease_in_force, covers,
@@ -214,6 +216,12 @@ class AircraftIn(BaseModel):
     engines: list[EngineIn] = Field(default_factory=list)
     service: ServiceIn = Field(default_factory=ServiceIn,
                                description="The service block. Omit it for the defaults.")
+
+
+class BulkAircraftIn(BaseModel):
+    """Several airframes at once, each in exactly the shape `POST /fleet/aircraft` takes — so an
+    item of `GET /fleet/aircraft/lookup` can be sent back unchanged."""
+    aircraft: list[AircraftIn] = Field(min_length=1, max_length=500)
 
 
 class AircraftPatch(BaseModel):
@@ -602,6 +610,358 @@ async def create_aircraft(request: Request, response: Response, body: AircraftIn
             status_code=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
     except AmbiguousType as _ex:
         return warning_response(request=request, response=response, msg=str(_ex))
+    except IntegrityError as _ex:
+        code, msg = integrity_error(_ex)
+        return warning_response(request=request, response=response, msg=msg, status_code=code)
+    except Exception as _ex:
+        return error_response(request=request, exc=_ex, response=response)
+
+
+# ==============================================================================================
+# adding from Cirium — the lookup that fills the form, and the bulk insert behind it
+# ==============================================================================================
+# The lookup reads the NEWEST revision of each Cirium plan type (Commercial, Business &
+# Helicopters) — the fleet as it stands — and hands back each airframe already in the shape
+# `POST /fleet/aircraft` takes, category and engines included. Sending an item back unchanged is
+# therefore unambiguous even for a series that exists as a freighter AND a passenger aircraft.
+#
+# THE AIRLINE is matched against ref.airline exactly as the tracking matviews match it: the
+# Operator, Sub Lessor or Owner CONTAINS the name, longest name first ("Air Arabia Abu Dhabi" is
+# Air Arabia's). An airframe no name matches carries Cirium's Operator verbatim and a null
+# `airline_id` — posting it creates that airline.
+#
+# THE CATEGORY is Cirium's `Primary Usage` collapsed to three, the same collapse
+# `_admin/load_type_categories.py` applied to the type table. Keep the two lists in step.
+
+_PASSENGER_USAGE = (
+    "Passenger", "Business - Private Company Use", "Business - Air Taxi/Air Charter",
+    "Private Use", "VIP / Head of State", "Sightseeing / Tourist", "Government - Liaison",
+)
+_CARGO_USAGE = (
+    "Freight / Cargo", "Combi / Mixed (Passenger/Cargo)",
+    "Quick-Change/Convertible (Passenger/Cargo)",
+)
+# Statuses the tracking matviews leave out. A registration lookup still answers for them — the
+# caller typed that tail — but prefers a live airframe when a tail has been reissued.
+_INACTIVE = ("Cancelled", "On order", "Retired", "Written off")
+
+
+def _sql_list(values) -> str:
+    """Constants only — never caller input."""
+    return ", ".join("'" + v.replace("'", "''") + "'" for v in values)
+
+
+# Two filters are spliced in: `{match}` narrows the Cirium rows BEFORE the de-duplication (so the
+# registration index-free scan touches two revisions, not the history), `{keep}` filters the
+# finished rows. Every value arrives as a bind; CAST, never the double-colon form, which the
+# text() bind parser misreads.
+_LOOKUP_SQL = """
+WITH latest AS (
+    SELECT max(id) AS id FROM cirium.aircraftrevision
+    WHERE plan_type IN ('Commercial', 'Business&Helicopters')
+    GROUP BY plan_type
+),
+src AS (
+    SELECT c.*,
+           upper(regexp_replace(c."Registration", '[^A-Za-z0-9]', '', 'g')) AS reg_key
+    FROM cirium.ciriumaircrafts c
+    WHERE c.revision_id IN (SELECT id FROM latest)
+      AND c."Registration" IS NOT NULL
+      AND ({match})
+),
+one AS (
+    SELECT DISTINCT ON (reg_key) *
+    FROM src
+    WHERE reg_key <> ''
+    ORDER BY reg_key,
+             ("Status" IN ({inactive})) NULLS LAST,
+             revision_id DESC,
+             ("Lease Type" = 'Sub Lease') DESC NULLS LAST,
+             id DESC
+)
+SELECT o."Registration"                                   AS registration,
+       nullif(btrim(o."Serial Number"), '')               AS msn,
+       o."Manufacturer"                                   AS manufacturer,
+       o."Master Series"                                  AS master_series,
+       CASE WHEN o."Primary Usage" IN ({passenger}) THEN 'passenger'
+            WHEN o."Primary Usage" IN ({cargo}) THEN 'cargo'
+            ELSE 'other' END                              AS category,
+       o."Operator"                                       AS operator,
+       o."Status"                                         AS usage_status,
+       o."Number Of Engines"                              AS engine_count,
+       o."Engine Manufacturer"                            AS engine_manufacturer,
+       o."Engine Master Series"                           AS engine_master_series,
+       al.id                                              AS airline_id,
+       al.airline_name                                    AS airline_name,
+       fa.id                                              AS fleet_id
+FROM one o
+LEFT JOIN LATERAL (
+    SELECT a.id, a.airline_name
+    FROM ref.airline a
+    WHERE o."Operator"   ILIKE '%' || a.airline_name || '%'
+       OR o."Sub Lessor" ILIKE '%' || a.airline_name || '%'
+       OR o."Owner"      ILIKE '%' || a.airline_name || '%'
+    ORDER BY length(a.airline_name) DESC, a.airline_name
+    LIMIT 1
+) al ON TRUE
+LEFT JOIN LATERAL (
+    SELECT f.id
+    FROM fleet.aircraft f
+    WHERE f.registration_normalized = o.reg_key
+       OR f.msn = nullif(btrim(o."Serial Number"), '')
+    ORDER BY (f.registration_normalized = o.reg_key) DESC, f.id
+    LIMIT 1
+) fa ON TRUE
+WHERE {keep}
+ORDER BY o."Registration", o.reg_key
+"""
+
+_COMMON = {"inactive": _sql_list(_INACTIVE), "passenger": _sql_list(_PASSENGER_USAGE),
+           "cargo": _sql_list(_CARGO_USAGE)}
+
+_BY_REGISTRATION = text(_LOOKUP_SQL.format(
+    match="""upper(regexp_replace(c."Registration", '[^A-Za-z0-9]', '', 'g'))
+             = CAST(:reg_key AS text)""",
+    keep="TRUE", **_COMMON))
+
+# The pre-filter is the airline's own name, which every row the LATERAL can award to it must
+# contain; the LATERAL then decides, so a longer name that also matches still wins its rows.
+_BY_AIRLINE = text(_LOOKUP_SQL.format(
+    match="""c."Operator"   ILIKE '%' || CAST(:airline_name AS text) || '%'
+          OR c."Sub Lessor" ILIKE '%' || CAST(:airline_name AS text) || '%'
+          OR c."Owner"      ILIKE '%' || CAST(:airline_name AS text) || '%'""",
+    keep=f"""al.id = CAST(:airline_id AS integer)
+             AND (CAST(:include_inactive AS boolean)
+                  OR o."Status" IS NULL OR o."Status" NOT IN ({_COMMON['inactive']}))""",
+    **_COMMON))
+
+
+def _lookup_json(r) -> dict:
+    """One Cirium airframe as a ready `POST /fleet/aircraft` body, plus what the form shows."""
+    engines = []
+    if r.engine_master_series:
+        count = max(1, min(r.engine_count or 1, MAX_ENGINES))
+        engines = [{"position": p, "engine_type": r.engine_master_series,
+                    "engine_manufacturer": r.engine_manufacturer} for p in range(1, count + 1)]
+    return {
+        "registration": r.registration.strip(),
+        "msn": r.msn,
+        "aircraft_type": r.master_series,
+        "manufacturer": r.manufacturer,
+        "aircraft_category": r.category,
+        "airline": r.airline_name or r.operator,
+        "airline_id": r.airline_id,
+        "operator": r.operator,
+        "engines": engines,
+        "service": {"source": RecordSource.CIRIUM.value, "usage_status": r.usage_status},
+        "in_fleet": r.fleet_id is not None,
+        "fleet_aircraft_id": r.fleet_id,
+    }
+
+
+@router.get(
+    path="/aircraft/lookup",
+    description=(
+        "Find airframes in Cirium to add to the fleet — the newest revision of each plan type. "
+        "Exactly one of the two parameters:\n\n"
+        "* `registration` — one airframe, separator- and case-insensitive ('yl-abc' = 'YLABC'). "
+        "Returns the object; 404 when Cirium does not know the tail. A tail reissued to several "
+        "airframes answers with the one still flying.\n"
+        "* `airline_id` (a `ref.airline` id) — every airframe of that airline, matched the way the "
+        "tracking fleet is (Operator, Sub Lessor or Owner contains the name, longest name wins). "
+        "Retired, written-off, cancelled and on-order airframes are left out unless "
+        "`include_inactive=true`. Returns `{items, total}`, sorted by registration.\n\n"
+        "Each item is a ready `POST /fleet/aircraft` body — `aircraft_category` and `engines` "
+        "included, so sending it back is never ambiguous — plus `in_fleet` / `fleet_aircraft_id` "
+        "(already in fleet.aircraft by registration or MSN), `airline_id` (null when no ref.airline "
+        "name matched: `airline` is then Cirium's Operator verbatim, and posting it creates that "
+        "airline) and `operator`, Cirium's own wording."
+    ),
+    responses=build_responses(include=_OK), dependencies=_READ,
+)
+async def lookup_aircraft(
+    request: Request, response: Response,
+    registration: Optional[str] = Query(None, max_length=32,
+                                        description="Tail number, any case, any separators."),
+    airline_id: Optional[int] = Query(None, description="ref.airline id."),
+    include_inactive: bool = Query(False, description="airline_id only: keep retired, written-off, "
+                                                      "cancelled and on-order airframes."),
+    limit: int = Query(500, ge=1, le=2000), offset: int = Query(0, ge=0),
+):
+    try:
+        reg_key = norm_reg(registration) if registration else ""
+        if (not reg_key) == (airline_id is None):
+            return warning_response(
+                request=request, response=response,
+                msg="Send exactly one of `registration` or `airline_id`.")
+
+        async with request.app.state.db_client.read_session(DB) as session:
+            if reg_key:
+                row = (await session.execute(_BY_REGISTRATION, {"reg_key": reg_key})).first()
+                if row is None:
+                    return warning_response(
+                        request=request, response=response,
+                        msg=f"Cirium has no aircraft registered '{registration.strip()}'.",
+                        status_code=status.HTTP_404_NOT_FOUND)
+                return success_response(request=request, response=response,
+                                        data=_lookup_json(row))
+
+            name = (await session.execute(
+                select(Airline.airline_name).where(Airline.id == airline_id))).scalar_one_or_none()
+            if name is None:
+                return warning_response(request=request, response=response,
+                                        msg=f"Airline {airline_id} not found",
+                                        status_code=status.HTTP_404_NOT_FOUND)
+            rows = (await session.execute(_BY_AIRLINE, {
+                "airline_name": name, "airline_id": airline_id,
+                "include_inactive": include_inactive})).all()
+        items = [_lookup_json(r) for r in rows]
+        return success_response(request=request, response=response,
+                                data={"items": items[offset:offset + limit], "total": len(items)})
+    except Exception as _ex:
+        return error_response(request=request, exc=_ex, response=response)
+
+
+class _RowErrors(Exception):
+    """Rows the bulk insert cannot resolve. Raised INSIDE the session so the transaction rolls back
+    whatever the rows before them had already found-or-created."""
+
+    def __init__(self, errors: list[dict]):
+        super().__init__(f"{len(errors)} row error(s)")
+        self.errors = errors
+
+
+class _AlreadyInFleet(Exception):
+    def __init__(self, clashes: list[str]):
+        super().__init__(", ".join(clashes))
+        self.clashes = clashes
+
+
+def _row_error(loc: tuple, msg: str) -> dict:
+    # the shape RequestValidationError carries, so the ordinary 422 handler renders it —
+    # `field` comes out as "body.aircraft.3.aircraft_type"
+    return {"loc": ("body", "aircraft", *loc), "msg": msg, "type": "value_error"}
+
+
+@router.post(
+    path="/aircraft/bulk",
+    description=(
+        "Add up to 500 airframes in ONE transaction: all of them or none. Each item is a "
+        "`POST /fleet/aircraft` body, and types, engine models and airlines are found-or-created "
+        "the same way.\n\n"
+        "Unlike the single POST this only ADDS. An item whose registration or MSN is already in "
+        "the fleet is a 409 naming every such aircraft — nothing is updated in place. Rows that "
+        "cannot be resolved (a series several manufacturers build or that exists in several "
+        "categories, a registration or MSN repeated within the request) are a 422 with one entry "
+        "per row, `field` = `body.aircraft.<index>.<field>`.\n\n"
+        "Returns 201 with the created aircraft (sorted by registration, with type, airline, "
+        "service block and engines) and their `count`. Every insert is in /history, attributed "
+        "to the caller, as a single create would be."
+    ),
+    status_code=status.HTTP_201_CREATED,
+    responses=build_responses(include=_OK | {status.HTTP_201_CREATED}),
+)
+async def create_aircraft_bulk(request: Request, response: Response, body: BulkAircraftIn,
+                               token: Optional[ApiToken] = Depends(authorize(SCOPE_INSURANCE_WRITE))):
+    # Rows that contradict each other are caught before the database is touched.
+    errors, by_reg, by_msn = [], {}, {}
+    for i, item in enumerate(body.aircraft):
+        key = norm_reg(item.registration)
+        if not key:
+            errors.append(_row_error((i, "registration"), "Registration has no letters or digits."))
+        elif key in by_reg:
+            errors.append(_row_error((i, "registration"),
+                                     f"Same registration as row {by_reg[key]}."))
+        else:
+            by_reg[key] = i
+        msn = item.msn.strip() if item.msn else ""
+        if msn and msn in by_msn:
+            errors.append(_row_error((i, "msn"), f"Same MSN as row {by_msn[msn]}."))
+        elif msn:
+            by_msn[msn] = i
+    if errors:
+        raise RequestValidationError(errors)
+
+    try:
+        async with request.app.state.db_client.session(DB) as session:
+            await set_actor(session, token)
+
+            # ONE question for the whole batch: which of these are already here.
+            clash = [Aircraft.registration_normalized.in_(list(by_reg))]
+            if by_msn:
+                clash.append(Aircraft.msn.in_(list(by_msn)))
+            held = (await session.execute(
+                select(Aircraft.registration, Aircraft.msn)
+                .where(or_(*clash)).order_by(Aircraft.registration)
+            )).all()
+            if held:
+                raise _AlreadyInFleet([
+                    f"{h.registration}" + (f" (MSN {h.msn})" if h.msn else "") for h in held])
+
+            # Resolve EVERYTHING before adding ANY aircraft: each find-or-create is a SELECT, and
+            # a SELECT autoflushes whatever was added before it — one INSERT per aircraft instead
+            # of one for the batch. Every error is collected, so the caller fixes them in one go.
+            airlines: dict[str, Optional[Airline]] = {}
+            resolved = []
+            for i, item in enumerate(body.aircraft):
+                ac_type = None
+                try:
+                    ac_type = await get_or_create_aircraft_type(
+                        session, item.aircraft_type, item.manufacturer, item.aircraft_category)
+                except AmbiguousType as ex:
+                    errors.append(_row_error((i, "aircraft_type"), str(ex)))
+                engines = []
+                for j, engine in enumerate(item.engines):
+                    try:
+                        engines.append(await _engine_fields(session, engine))
+                    except AmbiguousType as ex:
+                        errors.append(_row_error((i, "engines", j, "engine_type"), str(ex)))
+                airline_key = norm(item.airline) if item.airline and item.airline.strip() else None
+                if airline_key and airline_key not in airlines:
+                    airlines[airline_key] = await get_or_create_airline(session, item.airline)
+                resolved.append((item, ac_type, airlines.get(airline_key), engines))
+            if errors:
+                raise _RowErrors(errors)
+
+            rows = []
+            for item, ac_type, airline, _ in resolved:
+                rows.append(Aircraft(
+                    registration=item.registration.strip(),
+                    msn=item.msn.strip() if item.msn and item.msn.strip() else None,
+                    aircraft_type_id=ac_type.id if ac_type else None,
+                    airline_id=airline.id if airline else None))
+            session.add_all(rows)
+            await session.flush()
+
+            children = []
+            for row, (item, _, _, engines) in zip(rows, resolved):
+                fields = item.service.model_dump()
+                fields["lease_currency"] = fields["lease_currency"].upper()
+                fields["policy_currency"] = fields["policy_currency"].upper()
+                children.append(ServiceInfo(aircraft_id=row.id, **fields))
+                children.extend(AircraftEngine(aircraft_id=row.id, **e) for e in engines)
+            session.add_all(children)
+            await session.flush()
+
+            created = (await session.execute(
+                select(Aircraft).where(Aircraft.id.in_([r.id for r in rows]))
+                .options(*_AIRCRAFT_LOAD)
+                .order_by(Aircraft.registration, Aircraft.id)
+                .execution_options(populate_existing=True)
+            )).unique().scalars().all()
+            data = {"created": [aircraft_json(a) for a in created], "count": len(created)}
+        await invalidate(request, AIRCRAFT_TYPE, ENGINE_TYPE, AIRLINE)
+        return success_response(request=request, response=response, data=data,
+                                msg=f"{len(created)} aircraft created",
+                                status_code=status.HTTP_201_CREATED)
+    except _RowErrors as _ex:
+        raise RequestValidationError(_ex.errors)
+    except _AlreadyInFleet as _ex:
+        return warning_response(
+            request=request, response=response,
+            msg=(f"{len(_ex.clashes)} aircraft already in the fleet — nothing was added: "
+                 f"{', '.join(_ex.clashes)}"),
+            status_code=status.HTTP_409_CONFLICT)
     except IntegrityError as _ex:
         code, msg = integrity_error(_ex)
         return warning_response(request=request, response=response, msg=msg, status_code=code)

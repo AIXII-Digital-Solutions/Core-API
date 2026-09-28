@@ -397,6 +397,8 @@ All endpoints are under `/api/v1`. Reads need `insurance:read`, writes `insuranc
 /fleet/engine-types               GET  POST  .  /{id} PATCH DELETE
 /fleet/aircraft                   GET  POST  .  /{id} GET PATCH DELETE
 /fleet/aircraft/by-registration/{registration}   GET  (separator-insensitive, ?msn= disambiguates)
+/fleet/aircraft/lookup            GET  (Cirium, newest revision per plan type: ?registration= | ?airline_id=)
+/fleet/aircraft/bulk              POST (1..500 lookup items, all-or-nothing, add-only: 409 on any already held)
 /fleet/aircraft/{id}/engines      GET  POST  .  /fleet/engines/{id} PATCH DELETE
 /fleet/aircraft/{id}/service      GET  PATCH
 
