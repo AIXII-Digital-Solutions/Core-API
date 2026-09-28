@@ -95,17 +95,17 @@ def norm_reg(value: str) -> str:
 # never become two rows. They flush, so the caller gets a usable id without committing.
 
 async def get_or_create_airline(session, name: Optional[str], *,
-                                is_asg: Optional[bool] = None) -> Optional[Airline]:
-    """`is_asg` applies only to an airline CREATED here; an existing row keeps its own. Left as
-    None, the column default (TRUE) applies."""
+                                is_asg: bool = False) -> Optional[Airline]:
+    """`is_asg` applies only to an airline CREATED here; an existing row keeps its own. It
+    defaults to FALSE: an airline first met while entering an insured aircraft is one we insure,
+    and making it ASG is a deliberate choice, not the column's TRUE default."""
     if not name or not name.strip():
         return None
     row = (await session.execute(
         select(Airline).where(Airline.airline_name.ilike(name.strip())).order_by(Airline.id).limit(1)
     )).scalar_one_or_none()
     if row is None:
-        row = Airline(airline_name=name.strip(),
-                      **({} if is_asg is None else {"is_asg": is_asg}))
+        row = Airline(airline_name=name.strip(), is_asg=is_asg)
         session.add(row)
         await session.flush()
     return row
