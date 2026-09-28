@@ -668,12 +668,12 @@ def service_json(v: Optional[ServiceInfo]) -> dict:
     somebody cleared the fields."""
     if v is None:
         return {"id": None, "agreed_value_fixed": False, "source": "cirium", "status": "not_insured",
-                "usage_status": None, "lease_currency": "USD", "policy_currency": "USD",
+                "usage_status": None, "lease_currency": "USD",
                 "recorded": False}
     return {"id": v.id, "agreed_value_fixed": v.agreed_value_fixed,
             "source": enum_value(v.source), "status": enum_value(v.status),
             "usage_status": v.usage_status, "lease_currency": v.lease_currency,
-            "policy_currency": v.policy_currency, "recorded": True}
+            "recorded": True}
 
 
 def aircraft_json(a: Optional[Aircraft], *, engines: bool = True) -> Optional[dict]:
@@ -762,6 +762,7 @@ def policy_json(p: Optional[Policy]) -> Optional[dict]:
         "period_from": iso(p.period_from),
         "period_to": iso(p.period_to),
         "period": f"{iso(p.period_from)}..{iso(p.period_to) or ''}",
+        "currency": p.currency,
         "hull_all_risks_deductible": num(p.hull_all_risks_deductible),
         "spares_deductible": num(p.spares_deductible),
         "hull_deductible_buy_down": num(p.hull_deductible_buy_down),

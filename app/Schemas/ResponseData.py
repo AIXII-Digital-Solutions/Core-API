@@ -441,7 +441,6 @@ class ServiceOut(BaseModel):
     status: str = Field(description="insured | not_insured — whether a policy coverage covers today. Read-only.")
     usage_status: Optional[str] = Field(description="The airframe's Status in the newest Cirium revision. Read-only.")
     lease_currency: str
-    policy_currency: str
     recorded: bool
 
 
@@ -546,6 +545,7 @@ class PolicyOut(BaseModel):
     period_from: Optional[Date]
     period_to: Optional[Date]
     period: str = Field(description="`from..to`, open-ended when there is no end date.")
+    currency: str = Field(description="USD | EUR | GBP — every amount on the policy is in it.")
     hull_all_risks_deductible: Optional[float]
     spares_deductible: Optional[float]
     hull_deductible_buy_down: Optional[float]

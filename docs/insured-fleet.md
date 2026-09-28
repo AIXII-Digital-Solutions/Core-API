@@ -131,10 +131,10 @@ they live together beside the airframe they describe.
 | spec | column | default |
 |---|---|---|
 | Agreed Value Fixed | `agreed_value_fixed` | `false` |
-| Source | `source` — manual / lease_agreement / cirium | **`cirium`** |
-| Status | `status` — insured / not_insured | `insured` |
+| Status | `status` — insured / not_insured, kept by the system (coverage in force today) | `not_insured` |
+| Usage Status | `usage_status` — Cirium's `Status`, kept by the system | — |
 | Usage Status | `usage_status` — Cirium's `Status`, verbatim | — |
-| Lease Agreement Currency | `lease_currency` | `USD` |
+| Policy Currency | on the POLICY: `policy.policy.currency` (not the service block) | `USD` |
 | Policy Currency | `policy_currency` | `USD` |
 
 `source` defaults to `cirium` because most records arrive from the feed. Both currencies are

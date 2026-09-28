@@ -130,6 +130,16 @@ class CoverageItem(BaseModel):
 
 
 class _PolicyTerms(BaseModel):
+    currency: Optional[str] = Field(
+        default=None, min_length=3, max_length=3,
+        description="USD, EUR or GBP (any case) — the currency every amount on the policy is in. "
+                    "Defaults to USD on create.")
+
+    @field_validator("currency")
+    @classmethod
+    def _upper(cls, value):
+        return value.upper() if value else value
+
     hull_all_risks_deductible: Optional[Decimal] = Field(default=None, ge=0)
     spares_deductible: Optional[Decimal] = Field(default=None, ge=0)
     hull_deductible_buy_down: Optional[Decimal] = Field(default=None, ge=0)
@@ -541,7 +551,7 @@ async def create_policy(request: Request, response: Response, body: PolicyIn,
         async with request.app.state.db_client.session(DB) as session:
             await set_actor(session, token)
             row = Policy(**body.model_dump(
-                exclude={"insured", "reinsured", "retrocedent", "aircraft"}))
+                exclude={"insured", "reinsured", "retrocedent", "aircraft"}, exclude_none=True))
             session.add(row)
             await session.flush()
             errors: list[dict] = []
@@ -606,6 +616,8 @@ async def update_policy(request: Request, response: Response, policy_id: int, bo
                                         msg=f"Policy {policy_id} not found",
                                         status_code=status.HTTP_404_NOT_FOUND)
             fields.pop("aircraft", None)
+            if fields.get("currency", "") is None:
+                fields.pop("currency")   # a policy always has one; null means "leave it"
             errors: list[dict] = []
             roles = {role: fields.pop(role.value) or [] for role in _ROLES if role.value in fields}
             if roles:

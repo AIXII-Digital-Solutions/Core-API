@@ -174,20 +174,27 @@ class EnginePatch(BaseModel):
     details: Optional[str] = None
 
 
+_NOT_HERE = {
+    "status": "`status` follows the policy coverage in force today",
+    "usage_status": "`usage_status` comes from Cirium",
+    "policy_currency": "the policy currency is set on the policy (`currency` on /policy/policies)",
+}
+
+
 class _NoDerivedStatus(BaseModel):
     """The service block SHOWS `status` and `usage_status`, but nobody sets them: the first is
-    whether a coverage covers today, the second is Cirium's. Sending either is refused rather than
-    silently dropped, so a client still offering them as inputs finds out at once."""
+    whether a coverage covers today, the second is Cirium's. `policy_currency` is no longer here
+    at all — it is the policy's. Sending any of them is refused rather than silently dropped, so a
+    client still offering them as inputs finds out at once."""
 
     @model_validator(mode="before")
     @classmethod
     def _refuse_derived(cls, value):
         if isinstance(value, dict):
-            sent = sorted({"status", "usage_status"} & value.keys())
+            sent = sorted(_NOT_HERE.keys() & value.keys())
             if sent:
-                raise ValueError(
-                    f"{' and '.join(sent)} cannot be set: `status` follows the policy coverage in "
-                    f"force today and `usage_status` comes from Cirium.")
+                raise ValueError(f"{', '.join(sent)} cannot be set here: "
+                                 + "; ".join(_NOT_HERE[k] for k in sent) + ".")
         return value
 
 
@@ -201,14 +208,12 @@ class ServiceIn(_NoDerivedStatus):
         description="Where the record came from. Left out: `cirium` when Cirium knows the tail, "
                     "`manual` when it does not.")
     lease_currency: str = Field(default="USD", min_length=3, max_length=3)
-    policy_currency: str = Field(default="USD", min_length=3, max_length=3)
 
 
 class ServicePatch(_NoDerivedStatus):
     agreed_value_fixed: Optional[bool] = None
     source: Optional[RecordSource] = None
     lease_currency: Optional[str] = Field(default=None, min_length=3, max_length=3)
-    policy_currency: Optional[str] = Field(default=None, min_length=3, max_length=3)
 
 
 class AircraftIn(BaseModel):
@@ -624,7 +629,6 @@ async def create_aircraft(request: Request, response: Response, body: AircraftIn
             if created:
                 fields = body.service.model_dump()
                 fields["lease_currency"] = fields["lease_currency"].upper()
-                fields["policy_currency"] = fields["policy_currency"].upper()
                 session.add(ServiceInfo(aircraft_id=row.id, **fields))
             await session.flush()
             if created:
@@ -1027,7 +1031,6 @@ async def create_aircraft_bulk(request: Request, response: Response, body: BulkA
             for row, (item, _, _, engines) in zip(rows, resolved):
                 fields = item.service.model_dump()
                 fields["lease_currency"] = fields["lease_currency"].upper()
-                fields["policy_currency"] = fields["policy_currency"].upper()
                 children.append(ServiceInfo(aircraft_id=row.id, **fields))
                 children.extend(AircraftEngine(aircraft_id=row.id, **e) for e in engines)
             session.add_all(children)
@@ -1315,7 +1318,7 @@ async def update_service(request: Request, response: Response, aircraft_id: int,
                          token: Optional[ApiToken] = Depends(authorize(SCOPE_INSURANCE_WRITE))):
     try:
         fields = body.model_dump(exclude_unset=True)
-        for key in ("lease_currency", "policy_currency"):
+        for key in ("lease_currency",):
             if fields.get(key):
                 fields[key] = fields[key].upper()
         async with request.app.state.db_client.session(DB) as session:
