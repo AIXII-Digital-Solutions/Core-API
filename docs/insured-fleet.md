@@ -413,7 +413,7 @@ All endpoints are under `/api/v1`. Reads need `insurance:read`, writes `insuranc
 /policy/coverage                  GET  POST  .  /{id} PATCH DELETE
 /policy/coverage/bulk             POST   many aircraft onto one policy, all-or-nothing
 /policy/coverage/compare          GET    required vs provided, per aircraft
-/certificates/reinsurance          POST  .  /preview POST  .  GET  .  /{id} GET  .  /{id}/pdf GET   AVN 67B, append-only history
+/certificates/{reinsurance|insurance}  /preview . POST . GET . /{id} GET|PATCH|DELETE . /{id}/issue . /{id}/pdf   AVN 67B, draft -> issued (frozen)
 
 /history                          GET    the change log, filtered
 /history/aircraft/{id}            GET    one airframe's whole timeline

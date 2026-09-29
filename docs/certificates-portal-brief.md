@@ -1,19 +1,19 @@
 # Certificates — integration brief for the portal
 
 **Living document.** The certificates module is being built in stages; this brief is updated with
-every change the portal has to follow. Read the [change log](#9-change-log) first to see what is new
-since you last looked, and [open items](#8-open-items) for what is not built yet.
+every change the portal has to follow. Read the [change log](#11-change-log) first to see what is new
+since you last looked, and [open items](#10-open-items) for what is not built yet.
 
-What it covers: issuing the **Reinsurance certificate (AVN 67B)**, its history, the issuing company's
-branding, the signatory profile, and the fields elsewhere in the domain the certificate reads. The
-**Insurance certificate** is the next document and will be added here.
+What it covers: the **Reinsurance certificate** and the **Insurance certificate** (both AVN 67B) —
+drafting, editing, issuing, history — the issuing company's branding (admin panel), and the fields
+elsewhere in the domain the certificates read.
 
 The general API contract — base URL, the response envelope, error shapes, conventions — is in
 [`insured-fleet-portal-brief.md`](insured-fleet-portal-brief.md). This document only adds to it.
 
 ---
 
-## 1. Who is calling — the signatory rule
+## 1. Who is calling — the signatory
 
 Every request carries the service token and the portal user it is made for:
 
@@ -24,100 +24,176 @@ Every request carries the service token and the portal user it is made for:
 | `X-Portal-User-Email` | their e-mail |
 | `X-Portal-User-Name` | their full name, percent-encoded UTF-8 (`urllib.parse.quote`) |
 
-**A certificate is signed by the portal user who issues it.** Their name and e-mail come from these
-headers; their title, phone and signature image come from their signatory profile (§5). Without the
-headers, issuing a certificate and the signatory endpoints answer **422** (`certificate.signatory`
-or `header.X-Portal-User-Id`). The headers are believed only next to the service token.
+**A certificate is signed by hand by the portal user who issues it.** No signature is uploaded: the
+printed certificate has an empty space above the signatory's name, and they sign the paper copy
+after issuing. The certificate prints the signatory's details, which the portal **sends with the
+request**:
+
+```json
+"signatory": {"full_name": "Jane Doe", "title": "Head of Insurance",
+              "phone": "+7 700 000 0000", "email": "j.doe@ai12.example"}
+```
+
+Only `full_name` is required. Fill the block from the current user's portal profile and let them
+edit it in the form. If it is not sent, the draft takes the name and e-mail from the
+`X-Portal-User-*` headers when it is created and keeps them. With neither, the certificate cannot be
+issued (`certificate.signatory`). The headers are trusted only together with the service token.
 
 ---
 
-## 2. Issuing a reinsurance certificate
+## 2. Draft → issued
 
-Entry point: the aircraft card or the policy page → **"Issue reinsurance certificate"**.
+Every certificate starts as a **draft** and ends as **issued**. `status` says which.
 
-### 2.1 The form
+| | draft | issued |
+|---|---|---|
+| reference number | allocated when the draft is created, kept through every edit | the same |
+| values | re-resolved from the policy, lease and aircraft **every time** it is read or drawn | frozen as printed |
+| editing | `PATCH` its inputs; `DELETE` discards it | **impossible** — 409; the database refuses it too |
+| PDF | drawn on request, **DRAFT across every page** | the file as issued, no mark |
+| `errors` | what still blocks issuing (`can_issue: false`) | always `[]` |
+
+Issuing is final. A correction to an issued certificate is a **new draft, with a new number**. A
+discarded draft's number is not reused.
+
+---
+
+## 3. Endpoints
+
+`{kind}` is `reinsurance` or `insurance`. Both have the same endpoints and bodies.
+
+| method | path | what |
+|---|---|---|
+| `POST` | `/certificates/{kind}/preview` | what it would say, nothing saved (reference masked `CY25/SCAT/#####`) |
+| `POST` | `/certificates/{kind}` | create a **draft** → 201 |
+| `GET` | `/certificates/{kind}` | list: `aircraft_id`, `policy_id`, `registration`, `status=draft\|issued`, `limit`, `offset` → `{items, total}` |
+| `GET` | `/certificates/{kind}/{id}` | one, with `data` |
+| `PATCH` | `/certificates/{kind}/{id}` | change a draft's inputs → 409 if issued |
+| `POST` | `/certificates/{kind}/{id}/issue` | issue → 409 if already issued, 422 while it has errors |
+| `DELETE` | `/certificates/{kind}/{id}` | discard a draft → 409 if issued |
+| `GET` | `/certificates/{kind}/{id}/pdf` | the PDF (`?download=true` to save) |
+
+### 3.1 The body (create, preview; PATCH takes the same fields except `aircraft_id`)
 
 | field | required | notes |
 |---|---|---|
-| `aircraft_id` | yes | |
+| `aircraft_id` | yes (create / preview) | cannot change on a draft: another aircraft is another certificate |
 | `policy_id` | no | default: the policy covering the aircraft on the date of issue, else the next one to start |
-| `date_of_issue` | no | default: today (recorded as system-generated); sent = recorded as user-supplied |
+| `date_of_issue` | no | default: the day it is **issued** (system-generated); a draft shows today until then |
+| `signatory` | see §1 | `{full_name, title, phone, email}` |
+| `signed_by` | insurance only | `broker` (default) or `insurer` — see §4 |
 
-A collapsed block **"Overrides (from e-mail / rider / mark-up)"** — each replaces the stored value
+A collapsed block **"Overrides (from e-mail / rider / mark-up)"**. Each one replaces the stored value
 for this certificate only, and is kept with it:
 
 | field | replaces |
 |---|---|
 | `agreed_value` | the lease's agreed value (number) |
-| `equipment` | "<manufacturer> <series>" — e.g. to name the original engines |
+| `equipment` | "<manufacturer> <series>", e.g. to name the original engines |
 | `effective_date` | the lease terms' effective date |
-| `contract_parties` | the agreement's contract parties — list of strings, order matters |
-| `contracts` | the contracts list — list of strings, the full text of each item |
-| `addressees` | the notice addresses — list of `{company, contacts, email}` |
+| `contract_parties` | the agreement's contract parties: a list of strings, in order |
+| `contracts` | the contracts list: a list of strings, the full text of each item |
+| `addressees` | the notice addresses: a list of `{company, contacts, email}` |
 
-### 2.2 The flow
+On `PATCH`, only the fields you send change. Sending a field as `null` drops that override, and the
+stored value applies again. The inputs as saved are returned in `request`, so the edit form fills
+from it.
 
-1. **Check** — `POST /certificates/reinsurance/preview` with the form body. `data`:
+### 3.2 The record
 
-   | key | show as |
-   |---|---|
-   | `reference_number` | e.g. `CY25/SCAT/#####` — the number is allocated only on issue |
-   | `variant` | `retrocession` or `standard` (the wording used) |
-   | `data` | every value that will be printed — show a summary |
-   | `alerts[]` | `{code, msg}` — yellow warnings; they do NOT block issuing |
-   | `errors[]` | `{field: "certificate.<name>", msg}` — red; disable **Issue** |
-   | `can_issue` | |
+`id, kind, status, reference_number, date_of_issue, date_of_issue_source (system|user), variant,
+registration, msn, aircraft_id, policy_id, aircraft_lease_id, alerts[], errors[], can_issue,
+created_by_user {id, name}, created_at, updated_at, issued_at, issued_by, issued_by_user {id, email,
+name}, request, pdf_url` plus `data` (every value it prints) on everything except the list.
 
-   Where to send the user for an error:
+- `alerts[]` — `{code, msg}`, shown as yellow warnings. They do **not** block issuing (§8).
+- `errors[]` — `{field: "certificate.<name>", msg}`, shown in red. While there are any, disable
+  **Issue** and **PDF**.
 
-   | `field` | fix it in |
-   |---|---|
-   | `certificate.certificate_code` | the airline (§6.1) |
-   | `certificate.lease`, `agreed_value`, `contract_parties`, `effective_date`, `agreement_start_date` | the aircraft's lease / agreement (§6.2) |
-   | policy fields (`hull_all_risks_deductible`, `combined_single_limit`, …) | the policy |
-   | `certificate.insured` / `reinsured` / `period_to` | the policy |
-   | `certificate.equipment` / `msn` | the aircraft |
-   | `certificate.signatory` | no portal user on the request |
+Where to send the user for an error:
 
-2. **Preview PDF** — `POST /certificates/reinsurance/preview/pdf`, same body. Returns
-   `application/pdf` marked **DRAFT** on every page, reference masked. Open it in a viewer / new tab.
-   422 with the same `certificate.<field>` entries while something required is missing.
+| `field` | fix it in |
+|---|---|
+| `certificate.certificate_code`, `certificate.airline` | the airline (§7.1). Without these no draft can be created (422): there is no reference number to give it |
+| `certificate.lease`, `agreed_value`, `contract_parties`, `effective_date`, `agreement_start_date` | the aircraft's lease / agreement (§7.2) |
+| policy fields (`hull_all_risks_deductible`, `combined_single_limit`, …) | the policy |
+| `certificate.insured` / `reinsured` / `insurer` / `period_to` | the policy |
+| `certificate.equipment` / `msn` | the aircraft |
+| `certificate.signatory` | the signatory block of the form (§1) |
 
-3. **Issue** — `POST /certificates/reinsurance`, same body. **201**, `data`:
-   `reference_number` (e.g. `CY25/SCAT/00001`), `pdf_url`, `alerts`, `data` (the printed values).
-   Errors: **422** — missing data or no signatory; **404** — the aircraft does not exist, or is not
-   covered on the date of issue or later.
+### 3.3 The screens
 
-An issued certificate is never edited. A correction is a **new issue with a new number**.
+1. **Aircraft card / policy page** → "New reinsurance certificate" / "New insurance certificate".
+   The form (§3.1) opens; use `preview` for a live check as the user fills it in (optional).
+2. **Create** → `POST /certificates/{kind}`. You now have a draft with its number. Open its page.
+3. **Draft page**:
+   - the values (`data`) as a summary;
+   - alerts and errors;
+   - an **Edit** form (`PATCH`);
+   - **View PDF** (opens inline, marked DRAFT);
+   - **Issue** (confirm first: "This is final. The certificate can no longer be changed");
+   - **Discard**.
+4. **Issued page**:
+   - read-only;
+   - **PDF** and **Download**;
+   - "Issued by {issued_by_user.name} on {issued_at}";
+   - the alerts it was issued with.
+5. **History tab** on the aircraft card and the policy page: `GET /certificates/{kind}?aircraft_id=`
+   (or `policy_id=`). Columns: reference, status badge (Draft / Issued), date of issue, registration,
+   created by / issued by, alert count, PDF.
 
-### 2.3 The reference number
-
-`CY<yy>/<airline code>/<nnnnn>` — the year of the policy's `period_from`, the airline's
-`certificate_code`, and a sequence. The sequence runs per certificate type by default and can be
-switched (server setting) to one counter shared with the insurance certificate; numbers never repeat
-either way. The portal never builds or changes it.
-
----
-
-## 3. Certificate history
-
-A tab on the aircraft card and on the policy page.
-
-- **List** — `GET /certificates/reinsurance?aircraft_id=` (or `policy_id=`, `registration=`
-  separator-insensitive, `limit`, `offset`) → `{items, total}`, newest first. Columns: reference,
-  date of issue, registration, issued by (`issued_by_user.name`), alert count, PDF button.
-- **Detail** — `GET /certificates/reinsurance/{id}` — adds `data`: every value as printed, including
-  `data.issuer` (company and signatory as they were at issue).
-- **PDF** — `GET /certificates/reinsurance/{id}/pdf` opens inline; `?download=true` saves it as
-  `Reinsurance-Certificate-CY25-SCAT-00001.pdf`.
+PDF file names: `Reinsurance-Certificate-CY25-SCAT-00001.pdf`, a draft with `-DRAFT` appended.
 
 ---
 
-## 4. Page "Certificate settings" — the issuing company
+## 4. The insurance certificate
 
-- **Load** — `GET /certificates/settings` → `company_name`, `company_legal_name`, `address_line`,
-  `legal_footer`, `brand_primary`, `brand_accent`, `logo`, `stamp` (each image `{url, content_type,
-  size, sha256, updated_at}` or `null`).
+It is the same document for the Insured's own insurance, with these differences:
+
+- **INSURER** instead of REINSURED: the policy's `reinsured` party is printed as the Insurer. There is
+  no Retrocedent. If the policy has no reinsured, the error is `certificate.insurer`.
+- **INSURED AMOUNT: 100% of 100%** of Sums Insured.
+- **Who signs it** — `signed_by`:
+  - `broker` (default) — we sign, "in our capacity as insurance broker to the Insured"; the company
+    stamp is printed if one is uploaded.
+  - `insurer` — the Insurer signs. The wording is theirs, "AUTHORISED SIGNATORY" names the Insurer,
+    and **our stamp is not printed**.
+
+  `variant` shows which one applies. Show it as a radio button in the form.
+- **Its date should match the reinsurance certificate's.** If an issued reinsurance certificate
+  exists for the same aircraft and policy with another date, the alert
+  `date_differs_from_reinsurance` says so. Suggest the reinsurance date in the form, taken from the
+  latest issued reinsurance certificate in the history.
+- It has its own number sequence (`CY25/SCAT/00001` exists for both types) unless the shared counter
+  is switched on (§5).
+
+The reinsurance certificate's `variant` is `retrocession` or `standard` (with or without a
+retrocedent), as before.
+
+---
+
+## 5. The reference number
+
+`CY<yy>/<airline code>/<nnnnn>`:
+- the year of the policy's `period_from`;
+- the airline's `certificate_code`;
+- a sequence.
+
+By default the sequence runs separately for each certificate type. A server setting can switch it to
+one counter shared by both types; numbers never repeat either way. The number is allocated when the
+draft is created. If a draft's policy or airline changes, the number follows it, keeping its
+sequence. The portal never builds or changes it.
+
+---
+
+## 6. Admin panel → "Certificate settings" (the issuing company)
+
+**This page belongs in the admin panel, not in the users' menu.** Show it only to administrators.
+
+- **Load** — `GET /certificates/settings` returns:
+  - `company_name`, `company_legal_name`, `address_line`, `legal_footer`;
+  - `brand_primary`, `brand_accent`;
+  - `logo`, `stamp`: each is `{url, content_type, size, sha256, updated_at}`, or `null`.
 - **Form**
 
   | field | printed as | notes |
@@ -128,51 +204,44 @@ A tab on the aircraft card and on the policy page.
   | `legal_footer` | the regulatory small print on page 1 | multi-line |
   | `brand_primary`, `brand_accent` | header text colour, rule above page numbers | `#RRGGBB` |
 
-  Save with `PATCH /certificates/settings` — only the fields changed; `null` / `""` clears the
-  optional ones.
-- **Logo and stamp** — preview `GET /certificates/settings/logo` (or `/stamp`: the image itself);
-  upload `PUT /certificates/settings/logo` (or `/stamp`) as `multipart/form-data`, field `file`, PNG /
-  JPEG / SVG up to 2 MB (SVG preferred — drawn as vector, sharp in print); remove with `DELETE`.
-  422 = broken or unsupported file; show its `msg`.
-- Tell the user: **changes apply to new certificates; issued ones keep what they printed.**
+  Save with `PATCH /certificates/settings`, sending only the fields that changed. `null` or `""`
+  clears the optional ones.
+- **Logo and stamp**
+  - preview: `GET /certificates/settings/logo` (or `/stamp`) returns the image itself;
+  - upload: `PUT /certificates/settings/logo` (or `/stamp`) as `multipart/form-data`, field `file`.
+    PNG, JPEG or SVG up to 2 MB. SVG is preferred for the logo: it is drawn as vector and stays sharp
+    in print. PNG with a transparent background is best for the stamp;
+  - remove: `DELETE`;
+  - 422 means a broken or unsupported file: show its `msg`.
+- **The stamp is printed only if one is uploaded.** Without one, the signature block has no stamp.
+- Tell the admin: **drafts pick up changes at once; issued certificates keep what they printed.**
 
 Current values: legal name `AI12`, no header text, the AI12 logo (SVG), no stamp, no address line,
 no footer.
 
 ---
 
-## 5. Page "My signatory profile" — the current user
+## 7. Data elsewhere the certificates read
 
-- **Load** — `GET /certificates/signatory` → `title`, `phone`, `name`, `email`, `printed_as`,
-  `signature`. `printed_as` is exactly what a certificate issued now prints under the signature —
-  show it as a preview. `name` / `email` are optional overrides; empty = the portal's.
-- **Save** — `PATCH /certificates/signatory` with `{title, phone, name?, email?}`.
-- **Signature** — `PUT /certificates/signatory/signature` (field `file`, PNG with a transparent
-  background preferred, JPEG or SVG, up to 2 MB); `GET` shows it; `DELETE` removes it.
-- A user without a profile can still issue: the certificate then shows their portal name and e-mail
-  with no signature image. Nudge them to fill it in before their first certificate.
-
----
-
-## 6. Data elsewhere the certificate reads
-
-### 6.1 Airline — `certificate_code`
+### 7.1 Airline — `certificate_code`
 `POST` / `PATCH /ref/airlines` take `certificate_code`: letters, digits and hyphens, stored upper-case,
 unique. It is the airline part of the reference number; without it the airline's aircraft cannot get
 a certificate. SCAT is set (`SCAT`).
 
-### 6.2 Lease agreement — contract parties and contracts
-- `contract_parties` on `POST` / `PATCH /leasing/agreements`: the parties the certificate names as
-  Contract Party(ies), **in print order** (usually the lessor first) — party ids or names. Returned
-  on `/leasing/agreements*` as `contract_parties: [{id, name, details}]`. Edit as a multi-select with
-  drag-to-reorder. Empty = the lessor alone.
+### 7.2 Lease agreement — contract parties and contracts
+- `contract_parties` on `POST` / `PATCH /leasing/agreements`:
+  - the parties the certificate names as Contract Party(ies), **in print order** (usually the lessor
+    first), given as party ids or names;
+  - returned on `/leasing/agreements*` as `contract_parties: [{id, name, details}]`;
+  - edit it as a multi-select with drag-to-reorder;
+  - empty = the lessor alone.
 - The notice e-mails on the Schedule of Parties are those parties' contacts
-  (`/ref/parties/{id}/contacts`). A party without contacts is printed without an e-mail and raises an
-  alert.
+  (`/ref/parties/{id}/contacts`). A party without contacts is printed without an e-mail, and an alert
+  is raised.
 - `other_contracts`: **one line = one item** of the certificate's Contracts list, after the lease
   agreement itself.
 
-### 6.3 Policy — "Certificate wording"
+### 7.3 Policy — "Certificate wording"
 New editable fields on the policy, each defaulting to the market-standard text from the client's
 sample. Put them in a "Certificate wording" section of the policy form:
 
@@ -188,7 +257,7 @@ sample. Put them in a "Certificate wording" section of the policy form:
 
 ---
 
-## 7. What the checks mean (`alerts[].code`)
+## 8. What the checks mean (`alerts[].code`)
 
 | code | meaning |
 |---|---|
@@ -198,23 +267,38 @@ sample. Put them in a "Certificate wording" section of the policy form:
 | `no_deductible_aggregate` | a hull deductible buy-down is shown without an annual aggregate |
 | `country_limit_without_country` | the policy has a country confiscation limit but no country; left off |
 | `no_notice_address` | a contract party has no contact block; printed without an e-mail |
+| `date_differs_from_reinsurance` | insurance only: dated differently from the issued reinsurance certificate for the same aircraft and policy |
 
 ---
 
-## 8. Open items
+## 9. What was removed
 
-- **Insurance certificate** — not built yet; will reuse the same flow, history, settings and
-  signatory.
-- **Real company details** — legal name, address line and legal footer still to be entered in
-  "Certificate settings"; no stamp uploaded yet.
-- **Letter of Undertaking / Schedule of Parties** are always part of the reinsurance certificate PDF
-  (pages 5-7); there is no separate endpoint for them.
+- `/certificates/signatory*` (the signatory profile and the signature upload): the signatory now
+  comes with the request (§1), and the signature is made by hand.
+- `POST /certificates/reinsurance/preview/pdf`: create a draft and open its PDF instead.
+- `POST /certificates/reinsurance` no longer issues directly. It creates a draft, and
+  `/{id}/issue` issues it.
 
 ---
 
-## 9. Change log
+## 10. Open items
+
+- **Insurer-signed insurance certificate — whose details?** The certificate prints whatever
+  `signatory` the request carries. When the Insurer signs, send the Insurer's signatory details, not
+  the portal user's. To confirm with the client.
+- **Real company details** — the legal name, address line and legal footer still have to be entered
+  in the admin panel. No stamp has been uploaded yet.
+- **Letter of Undertaking / Schedule of Parties** are always part of the certificate PDF (the last
+  pages). There is no separate endpoint for them.
+- **Insurance certificate: the client's sample.** It is built from the guidelines' list of
+  differences. A real signed sample would confirm the insurer-signed wording.
+
+---
+
+## 11. Change log
 
 | date | change |
 |---|---|
 | 2026-09-29 | Reinsurance certificate: preview, issue, history, PDF; reference numbers; airline `certificate_code`; policy certificate wording; agreement `contract_parties`. |
 | 2026-09-29 | Signatory = the issuing portal user (+ profile at `/certificates/signatory`); company branding and images moved to the database (`/certificates/settings`); DRAFT PDF preview. |
+| 2026-09-30 | **Draft → issued.** A certificate is created as a draft, edited (`PATCH`), drawn marked DRAFT, then issued (`/{id}/issue`) and frozen. **Insurance certificate** (`/certificates/insurance`, `signed_by`). Signatory details come with the request; the signature profile and signature upload were removed. The stamp is printed only when uploaded. "Certificate settings" moved to the admin panel. |

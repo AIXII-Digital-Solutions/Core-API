@@ -681,26 +681,46 @@ class CertificateIssuer(BaseModel):
     name: Optional[str]
 
 
-class ReinsuranceCertificateOut(BaseModel):
+class CertificateUser(BaseModel):
+    id: Optional[str]
+    name: Optional[str]
+
+
+class CertificateOut(BaseModel):
     id: int
-    reference_number: str = Field(description="CY<yy>/<airline code>/<nnnnn>")
-    date_of_issue: Date
+    kind: str = Field(description="reinsurance | insurance")
+    status: str = Field(description="draft (editable, drawn marked DRAFT) | issued (final)")
+    reference_number: str = Field(description="CY<yy>/<airline code>/<nnnnn>; allocated with the draft.")
+    date_of_issue: Date = Field(description="A draft left to the system shows today; issued = as printed.")
     date_of_issue_source: str = Field(description="system | user")
-    variant: str = Field(description="retrocession | standard")
+    variant: str = Field(description="reinsurance: retrocession | standard; insurance: broker | insurer")
     registration: Optional[str]
     msn: Optional[str]
     aircraft_id: Optional[int]
     policy_id: Optional[int]
     aircraft_lease_id: Optional[int]
     alerts: List[CertificateAlert]
-    issued_by: Optional[str]
-    issued_by_user: Optional[CertificateIssuer]
+    errors: List[CertificateError] = Field(description="What stops the draft being issued; [] once issued.")
+    can_issue: bool
+    created_by_user: Optional[CertificateUser]
     created_at: Optional[DateTime]
+    updated_at: Optional[DateTime]
+    issued_at: Optional[DateTime]
+    issued_by: Optional[str] = Field(description="The API credential that issued it.")
+    issued_by_user: Optional[CertificateIssuer]
+    request: dict[str, Any] = Field(description="The inputs as stored: policy_id, date_of_issue, "
+                                                "signed_by, signatory, overrides.")
     pdf_url: str
 
 
-class ReinsuranceCertificateFull(ReinsuranceCertificateOut):
-    data: dict[str, Any] = Field(description="Every value the certificate printed, as resolved at issue.")
+class CertificateFull(CertificateOut):
+    data: dict[str, Any] = Field(description="Every value it prints: a draft as resolved now, an "
+                                             "issued certificate as printed.")
+
+
+class CertificateDiscarded(BaseModel):
+    id: int
+    reference_number: str
 
 
 class CertificateImage(BaseModel):
@@ -729,24 +749,7 @@ class CertificateSettingsOut(BaseModel):
     stamp: Optional[CertificateImage]
 
 
-class SignatoryPrinted(BaseModel):
-    name: Optional[str]
-    email: Optional[str]
-    title: Optional[str]
-    phone: Optional[str]
-
-
-class SignatoryOut(BaseModel):
-    portal_user_id: str
-    name: Optional[str] = Field(description="Override of the portal name; null = the portal's.")
-    email: Optional[str] = Field(description="Override of the portal e-mail; null = the portal's.")
-    title: Optional[str]
-    phone: Optional[str]
-    printed_as: SignatoryPrinted = Field(description="What a certificate issued now would print.")
-    signature: Optional[CertificateImage]
-
-
-class ReinsurancePreview(BaseModel):
+class CertificatePreview(BaseModel):
     reference_number: Optional[str] = Field(description="With the sequence masked: CY25/SCAT/#####.")
     date_of_issue: Date
     variant: str
@@ -866,18 +869,24 @@ RESPONSE_DATA: dict[tuple[str, str], Any] = {
 
     ("GET", "/ref/countries"): Page[CountryOut],
     ("GET", "/ref/countries/{country_id}"): CountryOut,
-    ("POST", "/certificates/reinsurance/preview"): ReinsurancePreview,
-    ("POST", "/certificates/reinsurance"): ReinsuranceCertificateFull,
-    ("GET", "/certificates/reinsurance"): Page[ReinsuranceCertificateOut],
-    ("GET", "/certificates/reinsurance/{certificate_id}"): ReinsuranceCertificateFull,
+    ("POST", "/certificates/reinsurance/preview"): CertificatePreview,
+    ("POST", "/certificates/reinsurance"): CertificateFull,
+    ("GET", "/certificates/reinsurance"): Page[CertificateOut],
+    ("GET", "/certificates/reinsurance/{certificate_id}"): CertificateFull,
+    ("PATCH", "/certificates/reinsurance/{certificate_id}"): CertificateFull,
+    ("POST", "/certificates/reinsurance/{certificate_id}/issue"): CertificateFull,
+    ("DELETE", "/certificates/reinsurance/{certificate_id}"): CertificateDiscarded,
+    ("POST", "/certificates/insurance/preview"): CertificatePreview,
+    ("POST", "/certificates/insurance"): CertificateFull,
+    ("GET", "/certificates/insurance"): Page[CertificateOut],
+    ("GET", "/certificates/insurance/{certificate_id}"): CertificateFull,
+    ("PATCH", "/certificates/insurance/{certificate_id}"): CertificateFull,
+    ("POST", "/certificates/insurance/{certificate_id}/issue"): CertificateFull,
+    ("DELETE", "/certificates/insurance/{certificate_id}"): CertificateDiscarded,
     ("GET", "/certificates/settings"): CertificateSettingsOut,
     ("PATCH", "/certificates/settings"): CertificateSettingsOut,
     ("PUT", "/certificates/settings/{kind}"): CertificateImageSaved,
     ("DELETE", "/certificates/settings/{kind}"): dict[str, str],
-    ("GET", "/certificates/signatory"): SignatoryOut,
-    ("PATCH", "/certificates/signatory"): SignatoryOut,
-    ("PUT", "/certificates/signatory/signature"): CertificateImageSaved,
-    ("DELETE", "/certificates/signatory/signature"): dict[str, str],
     ("GET", "/policy/policies"): Page[PolicyOut],
     ("POST", "/policy/policies"): PolicyWithAircraft,
     ("GET", "/policy/policies/{policy_id}"): PolicyWithAircraft,

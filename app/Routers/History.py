@@ -51,8 +51,8 @@ _TABLES = {
     "fleet": {"aircraft_type", "engine_type", "aircraft", "aircraft_engine", "service_info"},
     "leasing": {"agreement", "aircraft_lease"},
     "policy": {"policy", "policy_party", "coverage"},
-    # the issuing company and the signatories of the certificates (Routers/Certificates.py)
-    "certificate": {"settings", "signatory"},
+    # the issuing company of the certificates (Routers/Certificates.py)
+    "certificate": {"settings"},
     # the manual overrides of the forecast fleet sheet (Routers/AircraftDetails.py)
     "forecast": {"aircraft_info_edits"},
 }

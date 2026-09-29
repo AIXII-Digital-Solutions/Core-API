@@ -1,33 +1,37 @@
-"""Issued certificates — schema `certificate` in the aixii database.
+"""Certificates — schema `certificate` in the aixii database.
 
 An insured aircraft needs two documents, issued on request and re-issued whenever something on them
-changes: the INSURANCE certificate and the REINSURANCE certificate (AVN 67B). Each table here is the
-history of one of them — every certificate ever issued, never updated, never deleted by the API.
+changes: the INSURANCE certificate and the REINSURANCE certificate (AVN 67B). Each table holds one of
+them, every certificate from its first draft on.
 
-WHAT A ROW HOLDS. The certificate is a legal document, so a row must reproduce exactly what was
-sent, however the policy, the lease or the aircraft have changed since:
+A CERTIFICATE HAS TWO STATES (`status`):
 
-  * `data`       every value printed on it, resolved and formatted at the moment of issue;
-  * `alerts`     the warnings the checks raised (a lease limit above the policy's, …);
-  * `pdf`        the rendered document itself, deferred so a listing never drags it along;
-  * the links    aircraft / policy / lease — for finding certificates, never for re-reading
-                 them (ON DELETE SET NULL: the history outlives the rows it was issued from).
+  * `draft`   being prepared. Its inputs (`request`: policy, date of issue, overrides, signatory) can
+              still change; its values are re-resolved from the policy, the lease and the aircraft
+              whenever it is read, and every PDF drawn of it is marked DRAFT on every page.
+  * `issued`  final. Its values (`data`), checks (`alerts`) and the PDF as sent (`pdf`) are frozen —
+              a database trigger refuses any UPDATE or DELETE of an issued row — so it reproduces
+              exactly what was sent however the policy, the lease or the aircraft change later.
 
-THE REFERENCE NUMBER is `CY<yy>/<airline code>/<nnnnn>`: the contract year is the year of the policy's
-period_from, the airline code is `ref.airline.certificate_code`, and nnnnn comes from
-`certificate.reference_counter`. The counter has a SCOPE: one per certificate type by default, or
-one shared scope for both types (settings.CERTIFICATE_COUNTER_MODE). Switching between them never
-reuses a number: a scope continues from the highest value of every scope it could collide with.
+THE REFERENCE NUMBER is allocated when the draft is created, so a draft circulated for review already
+carries the number it will be issued under: `CY<yy>/<airline code>/<nnnnn>` — the year of the policy's
+period_from, `ref.airline.certificate_code`, and nnnnn from `certificate.reference_counter`. The counter
+has a SCOPE: one per certificate type by default, or one shared by both (settings
+.CERTIFICATE_COUNTER_MODE). Switching never reuses a number: a scope continues from the highest value
+of every scope it could collide with. A discarded draft does not give its number back.
+
+The links to aircraft / policy / lease are for finding certificates, never for re-reading an issued
+one (ON DELETE SET NULL: the history outlives the rows it was issued from).
 
 Alembic reads THIS file (db-contract); `app/Database/CertificateModels.py` is core-api's runtime copy.
 """
 import inspect
 import sys
-from datetime import date
+from datetime import date, datetime
 from typing import Optional
 
 from sqlalchemy import (
-    String, Text, BigInteger, Integer, Date, ForeignKey, LargeBinary, CheckConstraint,
+    String, Text, BigInteger, Integer, Date, DateTime, ForeignKey, LargeBinary, CheckConstraint,
     UniqueConstraint, text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -40,10 +44,15 @@ from .FleetModels import Aircraft
 from .PolicyModels import Policy
 from .LeasingModels import AircraftLease
 
+DRAFT, ISSUED = "draft", "issued"
 
-class _IssuedCertificate:
+
+class _Certificate:
     """The columns both certificate tables share."""
 
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, server_default=text("'draft'"),
+        comment="draft (still editable, drawn marked DRAFT) or issued (frozen).")
     reference_number: Mapped[str] = mapped_column(String, nullable=False)
     contract_year: Mapped[int] = mapped_column(Integer, nullable=False)
     airline_code: Mapped[str] = mapped_column(String, nullable=False)
@@ -60,10 +69,19 @@ class _IssuedCertificate:
     registration: Mapped[Optional[str]] = mapped_column(String, nullable=True, index=True)
     msn: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
+    request: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb"),
+        comment="The inputs: policy, date of issue, overrides, signatory — what a draft edit changes.")
     data: Mapped[dict] = mapped_column(JSONB, nullable=False)
     alerts: Mapped[list] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
-    pdf: Mapped[bytes] = mapped_column(LargeBinary, nullable=False, deferred=True)
+    errors: Mapped[list] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb"),
+        comment="What still stops a draft being issued; always empty once issued.")
+    pdf: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True, deferred=True)
 
+    created_by_user_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    created_by_user_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    issued_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     issued_by: Mapped[Optional[str]] = mapped_column(String, nullable=True,
                                                      comment="The API credential, as in audit.change_log.")
     issued_by_user_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
@@ -87,26 +105,28 @@ class _IssuedCertificate:
                              nullable=True, index=True)
 
 
-class ReinsuranceCertificate(_IssuedCertificate, Base):
-    """Every reinsurance certificate issued (AVN 67B)."""
+def _table_args(name: str, what: str):
+    return (
+        UniqueConstraint("reference_number", name=f"uq_{name}_reference_number"),
+        CheckConstraint("date_of_issue_source IN ('system', 'user')", name=f"ck_{name}_date_source"),
+        CheckConstraint("status IN ('draft', 'issued')", name=f"ck_{name}_status"),
+        CheckConstraint("status = 'draft' OR (pdf IS NOT NULL AND issued_at IS NOT NULL)",
+                        name=f"ck_{name}_issued_complete"),
+        {"comment": f"Every {what} certificate, from draft to issued. An issued row is frozen "
+                    f"(trigger): its values, alerts and the PDF as sent."},
+    )
+
+
+class ReinsuranceCertificate(_Certificate, Base):
+    """Reinsurance certificates (AVN 67B)."""
     __tablename__ = "reinsurance_certificate"
-    __table_args__ = (
-        UniqueConstraint("reference_number", name="uq_reinsurance_certificate_reference_number"),
-        CheckConstraint("date_of_issue_source IN ('system', 'user')", name="ck_reinsurance_certificate_date_source"),
-        {"comment": "Every reinsurance certificate issued: its reference, the values printed on it, "
-                    "the checks' alerts and the PDF as sent. Append-only."},
-    )
+    __table_args__ = _table_args("reinsurance_certificate", "reinsurance")
 
 
-class InsuranceCertificate(_IssuedCertificate, Base):
-    """Every insurance certificate issued."""
+class InsuranceCertificate(_Certificate, Base):
+    """Insurance certificates (AVN 67B)."""
     __tablename__ = "insurance_certificate"
-    __table_args__ = (
-        UniqueConstraint("reference_number", name="uq_insurance_certificate_reference_number"),
-        CheckConstraint("date_of_issue_source IN ('system', 'user')", name="ck_insurance_certificate_date_source"),
-        {"comment": "Every insurance certificate issued: its reference, the values printed on it, "
-                    "the checks' alerts and the PDF as sent. Append-only."},
-    )
+    __table_args__ = _table_args("insurance_certificate", "insurance")
 
 
 class ReferenceCounter(Base):
@@ -123,9 +143,9 @@ class ReferenceCounter(Base):
 
 
 class Settings(Base):
-    """The issuing company as the certificates print it — ONE row (id = 1), edited from the portal.
-    The images (logo, stamp) are rows of `Asset`, not columns here, so this row stays small and its
-    audit entries readable."""
+    """The issuing company as the certificates print it — ONE row (id = 1), edited from the portal's
+    admin. The images (logo, stamp) are rows of `Asset`, not columns here, so this row stays small and
+    its audit entries readable."""
     __tablename__ = "settings"
 
     company_name: Mapped[Optional[str]] = mapped_column(
@@ -150,28 +170,9 @@ class Settings(Base):
     )
 
 
-class Signatory(Base):
-    """What a certificate prints under its signature for one portal user — the person who issues it.
-    Their name and e-mail come from the portal with the request; this row adds what the portal does
-    not send: title, phone, and (as an Asset `signature:<user id>`) the signature image."""
-    __tablename__ = "signatory"
-
-    portal_user_id: Mapped[str] = mapped_column(String, nullable=False)
-    name: Mapped[Optional[str]] = mapped_column(
-        String, nullable=True, comment="Overrides the portal name on the certificate when set.")
-    email: Mapped[Optional[str]] = mapped_column(
-        String, nullable=True, comment="Overrides the portal e-mail on the certificate when set.")
-    title: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    phone: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-
-    __table_args__ = (
-        UniqueConstraint("portal_user_id", name="uq_certificate_signatory_portal_user"),
-    )
-
-
 class Asset(Base):
-    """An image the certificates draw: `logo`, `stamp`, or `signature:<portal user id>`. PNG, JPEG or
-    SVG (SVG is drawn as vector). Not audited: a log entry per upload would copy the bytes."""
+    """An image the certificates draw: the company `logo` and `stamp`. PNG, JPEG or SVG (SVG is drawn
+    as vector). Not audited: a log entry per upload would copy the bytes."""
     __tablename__ = "asset"
 
     key: Mapped[str] = mapped_column(String, nullable=False)

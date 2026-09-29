@@ -163,8 +163,8 @@ def _validation_example() -> dict:
 # described by _special_cases, not by RESPONSE_DATA
 _SPECIAL_PATHS = {"/status/stream", "/database/{type}",
                   "/certificates/reinsurance/{certificate_id}/pdf",
-                  "/certificates/reinsurance/preview/pdf",
-                  "/certificates/settings/{kind}", "/certificates/signatory/signature"}
+                  "/certificates/insurance/{certificate_id}/pdf",
+                  "/certificates/settings/{kind}"}
 
 
 def _special_cases(spec: dict) -> None:
@@ -199,13 +199,12 @@ def _special_cases(spec: dict) -> None:
     binary = {"type": "string", "format": "binary"}
     for path, method, description, types in (
             ("/certificates/reinsurance/{certificate_id}/pdf", "get",
-             "The certificate as issued: a PDF, not the envelope.", ("application/pdf",)),
-            ("/certificates/reinsurance/preview/pdf", "post",
-             "The certificate as it would be issued, marked DRAFT: a PDF, not the envelope.",
-             ("application/pdf",)),
+             "A PDF, not the envelope: a draft drawn now and marked DRAFT, an issued certificate "
+             "as sent.", ("application/pdf",)),
+            ("/certificates/insurance/{certificate_id}/pdf", "get",
+             "A PDF, not the envelope: a draft drawn now and marked DRAFT, an issued certificate "
+             "as sent.", ("application/pdf",)),
             ("/certificates/settings/{kind}", "get", "The image itself, not the envelope.",
-             ("image/png", "image/jpeg", "image/svg+xml")),
-            ("/certificates/signatory/signature", "get", "The image itself, not the envelope.",
              ("image/png", "image/jpeg", "image/svg+xml"))):
         op = paths.get(path, {}).get(method)
         if op:
