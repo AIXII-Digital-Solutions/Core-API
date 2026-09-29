@@ -703,6 +703,49 @@ class ReinsuranceCertificateFull(ReinsuranceCertificateOut):
     data: dict[str, Any] = Field(description="Every value the certificate printed, as resolved at issue.")
 
 
+class CertificateImage(BaseModel):
+    url: str
+    content_type: str = Field(description="image/png | image/jpeg | image/svg+xml")
+    size: int
+    sha256: str
+    updated_at: Optional[DateTime]
+
+
+class CertificateImageSaved(BaseModel):
+    content_type: str
+    size: int
+    sha256: str
+    url: str
+
+
+class CertificateSettingsOut(BaseModel):
+    company_name: Optional[str] = Field(description="Beside the logo in the header; null = logo only.")
+    company_legal_name: str
+    address_line: Optional[str]
+    legal_footer: Optional[str]
+    brand_primary: str
+    brand_accent: str
+    logo: Optional[CertificateImage]
+    stamp: Optional[CertificateImage]
+
+
+class SignatoryPrinted(BaseModel):
+    name: Optional[str]
+    email: Optional[str]
+    title: Optional[str]
+    phone: Optional[str]
+
+
+class SignatoryOut(BaseModel):
+    portal_user_id: str
+    name: Optional[str] = Field(description="Override of the portal name; null = the portal's.")
+    email: Optional[str] = Field(description="Override of the portal e-mail; null = the portal's.")
+    title: Optional[str]
+    phone: Optional[str]
+    printed_as: SignatoryPrinted = Field(description="What a certificate issued now would print.")
+    signature: Optional[CertificateImage]
+
+
 class ReinsurancePreview(BaseModel):
     reference_number: Optional[str] = Field(description="With the sequence masked: CY25/SCAT/#####.")
     date_of_issue: Date
@@ -827,6 +870,14 @@ RESPONSE_DATA: dict[tuple[str, str], Any] = {
     ("POST", "/certificates/reinsurance"): ReinsuranceCertificateFull,
     ("GET", "/certificates/reinsurance"): Page[ReinsuranceCertificateOut],
     ("GET", "/certificates/reinsurance/{certificate_id}"): ReinsuranceCertificateFull,
+    ("GET", "/certificates/settings"): CertificateSettingsOut,
+    ("PATCH", "/certificates/settings"): CertificateSettingsOut,
+    ("PUT", "/certificates/settings/{kind}"): CertificateImageSaved,
+    ("DELETE", "/certificates/settings/{kind}"): dict[str, str],
+    ("GET", "/certificates/signatory"): SignatoryOut,
+    ("PATCH", "/certificates/signatory"): SignatoryOut,
+    ("PUT", "/certificates/signatory/signature"): CertificateImageSaved,
+    ("DELETE", "/certificates/signatory/signature"): dict[str, str],
     ("GET", "/policy/policies"): Page[PolicyOut],
     ("POST", "/policy/policies"): PolicyWithAircraft,
     ("GET", "/policy/policies/{policy_id}"): PolicyWithAircraft,

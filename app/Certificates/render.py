@@ -2,11 +2,12 @@
 
 The layout follows the market form the client supplied (Reinsurance Certificates Info.xlsx, sheet
 "Reinsurance certificate"): the certificate (sections 1-8, signature), the Letter of Undertaking and
-the Schedule of Parties to whom Notice is to be Given — with our own header, footer and signatory
-(branding.py) in place of the broker's.
+the Schedule of Parties to whom Notice is to be Given — with the issuing company's header, footer
+and images (certificate.settings / certificate.asset) and the issuing user as signatory, in place of
+the broker's. `data["issuer"]` carries the text; `images` the logo, stamp and signature bytes.
 
-Everything here is a pure function of `data`: the same snapshot always draws the same document,
-which is what lets the history keep the values beside the PDF and trust them to agree.
+Everything here is a pure function of its arguments: the same snapshot and images always draw the
+same document, which is what lets the history keep the values beside the PDF and trust them.
 """
 import io
 from datetime import date
@@ -20,7 +21,9 @@ from reportlab.lib.units import mm
 from reportlab.platypus import (Image, KeepTogether, PageBreak, Paragraph, SimpleDocTemplate,
                                 Spacer, Table, TableStyle)
 
-from . import branding
+from reportlab.graphics import renderPDF
+from reportlab.lib.utils import ImageReader
+
 from .formatting import join_names, long_date, money, percent_number, percent_words, roman
 
 PAGE_W, PAGE_H = A4
@@ -115,58 +118,113 @@ _SEVERAL_SMALL = ("SEVERAL LIABILITY NOTICE – The subscribing Insurer’s obli
 # page furniture
 # ==============================================================================================
 
-def _header(canvas):
-    canvas.saveState()
-    y = PAGE_H - 22 * mm
-    canvas.setFillColor(colors.HexColor(branding.BRAND_PRIMARY))
-    canvas.setFont("Times-Roman", 20)
-    canvas.drawString(MARGIN_X, y, branding.COMPANY_NAME)
-    logo = branding.asset("logo.png")
-    if logo:
-        w, h = 55 * mm, 14 * mm
-        canvas.drawImage(str(logo), PAGE_W - MARGIN_X - w, y - 4 * mm, w, h,
-                         preserveAspectRatio=True, anchor="e", mask="auto")
-    canvas.restoreState()
+def _svg(data: bytes):
+    from svglib.svglib import svg2rlg
+    return svg2rlg(io.BytesIO(data))
 
 
-def _first_page(canvas, doc):
-    _header(canvas)
-    canvas.saveState()
-    canvas.setFont("Times-Roman", 11)
-    canvas.setFillColor(colors.black)
-    canvas.drawCentredString(PAGE_W / 2, 22 * mm, branding.COMPANY_ADDRESS_LINE)
-    footer = Paragraph(_e(branding.COMPANY_LEGAL_FOOTER), _SMALL)
-    w, h = footer.wrap(PAGE_W - 2 * MARGIN_X, 20 * mm)
-    footer.drawOn(canvas, MARGIN_X, 18 * mm - h)
-    canvas.restoreState()
+def _fit(width, height, max_w, max_h):
+    scale = min(max_w / width, max_h / height)
+    return width * scale, height * scale, scale
 
 
-def _later_page(canvas, doc):
-    _header(canvas)
-    canvas.saveState()
-    canvas.setStrokeColor(colors.HexColor(branding.BRAND_ACCENT))
-    canvas.setLineWidth(3)
-    canvas.line(MARGIN_X, 20 * mm, PAGE_W - MARGIN_X, 20 * mm)
-    canvas.setFont("Times-Roman", 10)
-    canvas.drawRightString(PAGE_W - MARGIN_X, 13 * mm, str(doc.page))
-    canvas.restoreState()
+def _flowable(img, max_w, max_h):
+    """An image as a flowable inside a box, aspect kept: SVG as vector, PNG/JPEG as a bitmap."""
+    if img is None:
+        return None
+    if img.content_type == "image/svg+xml":
+        drawing = _svg(img.data)
+        w, h, scale = _fit(drawing.width, drawing.height, max_w, max_h)
+        drawing.scale(scale, scale)
+        drawing.width, drawing.height = w, h
+        return drawing
+    reader = ImageReader(io.BytesIO(img.data))
+    iw, ih = reader.getSize()
+    w, h, _ = _fit(iw, ih, max_w, max_h)
+    return Image(io.BytesIO(img.data), width=w, height=h)
 
 
-def _signature_block(date_of_issue: str, with_date: bool = True, lead=None):
-    sig, stamp = branding.asset("signature.png"), branding.asset("stamp.png")
-    images = []
-    if sig:
-        images.append(Image(str(sig), width=45 * mm, height=18 * mm, kind="proportional"))
-    if stamp:
-        images.append(Image(str(stamp), width=22 * mm, height=22 * mm, kind="proportional"))
-    image_row = Table([images], hAlign="LEFT") if images else Spacer(1, 18 * mm)
-    right = [
-        image_row,
-        _p("Authorised Signatory", _BASE),
-        _p(f"<b>{_e(branding.SIGNATORY_NAME)}</b><br/><b>Tel: {_e(branding.SIGNATORY_PHONE)}</b><br/>"
-           f"<font color='#1F5FBF'><b>{_e(branding.SIGNATORY_EMAIL)}</b></font>", _BASE),
-    ]
-    left = _p(f"Date of issue {_e(date_of_issue)}", _BASE) if with_date else _p("", _BASE)
+def _draw_image(canvas, img, right_x, top_y, max_w, max_h):
+    """Draw on the canvas, right-aligned at `right_x`, top at `top_y`."""
+    if img.content_type == "image/svg+xml":
+        drawing = _svg(img.data)
+        w, h, scale = _fit(drawing.width, drawing.height, max_w, max_h)
+        drawing.scale(scale, scale)
+        renderPDF.draw(drawing, canvas, right_x - w, top_y - h)
+        return
+    reader = ImageReader(io.BytesIO(img.data))
+    iw, ih = reader.getSize()
+    w, h, _ = _fit(iw, ih, max_w, max_h)
+    canvas.drawImage(reader, right_x - w, top_y - h, w, h, mask="auto")
+
+
+def _page_callbacks(issuer: dict, images: dict, draft: bool):
+    primary = colors.HexColor(issuer.get("brand_primary") or "#1F3B33")
+    accent = colors.HexColor(issuer.get("brand_accent") or "#D5E28D")
+
+    def header(canvas):
+        canvas.saveState()
+        top = PAGE_H - 14 * mm
+        if issuer.get("company_name"):
+            canvas.setFillColor(primary)
+            canvas.setFont("Times-Roman", 20)
+            canvas.drawString(MARGIN_X, top - 8 * mm, issuer["company_name"])
+        if images.get("logo"):
+            _draw_image(canvas, images["logo"], PAGE_W - MARGIN_X, top, 60 * mm, 13 * mm)
+        if draft:
+            canvas.setFillColor(colors.Color(0.85, 0.2, 0.2, alpha=0.18))
+            canvas.setFont("Helvetica-Bold", 110)
+            canvas.translate(PAGE_W / 2, PAGE_H / 2)
+            canvas.rotate(45)
+            canvas.drawCentredString(0, -35, "DRAFT")
+        canvas.restoreState()
+
+    def first_page(canvas, doc):
+        header(canvas)
+        canvas.saveState()
+        if issuer.get("address_line"):
+            canvas.setFont("Times-Roman", 11)
+            canvas.setFillColor(colors.black)
+            canvas.drawCentredString(PAGE_W / 2, 22 * mm, issuer["address_line"])
+        if issuer.get("legal_footer"):
+            footer = Paragraph(_e(issuer["legal_footer"]), _SMALL)
+            w, h = footer.wrap(PAGE_W - 2 * MARGIN_X, 20 * mm)
+            footer.drawOn(canvas, MARGIN_X, 18 * mm - h)
+        canvas.restoreState()
+
+    def later_page(canvas, doc):
+        header(canvas)
+        canvas.saveState()
+        canvas.setStrokeColor(accent)
+        canvas.setLineWidth(3)
+        canvas.line(MARGIN_X, 20 * mm, PAGE_W - MARGIN_X, 20 * mm)
+        canvas.setFont("Times-Roman", 10)
+        canvas.drawRightString(PAGE_W - MARGIN_X, 13 * mm, str(doc.page))
+        canvas.restoreState()
+
+    return first_page, later_page
+
+
+def _signature_block(issuer: dict, images: dict, date_of_issue: str, lead=None):
+    """The issuing user's signature (if they keep one) and the company stamp, then who signed."""
+    parts = [x for x in (_flowable(images.get("signature"), 48 * mm, 20 * mm),
+                         _flowable(images.get("stamp"), 24 * mm, 24 * mm)) if x is not None]
+    if parts:
+        image_row = Table([parts], hAlign="LEFT")
+        image_row.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                                       ("LEFTPADDING", (0, 0), (-1, -1), 0)]))
+    else:
+        image_row = Spacer(1, 18 * mm)
+    who = issuer.get("signatory") or {}
+    lines = [f"<b>{_e(who.get('name') or '[Signatory]')}</b>"]
+    if who.get("title"):
+        lines.append(_e(who["title"]))
+    if who.get("phone"):
+        lines.append(f"<b>Tel: {_e(who['phone'])}</b>")
+    if who.get("email"):
+        lines.append(f"<font color='#1F5FBF'><b>{_e(who['email'])}</b></font>")
+    right = [image_row, _p("Authorised Signatory", _BASE), _p("<br/>".join(lines), _BASE)]
+    left = _p(f"Date of issue {_e(date_of_issue)}", _BASE)
     table = Table([[left, right]], colWidths=[(PAGE_W - 2 * MARGIN_X) * 0.5] * 2)
     table.setStyle(TableStyle([("VALIGN", (0, 0), (0, 0), "BOTTOM"),
                                ("VALIGN", (1, 0), (1, 0), "TOP"),
@@ -174,7 +232,7 @@ def _signature_block(date_of_issue: str, with_date: bool = True, lead=None):
     return KeepTogether([
         *(lead or []),
         table, Spacer(1, 4 * mm),
-        _p(f"AUTHORISED SIGNATORY<br/>{_e(branding.COMPANY_LEGAL_NAME.upper())}",
+        _p(f"AUTHORISED SIGNATORY<br/>{_e((issuer.get('company_legal_name') or '').upper())}",
            ParagraphStyle("sig", parent=_BASE, alignment=TA_CENTER)),
     ])
 
@@ -200,7 +258,11 @@ def _label_table(rows, label_width, indent=0, bold_values=True):
 # the document
 # ==============================================================================================
 
-def render(data: dict, *, reference_number: str, date_of_issue: date) -> bytes:
+def render(data: dict, *, reference_number: str, date_of_issue: date, images: dict,
+           draft: bool = False) -> bytes:
+    """`images`: {"logo"|"stamp"|"signature": issuer.Image}. `draft` stamps DRAFT across every page
+    — the preview, which has no reference number yet."""
+    issuer = data["issuer"]
     issued = long_date(date_of_issue)
     story = []
     add = story.append
@@ -316,7 +378,7 @@ def render(data: dict, *, reference_number: str, date_of_issue: date) -> bytes:
 
     add(_p(f"Subject to the coverage, terms, conditions, limitations, exclusions and cancellation "
            f"provisions of the relative policy(ies) as held on file by "
-           f"{_e(branding.COMPANY_LEGAL_NAME)}.", _SEC_BODY))
+           f"{_e(issuer.get('company_legal_name'))}.", _SEC_BODY))
 
     section("AVN 67B")
     add(_p("It is hereby certified that the following insurance provisions apply:", _SEC_BODY))
@@ -339,7 +401,7 @@ def render(data: dict, *, reference_number: str, date_of_issue: date) -> bytes:
     add(Spacer(1, 4 * mm))
     add(_p(_e(_SEVERAL)))
     add(Spacer(1, 8 * mm))
-    add(_signature_block(issued))
+    add(_signature_block(issuer, images, issued))
     add(Spacer(1, 6 * mm))
     add(_p(_e(_SEVERAL_SMALL), _SMALL))
 
@@ -390,7 +452,7 @@ def render(data: dict, *, reference_number: str, date_of_issue: date) -> bytes:
            "disputes arising out of or in any way connected with this undertaking shall be submitted "
            "to the exclusive jurisdiction of the English courts.", _LETTER))
     add(Spacer(1, 8 * mm))
-    add(_signature_block(issued, lead=[
+    add(_signature_block(issuer, images, issued, lead=[
         _p("Yours faithfully,", ParagraphStyle("yf", parent=_BASE, alignment=TA_CENTER)),
         Spacer(1, 4 * mm)]))
 
@@ -425,6 +487,7 @@ def render(data: dict, *, reference_number: str, date_of_issue: date) -> bytes:
     doc = SimpleDocTemplate(buffer, pagesize=A4, leftMargin=MARGIN_X, rightMargin=MARGIN_X,
                             topMargin=TOP, bottomMargin=BOTTOM,
                             title=f"Certificate of Reinsurance {reference_number}",
-                            author=branding.COMPANY_LEGAL_NAME)
-    doc.build(story, onFirstPage=_first_page, onLaterPages=_later_page)
+                            author=issuer.get("company_legal_name") or "")
+    first_page, later_page = _page_callbacks(issuer, images, draft)
+    doc.build(story, onFirstPage=first_page, onLaterPages=later_page)
     return buffer.getvalue()
