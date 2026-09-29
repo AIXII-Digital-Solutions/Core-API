@@ -28,6 +28,9 @@ Documentation for the three-service platform (core-api + external-worker + file-
   whoever builds the portal screens over that domain: auth and scopes, the response envelope and
   status codes, every endpoint with its real payloads, the workflows (add an aircraft, record an
   engine swap, renew a policy, read the history) and the seven rules that are easy to get wrong.
+- **[certificates-portal-brief.md](certificates-portal-brief.md)** — the LIVING brief for the
+  portal's certificate screens (reinsurance certificate AVN 67B: issue, preview, history,
+  company settings, signatory profile). Updated with every change; see its change log.
   Written to be read once, front to back, before the first request.
 
 For agent/Claude-Code guidance see `../CLAUDE.md`. The schema source of truth is `../db-contract/`.
