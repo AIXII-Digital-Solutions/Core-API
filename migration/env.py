@@ -64,7 +64,8 @@ db_name = context.get_x_argument(as_dictionary=True).get("db")
 if db_name == "aixii":
     from Database.config import (CiriumBase, AirlabsBase, FlightRadarBase, AviationEdgeBase,
                                  ApiBase, IcaoBase, FlightAwareBase, ForecastBase,
-                                 RefBase, FleetBase, LeasingBase, PolicyBase, AuditBase)
+                                 RefBase, FleetBase, LeasingBase, PolicyBase, AuditBase,
+                                 CertificateBase)
     from Database.CiriumModels import *        # noqa: F401,F403  (register tables on the Bases)
     from Database.AirlabsModels import *       # noqa: F401,F403
     from Database.FlightRadarModels import *   # noqa: F401,F403
@@ -75,6 +76,7 @@ if db_name == "aixii":
     from Database.LeasingModels import *       # noqa: F401,F403
     from Database.PolicyModels import *        # noqa: F401,F403
     from Database.AuditModels import *         # noqa: F401,F403
+    from Database.CertificateModels import *   # noqa: F401,F403
     from Database.IcaoModels import *          # noqa: F401,F403
     from Database.FlightAwareModels import *   # noqa: F401,F403
     DATABASE_URL = get_db_url("aixii")
@@ -90,6 +92,7 @@ if db_name == "aixii":
         LeasingBase.metadata,
         PolicyBase.metadata,
         AuditBase.metadata,
+        CertificateBase.metadata,
         IcaoBase.metadata,
         FlightAwareBase.metadata,
         ForecastBase.metadata,

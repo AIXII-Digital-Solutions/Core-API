@@ -161,6 +161,20 @@ class _PolicyTerms(BaseModel):
         description="The share, in percent, that `reinsured_amount` is taken of (the 100 in "
                     "'97.5 of 100').")
     cut_through_clause: Optional[str] = None
+    # wording the certificates quote; left out on create, each takes the market-standard default
+    period_wording: Optional[str] = Field(
+        default=None, max_length=512,
+        description="How the period is qualified after its dates. Default: 'both days inclusive, "
+                    "local standard time at the address of the Insured'.")
+    geographical_limits: Optional[str] = Field(
+        default=None, max_length=5000, description="The Geographical Limits paragraph.")
+    hull_war_clause: Optional[str] = Field(default=None, max_length=64, description="Default LSW 555D.")
+    war_exclusion_clause: Optional[str] = Field(default=None, max_length=64, description="Default AVN 48B.")
+    war_exclusion_exception: Optional[str] = Field(
+        default=None, max_length=256, description="Default 'sub-paragraph(s) (b) of AVN48B'; "
+                                                  "empty string for none.")
+    war_liability_clause: Optional[str] = Field(default=None, max_length=64, description="Default AVN 52E.")
+    fifty_fifty_clause: Optional[str] = Field(default=None, max_length=64, description="Default AVS103A.")
 
 
 class PolicyIn(_PolicyTerms):
@@ -616,8 +630,12 @@ async def update_policy(request: Request, response: Response, policy_id: int, bo
                                         msg=f"Policy {policy_id} not found",
                                         status_code=status.HTTP_404_NOT_FOUND)
             fields.pop("aircraft", None)
-            if fields.get("currency", "") is None:
-                fields.pop("currency")   # a policy always has one; null means "leave it"
+            for required in ("currency", "period_wording", "geographical_limits", "hull_war_clause",
+                             "war_exclusion_clause", "war_liability_clause", "fifty_fifty_clause"):
+                if required in fields and fields[required] is None:
+                    fields.pop(required)   # a policy always has one; null means "leave it"
+            if fields.get("war_exclusion_exception") == "":
+                fields["war_exclusion_exception"] = None
             errors: list[dict] = []
             roles = {role: fields.pop(role.value) or [] for role in _ROLES if role.value in fields}
             if roles:

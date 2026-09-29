@@ -594,7 +594,7 @@ def airline_json(a: Optional[Airline]) -> Optional[dict]:
     if a is None:
         return None
     return {"id": a.id, "airline_name": a.airline_name, "icao": a.icao, "iata": a.iata,
-            "is_asg": a.is_asg, "logo_url": a.logo_url}
+            "is_asg": a.is_asg, "logo_url": a.logo_url, "certificate_code": a.certificate_code}
 
 
 def aircraft_type_json(t: Optional[AircraftType]) -> Optional[dict]:
@@ -711,10 +711,12 @@ def aircraft_json(a: Optional[Aircraft], *, engines: bool = True) -> Optional[di
     return out
 
 
-def agreement_json(g: Optional[Agreement]) -> Optional[dict]:
+def agreement_json(g: Optional[Agreement], *, contract_parties: bool = False) -> Optional[dict]:
+    """`contract_parties=True` needs `Agreement.contract_parties` (and each link's party) loaded —
+    only the /leasing/agreements endpoints ask for them; a lease or a card renders without."""
     if g is None:
         return None
-    return {
+    out = {
         "id": g.id,
         "name": g.name,
         "start_date": iso(g.start_date),
@@ -722,6 +724,9 @@ def agreement_json(g: Optional[Agreement]) -> Optional[dict]:
         "alternative_contract_party": g.alternative_contract_party,
         "other_contracts": g.other_contracts,
     }
+    if contract_parties:
+        out["contract_parties"] = [party_json(x.party, contacts=False) for x in g.contract_parties]
+    return out
 
 
 def lease_json(l: Optional[AircraftLease], *, on: Optional[date] = None,
@@ -794,6 +799,13 @@ def policy_json(p: Optional[Policy]) -> Optional[dict]:
         "reinsured_amount": num(p.reinsured_amount),
         "reinsured_amount_of": num(p.reinsured_amount_of),
         "cut_through_clause": p.cut_through_clause,
+        "period_wording": p.period_wording,
+        "geographical_limits": p.geographical_limits,
+        "hull_war_clause": p.hull_war_clause,
+        "war_exclusion_clause": p.war_exclusion_clause,
+        "war_exclusion_exception": p.war_exclusion_exception,
+        "war_liability_clause": p.war_liability_clause,
+        "fifty_fifty_clause": p.fifty_fifty_clause,
         "created_at": iso(p.created_at),
         "updated_at": iso(p.updated_at),
     }

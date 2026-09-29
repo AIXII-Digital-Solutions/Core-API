@@ -19,6 +19,7 @@ from .AuditModels import *
 from .IcaoModels import *
 from .FlightAwareModels import *
 from .ForecastModels import *
+from .CertificateModels import *
 
 
 
