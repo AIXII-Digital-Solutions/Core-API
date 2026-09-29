@@ -27,7 +27,7 @@ from datetime import date
 from typing import Optional
 
 from sqlalchemy import (
-    String, BigInteger, Integer, Date, ForeignKey, LargeBinary, CheckConstraint,
+    String, Text, BigInteger, Integer, Date, ForeignKey, LargeBinary, CheckConstraint,
     UniqueConstraint, text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -119,6 +119,73 @@ class ReferenceCounter(Base):
     __table_args__ = (
         UniqueConstraint("scope", name="uq_certificate_reference_counter_scope"),
         CheckConstraint("last_value >= 0", name="ck_reference_counter_last_value"),
+    )
+
+
+class Settings(Base):
+    """The issuing company as the certificates print it — ONE row (id = 1), edited from the portal.
+    The images (logo, stamp) are rows of `Asset`, not columns here, so this row stays small and its
+    audit entries readable."""
+    __tablename__ = "settings"
+
+    company_name: Mapped[Optional[str]] = mapped_column(
+        String, nullable=True, comment="The name beside the logo in the page header; empty = logo only.")
+    company_legal_name: Mapped[str] = mapped_column(
+        String, nullable=False, comment="As held on file by … / AUTHORISED SIGNATORY …")
+    address_line: Mapped[Optional[str]] = mapped_column(
+        String, nullable=True, comment="The address / phone / website line at the foot of page 1.")
+    legal_footer: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, comment="The regulatory small print at the foot of page 1.")
+    brand_primary: Mapped[str] = mapped_column(
+        String(7), nullable=False, server_default=text("'#1F3B33'"),
+        comment="Header text colour, #RRGGBB.")
+    brand_accent: Mapped[str] = mapped_column(
+        String(7), nullable=False, server_default=text("'#D5E28D'"),
+        comment="The rule above the page number, #RRGGBB.")
+
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_certificate_settings_single_row"),
+        CheckConstraint("brand_primary ~ '^#[0-9A-Fa-f]{6}$' AND brand_accent ~ '^#[0-9A-Fa-f]{6}$'",
+                        name="ck_certificate_settings_colours"),
+    )
+
+
+class Signatory(Base):
+    """What a certificate prints under its signature for one portal user — the person who issues it.
+    Their name and e-mail come from the portal with the request; this row adds what the portal does
+    not send: title, phone, and (as an Asset `signature:<user id>`) the signature image."""
+    __tablename__ = "signatory"
+
+    portal_user_id: Mapped[str] = mapped_column(String, nullable=False)
+    name: Mapped[Optional[str]] = mapped_column(
+        String, nullable=True, comment="Overrides the portal name on the certificate when set.")
+    email: Mapped[Optional[str]] = mapped_column(
+        String, nullable=True, comment="Overrides the portal e-mail on the certificate when set.")
+    title: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    phone: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("portal_user_id", name="uq_certificate_signatory_portal_user"),
+    )
+
+
+class Asset(Base):
+    """An image the certificates draw: `logo`, `stamp`, or `signature:<portal user id>`. PNG, JPEG or
+    SVG (SVG is drawn as vector). Not audited: a log entry per upload would copy the bytes."""
+    __tablename__ = "asset"
+
+    key: Mapped[str] = mapped_column(String, nullable=False)
+    content_type: Mapped[str] = mapped_column(String, nullable=False)
+    data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False, deferred=True)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    size: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_by: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    updated_by_user_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("key", name="uq_certificate_asset_key"),
+        CheckConstraint("content_type IN ('image/png', 'image/jpeg', 'image/svg+xml')",
+                        name="ck_certificate_asset_content_type"),
     )
 
 

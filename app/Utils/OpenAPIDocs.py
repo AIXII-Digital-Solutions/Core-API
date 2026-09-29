@@ -162,7 +162,9 @@ def _validation_example() -> dict:
 
 # described by _special_cases, not by RESPONSE_DATA
 _SPECIAL_PATHS = {"/status/stream", "/database/{type}",
-                  "/certificates/reinsurance/{certificate_id}/pdf"}
+                  "/certificates/reinsurance/{certificate_id}/pdf",
+                  "/certificates/reinsurance/preview/pdf",
+                  "/certificates/settings/{kind}", "/certificates/signatory/signature"}
 
 
 def _special_cases(spec: dict) -> None:
@@ -194,12 +196,21 @@ def _special_cases(spec: dict) -> None:
             }},
         }
 
-    pdf = paths.get("/certificates/reinsurance/{certificate_id}/pdf", {}).get("get")
-    if pdf:
-        pdf["responses"]["200"] = {
-            "description": "The certificate as issued: a PDF, not the envelope.",
-            "content": {"application/pdf": {"schema": {"type": "string", "format": "binary"}}},
-        }
+    binary = {"type": "string", "format": "binary"}
+    for path, method, description, types in (
+            ("/certificates/reinsurance/{certificate_id}/pdf", "get",
+             "The certificate as issued: a PDF, not the envelope.", ("application/pdf",)),
+            ("/certificates/reinsurance/preview/pdf", "post",
+             "The certificate as it would be issued, marked DRAFT: a PDF, not the envelope.",
+             ("application/pdf",)),
+            ("/certificates/settings/{kind}", "get", "The image itself, not the envelope.",
+             ("image/png", "image/jpeg", "image/svg+xml")),
+            ("/certificates/signatory/signature", "get", "The image itself, not the envelope.",
+             ("image/png", "image/jpeg", "image/svg+xml"))):
+        op = paths.get(path, {}).get(method)
+        if op:
+            op["responses"]["200"] = {"description": description,
+                                      "content": {t: {"schema": binary} for t in types}}
 
     for path in ("/webhooks/microsoft", "/webhooks/microsoft/lifecycle"):
         op = paths.get(path, {}).get("post")
