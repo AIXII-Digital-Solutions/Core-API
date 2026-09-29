@@ -1,8 +1,8 @@
-"""The reinsurance certificate (AVN 67B): gather every value it prints, check them, and number it.
+"""The insurance and reinsurance certificates (AVN 67B): gather every value they print and check them.
 
 The document itself is drawn by `render.py`; this module decides WHAT it says. The rules are the
 client's certificate guidelines (.misc/insurance/Reinsurance Certificates Info.xlsx, "cert guidelines
-- summary"), field by field:
+- summary" and the "Insurance certificate" differences), field by field:
 
   A3-A6   Insured / Reinsured / Retrocedent / Period — the policy. A Retrocedent exists only when the
           placement is a retrocession; without one the certificate says nothing about retrocession.
@@ -19,8 +19,14 @@ client's certificate guidelines (.misc/insurance/Reinsurance Certificates Info.x
   A28     Effective date — the lease terms' effective date, unless overridden.
   A29     Notice addresses — each contract party's contacts.
 
-Values that must be on the document and are missing are ERRORS: the certificate is not issued.
-Disagreements a person should look at are ALERTS: it is issued, and they are kept with it.
+The INSURANCE certificate differs from the reinsurance one in what it names and how much it
+certifies: the Insurer is the policy's reinsured, there is no Reinsured and no Retrocedent, and the
+insured amount is 100 % of 100 % (direct insurance). Its wording depends on who signs it — the
+Insurer, or us as insurance broker — which is its `variant`. Its date should match the reinsurance
+certificate's; an alert says when it does not.
+
+Values that must be on the document and are missing are ERRORS: the certificate cannot be issued.
+Disagreements a person should look at are ALERTS: it can be issued, and they are kept with it.
 """
 from dataclasses import dataclass, field
 from datetime import date
@@ -30,6 +36,7 @@ from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.orm import joinedload, selectinload
 
+from Database.CertificateModels import ISSUED, ReinsuranceCertificate
 from Database.FleetModels import Aircraft, AircraftType
 from Database.LeasingModels import Agreement, AgreementParty, AircraftLease
 from Database.PolicyModels import Coverage, Policy, PolicyParty, PartyRole
@@ -38,8 +45,11 @@ from Utils.DomainCommon import (AIRCRAFT_BRIEF, agreed_value_at, lease_in_force,
                                 policy_parties)
 from .numbering import contract_year
 
-TEMPLATE_VERSION = "reinsurance-1"
-KIND = "reinsurance"
+REINSURANCE, INSURANCE = "reinsurance", "insurance"
+KINDS = (REINSURANCE, INSURANCE)
+TEMPLATE_VERSION = {REINSURANCE: "reinsurance-1", INSURANCE: "insurance-1"}
+# Who signs an insurance certificate: us, as the Insured's insurance broker, or the Insurer.
+SIGNED_BY = ("broker", "insurer")
 
 
 @dataclass
@@ -89,10 +99,12 @@ def r_start(row) -> date:
     return row.covered_from if isinstance(row, Coverage) else row.effective_date
 
 
-async def assemble(session, *, aircraft_id: int, date_of_issue: date,
-                   policy_id: Optional[int] = None,
-                   overrides: Optional[Overrides] = None) -> Draft:
-    """Everything the reinsurance certificate prints for this aircraft, as of `date_of_issue`."""
+async def assemble(session, kind: str, *, aircraft_id: int, date_of_issue: date,
+                   policy_id: Optional[int] = None, overrides: Optional[Overrides] = None,
+                   signed_by: str = "broker") -> Draft:
+    """Everything a certificate of `kind` prints for this aircraft, as of `date_of_issue`."""
+    if kind not in KINDS:
+        raise ValueError(f"unknown certificate kind {kind!r}")
     o = overrides or Overrides()
     errors, alerts = [], []
 
@@ -143,12 +155,18 @@ async def assemble(session, *, aircraft_id: int, date_of_issue: date,
     insured = [x.party.name for x in policy_parties(policy, PartyRole.INSURED)]
     reinsured = [x.party.name for x in policy_parties(policy, PartyRole.REINSURED)]
     retrocedent = [x.party.name for x in policy_parties(policy, PartyRole.RETROCEDENT)]
-    variant = "retrocession" if retrocedent else "standard"
     if not insured:
         errors.append({"field": "insured", "msg": "The policy names no insured."})
-    if not reinsured:
-        errors.append({"field": "reinsured", "msg": "A reinsurance certificate needs the policy's "
-                                                     "reinsured; it names none."})
+    if kind == REINSURANCE:
+        variant = "retrocession" if retrocedent else "standard"
+        if not reinsured:
+            errors.append({"field": "reinsured", "msg": "A reinsurance certificate needs the policy's "
+                                                         "reinsured; it names none."})
+    else:
+        variant = signed_by if signed_by in SIGNED_BY else "broker"
+        if not reinsured:
+            errors.append({"field": "insurer", "msg": "An insurance certificate names the policy's "
+                                                       "reinsured as the Insurer; the policy names none."})
 
     # --- currencies -------------------------------------------------------------------------------
     pcur = policy.currency
@@ -187,8 +205,11 @@ async def assemble(session, *, aircraft_id: int, date_of_issue: date,
     hull_deductible = need(policy.hull_all_risks_deductible, "hull_all_risks_deductible",
                            "hull all risks deductible")
     spares_deductible = need(policy.spares_deductible, "spares_deductible", "spares deductible")
-    reinsured_amount = need(policy.reinsured_amount, "reinsured_amount", "reinsured amount")
-    reinsured_of = _num(policy.reinsured_amount_of) if policy.reinsured_amount_of is not None else 100.0
+    if kind == REINSURANCE:
+        share = {"percent": need(policy.reinsured_amount, "reinsured_amount", "reinsured amount"),
+                 "of": _num(policy.reinsured_amount_of) if policy.reinsured_amount_of is not None else 100.0}
+    else:
+        share = {"percent": 100.0, "of": 100.0}      # direct insurance: the whole risk
     confiscation = need(policy.hull_war_confiscation_limit, "hull_war_confiscation_limit",
                         "hull war confiscation limit")
     overall = need(policy.hull_war_overall_limit, "hull_war_overall_limit", "hull war overall limit")
@@ -297,11 +318,12 @@ async def assemble(session, *, aircraft_id: int, date_of_issue: date,
         errors.append({"field": "period_to", "msg": "The policy has no end date."})
 
     data = {
-        "document": KIND,
+        "document": kind,
         "variant": variant,
         "insured": insured,
         "reinsured": reinsured,
-        "retrocedent": retrocedent,
+        "retrocedent": retrocedent if kind == REINSURANCE else [],
+        "insurer": reinsured if kind == INSURANCE else [],
         "period": {"from": policy.period_from.isoformat(),
                    "to": policy.period_to.isoformat() if policy.period_to else None,
                    "wording": policy.period_wording},
@@ -312,7 +334,7 @@ async def assemble(session, *, aircraft_id: int, date_of_issue: date,
         "geographical_limits": policy.geographical_limits,
         "policy_currency": pcur,
         "hull": {"deductible": hull_deductible, "spares_deductible": spares_deductible},
-        "reinsured_amount": {"percent": reinsured_amount, "of": reinsured_of},
+        "share": share,
         "hull_war": {"clause": policy.hull_war_clause, "confiscation_limit": confiscation,
                      "selected_country": policy.selected_country if country_limit is not None else None,
                      "selected_country_limit": country_limit, "overall_limit": overall,
@@ -335,6 +357,19 @@ async def assemble(session, *, aircraft_id: int, date_of_issue: date,
                     "aircraft_lease_id": lease.id if lease else None,
                     "agreement_id": agreement.id if agreement else None},
     }
+    # "The date shall ideally coincide with the reinsurance certificate"
+    if kind == INSURANCE:
+        ri_date = (await session.execute(
+            select(ReinsuranceCertificate.date_of_issue)
+            .where(ReinsuranceCertificate.aircraft_id == aircraft.id,
+                   ReinsuranceCertificate.policy_id == policy.id,
+                   ReinsuranceCertificate.status == ISSUED)
+            .order_by(ReinsuranceCertificate.issued_at.desc()).limit(1))).scalar_one_or_none()
+        if ri_date is not None and ri_date != date_of_issue:
+            alerts.append({"code": "date_differs_from_reinsurance",
+                           "msg": f"The reinsurance certificate for this aircraft and policy is dated "
+                                  f"{ri_date.isoformat()}; this one {date_of_issue.isoformat()}."})
+
     return Draft(data=data, alerts=alerts, errors=errors, aircraft_id=aircraft.id,
                  policy_id=policy.id, aircraft_lease_id=lease.id if lease else None,
                  airline_code=code, contract_year=contract_year(policy.period_from),

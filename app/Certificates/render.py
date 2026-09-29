@@ -1,4 +1,4 @@
-"""Draw the reinsurance certificate as a PDF, from the values `reinsurance.assemble` resolved.
+"""Draw an insurance or reinsurance certificate as a PDF, from the values `assemble` resolved.
 
 The layout follows the market form the client supplied (Reinsurance Certificates Info.xlsx, sheet
 "Reinsurance certificate"): the certificate (sections 1-8, signature), the Letter of Undertaking and
@@ -69,10 +69,20 @@ def _amount(data, value, currency_key="policy_currency") -> str:
     return _b(money(value, data[currency_key]))
 
 
-def _reinsured_amount(data) -> str:
-    ra = data["reinsured_amount"]
-    return (f"REINSURED AMOUNT: {percent_number(ra['percent'])}% of {percent_number(ra['of'])}% "
-            f"({percent_words(ra['percent'])}) of Sums Insured")
+def _share(data) -> str:
+    """REINSURED AMOUNT: 97.5% of 100% (…) / INSURED AMOUNT: 100% of 100% (ONE HUNDRED PERCENT)."""
+    sh = data["share"]
+    label = "REINSURED AMOUNT" if data["document"] == "reinsurance" else "INSURED AMOUNT"
+    return (f"{label}: {percent_number(sh['percent'])}% of {percent_number(sh['of'])}% "
+            f"({percent_words(sh['percent'])}) of Sums Insured")
+
+
+def _signer(data) -> tuple[str, bool]:
+    """(the name under AUTHORISED SIGNATORY and after 'held on file by', whether it is us). An
+    insurance certificate signed by the Insurer is the Insurer's document; every other is ours."""
+    if data["document"] == "insurance" and data["variant"] == "insurer":
+        return join_names(data["insurer"]), False
+    return data["issuer"].get("company_legal_name") or "", True
 
 
 # ==============================================================================================
@@ -80,6 +90,23 @@ def _reinsured_amount(data) -> str:
 # ==============================================================================================
 
 def _preamble(data) -> str:
+    if data["document"] == "insurance":
+        if data["variant"] == "insurer":
+            return (f"THIS IS TO CERTIFY that insurance has been placed in the name of "
+                    f"{join_names(data['insured'])} and/or any affiliated, associated, inter-related "
+                    f"subsidiary or controlled company, as now hereinafter constituted (hereinafter "
+                    f"called the “Insured”) with {join_names(data['insurer'])} (hereinafter called “the "
+                    f"Insurer”) covering their aviation operations in connection with their fleet of "
+                    f"aircraft including all new and acquired aircraft from the moment they become the "
+                    f"insurance responsibility of the Insured, against the following risks and up to "
+                    f"the limits stated")
+        return ("THIS IS TO CERTIFY that insurance has been placed in the name of the Insured (as "
+                "defined below) with the Insurer (as defined below) and that we, in our capacity as "
+                "insurance broker to the Insured have placed insurance with the below insurer for "
+                "account of the Insured, covering their aviation operations in connection with their "
+                "fleet of aircraft including all new and acquired aircraft from the moment they become "
+                "the insurance responsibility of the Insured, against the following risks and up to "
+                "the limits stated")
     if data["variant"] == "retrocession":
         return ("THIS IS TO CERTIFY that insurance has been placed in the name of the Insured (as "
                 "defined below) with the Reinsured (as defined below) who, in turn, places a "
@@ -205,18 +232,19 @@ def _page_callbacks(issuer: dict, images: dict, draft: bool):
     return first_page, later_page
 
 
-def _signature_block(issuer: dict, images: dict, date_of_issue: str, lead=None):
-    """The issuing user's signature (if they keep one) and the company stamp, then who signed."""
-    parts = [x for x in (_flowable(images.get("signature"), 48 * mm, 20 * mm),
-                         _flowable(images.get("stamp"), 24 * mm, 24 * mm)) if x is not None]
-    if parts:
-        image_row = Table([parts], hAlign="LEFT")
+def _signature_block(data: dict, images: dict, date_of_issue: str, lead=None):
+    """Room for the signatory to sign by hand, the company stamp beside it when one is uploaded and
+    the document is ours to stamp, then who signs."""
+    signer, ours = _signer(data)
+    stamp = _flowable(images.get("stamp"), 24 * mm, 24 * mm) if ours else None
+    if stamp is not None:
+        image_row = Table([[Spacer(48 * mm, 20 * mm), stamp]], hAlign="LEFT")
         image_row.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
                                        ("LEFTPADDING", (0, 0), (-1, -1), 0)]))
     else:
-        image_row = Spacer(1, 18 * mm)
-    who = issuer.get("signatory") or {}
-    lines = [f"<b>{_e(who.get('name') or '[Signatory]')}</b>"]
+        image_row = Spacer(1, 20 * mm)
+    who = data.get("signatory") or {}
+    lines = [f"<b>{_e(who.get('full_name') or '[Signatory]')}</b>"]
     if who.get("title"):
         lines.append(_e(who["title"]))
     if who.get("phone"):
@@ -232,7 +260,7 @@ def _signature_block(issuer: dict, images: dict, date_of_issue: str, lead=None):
     return KeepTogether([
         *(lead or []),
         table, Spacer(1, 4 * mm),
-        _p(f"AUTHORISED SIGNATORY<br/>{_e((issuer.get('company_legal_name') or '').upper())}",
+        _p(f"AUTHORISED SIGNATORY<br/>{_e(signer.upper())}",
            ParagraphStyle("sig", parent=_BASE, alignment=TA_CENTER)),
     ])
 
@@ -260,9 +288,11 @@ def _label_table(rows, label_width, indent=0, bold_values=True):
 
 def render(data: dict, *, reference_number: str, date_of_issue: date, images: dict,
            draft: bool = False) -> bytes:
-    """`images`: {"logo"|"stamp"|"signature": issuer.Image}. `draft` stamps DRAFT across every page
-    — the preview, which has no reference number yet."""
+    """`images`: {"logo"|"stamp": issuer.Image}. `draft` marks DRAFT across every page — every PDF
+    of a certificate not yet issued."""
     issuer = data["issuer"]
+    insurance = data["document"] == "insurance"
+    signer, _ours = _signer(data)
     issued = long_date(date_of_issue)
     story = []
     add = story.append
@@ -270,7 +300,7 @@ def render(data: dict, *, reference_number: str, date_of_issue: date, images: di
     # ---------------------------------------------------------------- the certificate
     add(_p(f"Date: {issued}", _BASE))
     add(Spacer(1, 3 * mm))
-    add(_p("CERTIFICATE OF REINSURANCE", _CENTER_B))
+    add(_p("CERTIFICATE OF INSURANCE" if insurance else "CERTIFICATE OF REINSURANCE", _CENTER_B))
     add(_p(f"Reference No. {_e(reference_number)}", _CENTER_B))
     add(_p("<b>TO WHOM IT MAY CONCERN</b>", _BASE))
     add(_p(_e(_preamble(data))))
@@ -287,9 +317,13 @@ def render(data: dict, *, reference_number: str, date_of_issue: date, images: di
            f"subsidiary or controlled company, as now or hereinafter acquired or constituted jointly "
            f"and severally for their respective rights and interests (the “<b>Insured</b>”).",
            _SEC_BODY))
-    section("REINSURED")
-    add(_p(f"{_e(join_names(data['reinsured']))} (the “<b>Reinsured</b>”).", _SEC_BODY))
-    if data["variant"] == "retrocession":
+    if insurance:
+        section("INSURER")
+        add(_p(f"{_e(join_names(data['insurer']))} (the “<b>Insurer</b>”).", _SEC_BODY))
+    else:
+        section("REINSURED")
+        add(_p(f"{_e(join_names(data['reinsured']))} (the “<b>Reinsured</b>”).", _SEC_BODY))
+    if not insurance and data["variant"] == "retrocession":
         section("RETROCEDENT")
         add(_p(_e(join_names(data["retrocedent"])), _SEC_BODY))
 
@@ -311,6 +345,7 @@ def render(data: dict, *, reference_number: str, date_of_issue: date, images: di
     add(_p(_e(data["geographical_limits"]), _SEC_BODY))
 
     section("COVERAGE")
+    cov = n     # "as detailed in 7(a) and 7(b)" — 7 on the reinsurance certificate, 6 on the insurance one
     hull, war, liab = data["hull"], data["hull_war"], data["liability"]
     add(_p("<u>HULL (including spares) ALL RISKS</u> covering loss or damage whilst flying and / or "
            "on the ground for an agreed value each aircraft. This coverage is subject to the "
@@ -320,7 +355,7 @@ def render(data: dict, *, reference_number: str, date_of_issue: date, images: di
     add(_p(f"In respect of spares – {_amount(data, hull['spares_deductible'])} each and every claim. "
            f"In respect of engine test running the above-mentioned hull deductible will apply.",
            _ITEM_BODY))
-    add(_p(_reinsured_amount(data), _ITEM_LEFT))
+    add(_p(_share(data), _ITEM_LEFT))
 
     clause = _b(war["clause"])
     country = ""
@@ -335,18 +370,18 @@ def render(data: dict, *, reference_number: str, date_of_issue: date, images: di
            f"{clause} in respect of spares is restricted to air and sea transits in accordance with "
            f"the applicable transit clause(s). Subject to an overall annual aggregate policy limit of "
            f"not less than {_amount(data, war['overall_limit'])}.", _ITEM, bullet="(b)"))
-    add(_p(f"The coverage in respect of spares (as detailed in 7(a) and 7(b) above) is subject to a "
+    add(_p(f"The coverage in respect of spares (as detailed in {cov}(a) and {cov}(b) above) is subject to a "
            f"limit of {_amount(data, war['spares_limit'])} any one occurrence.", _ITEM_BODY))
-    add(_p(_reinsured_amount(data), _ITEM_LEFT))
+    add(_p(_share(data), _ITEM_LEFT))
     if data.get("cut_through_clause"):
-        add(_p(f"The coverage detailed in 7(a) and 7(b) above includes a 50/50 clause in accordance "
+        add(_p(f"The coverage detailed in {cov}(a) and {cov}(b) above includes a 50/50 clause in accordance "
                f"with {_b(data['fifty_fifty_clause'])} and the following <b>Cut Through Clause</b>:",
                _ITEM_BODY))
         for para in data["cut_through_clause"].splitlines():
             if para.strip():
                 add(_p(_e(para.strip()), _ITEM_ITALIC))
     else:
-        add(_p(f"The coverage detailed in 7(a) and 7(b) above includes a 50/50 clause in accordance "
+        add(_p(f"The coverage detailed in {cov}(a) and {cov}(b) above includes a 50/50 clause in accordance "
                f"with {_b(data['fifty_fifty_clause'])}.", _ITEM_BODY))
 
     exception = (f" (except {_e(liab['war_exclusion_exception'])})"
@@ -363,7 +398,7 @@ def render(data: dict, *, reference_number: str, date_of_issue: date, images: di
            f"perils legal liability.", _ITEM, bullet="(c)"))
     add(_p("The above aggregate limit(s) may be reduced or exhausted by claims made under the "
            "policy(ies).", _ITEM_BODY))
-    add(_p(_reinsured_amount(data), _ITEM_LEFT))
+    add(_p(_share(data), _ITEM_LEFT))
 
     if data.get("hull_deductible"):
         hd = data["hull_deductible"]
@@ -374,11 +409,10 @@ def render(data: dict, *, reference_number: str, date_of_issue: date, images: di
                    f"{_amount(data, hd['aggregate'])}", _ITEM_BODY))
         add(_p("The above aggregate limit(s) may be reduced or exhausted by claims made under the "
                "policy(ies).", _ITEM_BODY))
-        add(_p(_reinsured_amount(data), _ITEM_LEFT))
+        add(_p(_share(data), _ITEM_LEFT))
 
     add(_p(f"Subject to the coverage, terms, conditions, limitations, exclusions and cancellation "
-           f"provisions of the relative policy(ies) as held on file by "
-           f"{_e(issuer.get('company_legal_name'))}.", _SEC_BODY))
+           f"provisions of the relative policy(ies) as held on file by {_e(signer)}.", _SEC_BODY))
 
     section("AVN 67B")
     add(_p("It is hereby certified that the following insurance provisions apply:", _SEC_BODY))
@@ -401,7 +435,7 @@ def render(data: dict, *, reference_number: str, date_of_issue: date, images: di
     add(Spacer(1, 4 * mm))
     add(_p(_e(_SEVERAL)))
     add(Spacer(1, 8 * mm))
-    add(_signature_block(issuer, images, issued))
+    add(_signature_block(data, images, issued))
     add(Spacer(1, 6 * mm))
     add(_p(_e(_SEVERAL_SMALL), _SMALL))
 
@@ -422,11 +456,27 @@ def render(data: dict, *, reference_number: str, date_of_issue: date, images: di
                            ("BOTTOMPADDING", (0, 0), (-1, -1), 0)]))
     add(t)
     add(Spacer(1, 5 * mm))
-    add(_p("We confirm that as Reinsurance Brokers, we have effected reinsurances in the name of the "
-           "Reinsured and confirm that the Reinsurances are in effect on and in respect of the "
-           "Equipment as set out herein", _LETTER))
-    add(_p("Pursuant to instructions from Reinsured, we hereby undertake the following in relation to "
-           "your interest(s) in the Equipment:", _LETTER))
+    if not insurance:
+        role, cover, principal = "Reinsurance Brokers", "Reinsurances", "Reinsured"
+        confirm = ("We confirm that as Reinsurance Brokers, we have effected reinsurances in the name "
+                   "of the Reinsured and confirm that the Reinsurances are in effect on and in respect "
+                   "of the Equipment as set out herein")
+        appointment = "Reinsurance Broker to the Reinsured"
+    elif data["variant"] == "insurer":
+        role, cover, principal = "Insurer", "Insurances", "Insured"
+        confirm = ("We confirm that as Insurer, we have effected insurances for the account of the "
+                   "Insured, and confirm that the Insurances are in effect on and in respect of the "
+                   "Equipment as set out herein.")
+        appointment = "Insurer to the Insured"
+    else:
+        role, cover, principal = "Insurance Brokers", "Insurances", "Insured"
+        confirm = ("We confirm that as Insurance Brokers, we have effected insurances in the name of "
+                   "the Insured and confirm that the Insurances are in effect on and in respect of the "
+                   "Equipment as set out herein")
+        appointment = "Insurance Broker to the Insured"
+    add(_p(confirm, _LETTER))
+    add(_p(f"Pursuant to instructions from the {principal}, we hereby undertake the following in "
+           f"relation to your interest(s) in the Equipment:", _LETTER))
     add(_p("In relation to the hull (including hull war risks) Insurances, to hold the benefit of "
            "those Insurances to your order in accordance with the loss payable provisions as "
            "contained with the Contracts, but subject always to the requirements to manage the "
@@ -434,34 +484,42 @@ def render(data: dict, *, reference_number: str, date_of_issue: date, images: di
            _LETTER_NUM, bullet="1."))
     add(_p("To advise you as soon as reasonably practicable at the e-mail address included within the "
            "Schedule of Addressees:", _LETTER_NUM, bullet="2."))
-    add(_p("of the receipt by us of any notice of cancellation or material change in the "
-           "Reinsurances;", _LETTER_SUB, bullet="2.1."))
-    add(_p("if we cease to be Reinsurance Brokers to the Reinsured;", _LETTER_SUB, bullet="2.2."))
+    add(_p(f"of the receipt by us of any notice of cancellation or material change in the {cover};",
+           _LETTER_SUB, bullet="2.1."))
+    if insurance:
+        add(_p("upon written request from you, of the premium payment status relating to the "
+               "insurances, and;", _LETTER_SUB, bullet="2.2."))
+        add(_p(f"if we cease to be {role} to the Insured during the policy period.", _LETTER_SUB,
+               bullet="2.3."))
+    else:
+        add(_p("if we cease to be Reinsurance Brokers to the Reinsured;", _LETTER_SUB, bullet="2.2."))
     add(Spacer(1, 3 * mm))
-    add(_p("Following a written application received from you not later than 21 days before expiry "
-           "of the Reinsurances, to notify you at the e-mail address contained within the Schedule "
-           "of Addressees attached to Certificate Addendum, within fourteen days of the receipt of "
-           "such application in the event of our not having received renewal instructions from the "
-           "Reinsured.", _LETTER_NUM, bullet="3."))
+    add(_p(f"Following a written application received from you not later than 21 days before expiry "
+           f"of the {cover}, to notify you at the e-mail address contained within the Schedule of "
+           f"Addressees attached to Certificate Addendum, within fourteen days of the receipt of such "
+           f"application in the event of our not having received renewal instructions from the "
+           f"{principal}.", _LETTER_NUM, bullet="3."))
     add(_p("The above undertakings are given:-", _LETTER))
-    add(_p("subject to our lien, if any, in respect of the Reinsurances for which premiums are due.",
+    add(_p(f"subject to our lien, if any, in respect of the {cover} for which premiums are due.",
            _LETTER_NUM, bullet="(a)"))
-    add(_p("subject to our continuing appointment for the time being as Reinsurance Broker to the "
-           "Reinsured.", _LETTER_NUM, bullet="(b)"))
+    add(_p(f"subject to our continuing appointment for the time being as {appointment}.",
+           _LETTER_NUM, bullet="(b)"))
     add(_p("This letter shall be governed by and construed in accordance with English Law and any "
            "disputes arising out of or in any way connected with this undertaking shall be submitted "
            "to the exclusive jurisdiction of the English courts.", _LETTER))
     add(Spacer(1, 8 * mm))
-    add(_signature_block(issuer, images, issued, lead=[
+    add(_signature_block(data, images, issued, lead=[
         _p("Yours faithfully,", ParagraphStyle("yf", parent=_BASE, alignment=TA_CENTER)),
         Spacer(1, 4 * mm)]))
 
     # ---------------------------------------------------------------- the schedule of parties
     add(PageBreak())
     add(_p("SCHEDULE OF PARTIES TO WHOM NOTICE IS TO BE GIVEN", _CENTER_B))
-    add(_label_table([("Certificate:", reference_number),
-                      ("Insured:", same), ("Reinsured:", same), ("Subject:", same)],
-                     label_width=28 * mm))
+    rows = [("Certificate:", reference_number), ("Insured:", same)]
+    if not insurance:
+        rows.append(("Reinsured:", same))
+    rows.append(("Subject:", same))
+    add(_label_table(rows, label_width=28 * mm))
     add(Spacer(1, 4 * mm))
     add(_p("<u><b>PLEASE READ CAREFULLY</b></u>", ParagraphStyle("prc", parent=_BASE,
                                                                   alignment=TA_CENTER)))
@@ -486,7 +544,8 @@ def render(data: dict, *, reference_number: str, date_of_issue: date, images: di
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4, leftMargin=MARGIN_X, rightMargin=MARGIN_X,
                             topMargin=TOP, bottomMargin=BOTTOM,
-                            title=f"Certificate of Reinsurance {reference_number}",
+                            title=f"Certificate of {'Insurance' if insurance else 'Reinsurance'} "
+                                  f"{reference_number}",
                             author=issuer.get("company_legal_name") or "")
     first_page, later_page = _page_callbacks(issuer, images, draft)
     doc.build(story, onFirstPage=first_page, onLaterPages=later_page)
