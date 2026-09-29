@@ -29,7 +29,7 @@ from .formatting import join_names, long_date, money, percent_number, percent_wo
 PAGE_W, PAGE_H = A4
 MARGIN_X = 20 * mm
 TOP = 38 * mm
-BOTTOM = 30 * mm
+BOTTOM = 25 * mm
 INDENT = 16 * mm          # section body, after the section number
 SUB = 28 * mm             # (a) / (b) item bodies
 SUBSUB = 40 * mm          # (i) / (ii) list bodies
@@ -434,9 +434,9 @@ def render(data: dict, *, reference_number: str, date_of_issue: date, images: di
 
     add(Spacer(1, 4 * mm))
     add(_p(_e(_SEVERAL)))
-    add(Spacer(1, 8 * mm))
+    add(Spacer(1, 5 * mm))
     add(_signature_block(data, images, issued))
-    add(Spacer(1, 6 * mm))
+    add(Spacer(1, 3 * mm))
     add(_p(_e(_SEVERAL_SMALL), _SMALL))
 
     # ---------------------------------------------------------------- the letter of undertaking
