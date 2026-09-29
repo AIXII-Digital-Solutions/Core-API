@@ -22,20 +22,21 @@ neither overwrites the other; a difference between them is information, not an e
 """
 from datetime import date
 from decimal import Decimal
-from typing import Optional
+from typing import Annotated, Optional, Union
 
 from fastapi import Request, Response, Depends, Query, status
-from pydantic import BaseModel, Field, model_validator
+from fastapi.exceptions import RequestValidationError
+from pydantic import BaseModel, Field, StrictInt, StringConstraints, model_validator
 from sqlalchemy import select, func, or_
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import joinedload, selectinload
 
 from Config import setup_logger
 from settings import Router
 from Database import ApiToken
 from Database.RefModels import Party
 from Database.FleetModels import Aircraft
-from Database.LeasingModels import Agreement, AircraftLease
+from Database.LeasingModels import Agreement, AgreementParty, AircraftLease
 from api_auth import authorize, SCOPE_INSURANCE_READ, SCOPE_INSURANCE_WRITE
 from Utils import success_response, warning_response, error_response
 from Utils.ResponsesFunc import build_responses
@@ -43,7 +44,7 @@ from Utils.DomainCache import PARTY, invalidate
 from Utils.DomainCommon import (
     reload_with, AIRCRAFT_BRIEF, page_with_total,
     DB, norm, set_actor, apply_sort, SortError, integrity_error, find_aircraft,
-    get_or_create_party, agreement_json, lease_json,
+    get_or_create_party, agreement_json, lease_json, resolve_party_lists,
 )
 
 logger = setup_logger("leasing_api")
@@ -70,6 +71,15 @@ _READ = [Depends(authorize(SCOPE_INSURANCE_READ))]
 _OK = {status.HTTP_200_OK, status.HTTP_400_BAD_REQUEST, status.HTTP_404_NOT_FOUND,
        status.HTTP_409_CONFLICT, status.HTTP_500_INTERNAL_SERVER_ERROR}
 
+# the agreement with its lessor (to-one, joined) and its contract parties (a collection: selectin)
+_AGREEMENT_LOAD = (joinedload(Agreement.lessor),
+                   selectinload(Agreement.contract_parties).joinedload(AgreementParty.party))
+
+PartyRef = Union[StrictInt, Annotated[str, StringConstraints(strip_whitespace=True, min_length=1,
+                                                              max_length=256)]]
+_PARTIES_DESC = ("The Contract Party(ies) the certificates name, in order: ref.party ids or names "
+                 "(found or created). Usually the lessor first. Empty = the lessor alone.")
+
 # agreement -> lessor is to-one twice over: one JOIN, not two extra round trips
 _LEASE_LOAD = (joinedload(AircraftLease.agreement).joinedload(Agreement.lessor),)
 
@@ -85,7 +95,10 @@ class AgreementIn(BaseModel):
                                   description="Counterparty NAME — found or created in ref.party.")
     alternative_contract_party: Optional[str] = None
     other_contracts: Optional[str] = Field(
-        default=None, description="Contracts to be mentioned other than the lease agreement.")
+        default=None, description="Contracts to be mentioned other than the lease agreement — one "
+                                  "per line; each line is one item of the certificate's list.")
+    contract_parties: list[PartyRef] = Field(default_factory=list, max_length=20,
+                                             description=_PARTIES_DESC)
 
 
 class AgreementPatch(BaseModel):
@@ -94,6 +107,8 @@ class AgreementPatch(BaseModel):
     lessor: Optional[str] = Field(default=None, max_length=256)
     alternative_contract_party: Optional[str] = None
     other_contracts: Optional[str] = None
+    contract_parties: Optional[list[PartyRef]] = Field(
+        default=None, max_length=20, description=_PARTIES_DESC + " Sent = replaces the list.")
 
 
 class LeaseIn(BaseModel):
@@ -139,6 +154,26 @@ class LeasePatch(BaseModel):
     hull_deductible_buy_down: Optional[Decimal] = Field(default=None, ge=0)
 
 
+async def _write_contract_parties(session, agreement_id: int, refs: list, existing) -> None:
+    """Make the agreement's contract parties exactly `refs`, in order; only the difference is
+    written. Unknown ids / empty names / repeats are a 422 per entry."""
+    (parties,), bad = await resolve_party_lists(session, [refs])
+    if bad:
+        raise RequestValidationError([{"loc": ("body", "contract_parties", i), "msg": msg,
+                                       "type": "value_error"} for _, i, msg in bad])
+    wanted = {p.id: pos for pos, p in enumerate(parties, 1)}
+    held = set()
+    for link in existing:
+        if link.party_id not in wanted:
+            await session.delete(link)
+            continue
+        held.add(link.party_id)
+        if link.position != wanted[link.party_id]:
+            link.position = wanted[link.party_id]
+    session.add_all(AgreementParty(agreement_id=agreement_id, party_id=pid, position=pos)
+                    for pid, pos in wanted.items() if pid not in held)
+
+
 # ==============================================================================================
 # agreements
 # ==============================================================================================
@@ -161,14 +196,15 @@ async def list_agreements(request: Request, response: Response,
             ))
         if lessor_id is not None:
             conds.append(Agreement.lessor_id == lessor_id)
-        stmt = apply_sort(select(Agreement).where(*conds).options(joinedload(Agreement.lessor)),
+        stmt = apply_sort(select(Agreement).where(*conds).options(*_AGREEMENT_LOAD),
                           sort=sort, order=order, sortmap=_AGREEMENT_SORTS,
                           tiebreak=(Agreement.name, Agreement.id))
         async with request.app.state.db_client.read_session(DB) as session:
             rows, total = await page_with_total(
                 session, stmt, limit=limit, offset=offset,
                 count_stmt=select(func.count()).select_from(Agreement).where(*conds))
-            data = {"items": [agreement_json(g) for g in rows], "total": total}
+            data = {"items": [agreement_json(g, contract_parties=True) for g in rows],
+                    "total": total}
         return success_response(request=request, response=response, data=data)
     except SortError as _ex:
         return warning_response(request=request, response=response, msg=str(_ex))
@@ -195,12 +231,16 @@ async def create_agreement(request: Request, response: Response, body: Agreement
             )
             session.add(row)
             await session.flush()
-            row = await reload_with(session, Agreement, row.id,
-                                    joinedload(Agreement.lessor))
-            data = agreement_json(row)
+            if body.contract_parties:
+                await _write_contract_parties(session, row.id, body.contract_parties, [])
+                await session.flush()
+            row = await reload_with(session, Agreement, row.id, *_AGREEMENT_LOAD)
+            data = agreement_json(row, contract_parties=True)
         await invalidate(request, PARTY)   # a counterparty may have been created
         return success_response(request=request, response=response, data=data,
                                 status_code=status.HTTP_201_CREATED)
+    except RequestValidationError:
+        raise
     except IntegrityError as _ex:
         code, msg = integrity_error(_ex)
         return warning_response(request=request, response=response, msg=msg, status_code=code)
@@ -217,8 +257,7 @@ async def get_agreement(request: Request, response: Response, agreement_id: int,
         on = on_date or date.today()
         async with request.app.state.db_client.read_session(DB) as session:
             row = (await session.execute(
-                select(Agreement).where(Agreement.id == agreement_id)
-                .options(joinedload(Agreement.lessor))
+                select(Agreement).where(Agreement.id == agreement_id).options(*_AGREEMENT_LOAD)
             )).scalar_one_or_none()
             if row is None:
                 return warning_response(request=request, response=response,
@@ -231,7 +270,7 @@ async def get_agreement(request: Request, response: Response, agreement_id: int,
                 .options(*_LEASE_LOAD, *AIRCRAFT_BRIEF)
                 .order_by(Aircraft.registration, AircraftLease.effective_date.desc())
             )).all()
-            data = agreement_json(row)
+            data = agreement_json(row, contract_parties=True)
             data["aircraft"] = [lease_json(l, on=on, aircraft=a) for l, a in leases]
         return success_response(request=request, response=response, data=data)
     except Exception as _ex:
@@ -248,24 +287,27 @@ async def update_agreement(request: Request, response: Response, agreement_id: i
         async with request.app.state.db_client.session(DB) as session:
             await set_actor(session, token)
             row = (await session.execute(
-                select(Agreement).where(Agreement.id == agreement_id)
-                .options(joinedload(Agreement.lessor))
+                select(Agreement).where(Agreement.id == agreement_id).options(*_AGREEMENT_LOAD)
             )).scalar_one_or_none()
             if row is None:
                 return warning_response(request=request, response=response,
                                         msg=f"Agreement {agreement_id} not found",
                                         status_code=status.HTTP_404_NOT_FOUND)
+            if "contract_parties" in fields:
+                await _write_contract_parties(session, row.id, fields.pop("contract_parties") or [],
+                                              list(row.contract_parties))
             if "lessor" in fields:
                 lessor = await get_or_create_party(session, fields.pop("lessor"))
                 row.lessor_id = lessor.id if lessor else None
             for key, value in fields.items():
                 setattr(row, key, value.strip() if key == "name" and value else value)
             await session.flush()
-            row = await reload_with(session, Agreement, row.id,
-                                    joinedload(Agreement.lessor))
-            data = agreement_json(row)
+            row = await reload_with(session, Agreement, row.id, *_AGREEMENT_LOAD)
+            data = agreement_json(row, contract_parties=True)
         await invalidate(request, PARTY)   # a counterparty may have been created
         return success_response(request=request, response=response, data=data)
+    except RequestValidationError:
+        raise
     except IntegrityError as _ex:
         code, msg = integrity_error(_ex)
         return warning_response(request=request, response=response, msg=msg, status_code=code)
@@ -283,8 +325,7 @@ async def delete_agreement(request: Request, response: Response, agreement_id: i
         async with request.app.state.db_client.session(DB) as session:
             await set_actor(session, token)
             row = (await session.execute(
-                select(Agreement).where(Agreement.id == agreement_id)
-                .options(joinedload(Agreement.lessor))
+                select(Agreement).where(Agreement.id == agreement_id).options(*_AGREEMENT_LOAD)
             )).scalar_one_or_none()
             if row is None:
                 return warning_response(request=request, response=response,
@@ -298,7 +339,7 @@ async def delete_agreement(request: Request, response: Response, agreement_id: i
                     request=request, response=response,
                     msg=f"{used} aircraft are still on this agreement — remove those first.",
                     status_code=status.HTTP_409_CONFLICT)
-            data = agreement_json(row)
+            data = agreement_json(row, contract_parties=True)
             await session.delete(row)
         return success_response(request=request, response=response, data=data,
                                 msg="Agreement deleted")

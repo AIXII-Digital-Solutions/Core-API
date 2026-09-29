@@ -161,7 +161,8 @@ def _validation_example() -> dict:
 
 
 # described by _special_cases, not by RESPONSE_DATA
-_SPECIAL_PATHS = {"/status/stream", "/database/{type}"}
+_SPECIAL_PATHS = {"/status/stream", "/database/{type}",
+                  "/certificates/reinsurance/{certificate_id}/pdf"}
 
 
 def _special_cases(spec: dict) -> None:
@@ -191,6 +192,13 @@ def _special_cases(spec: dict) -> None:
                 "example": {"type": "lease", "user_email": "integrator@ai12.com",
                             "filename": "Lease_Agreements_<token>.xlsx"},
             }},
+        }
+
+    pdf = paths.get("/certificates/reinsurance/{certificate_id}/pdf", {}).get("get")
+    if pdf:
+        pdf["responses"]["200"] = {
+            "description": "The certificate as issued: a PDF, not the envelope.",
+            "content": {"application/pdf": {"schema": {"type": "string", "format": "binary"}}},
         }
 
     for path in ("/webhooks/microsoft", "/webhooks/microsoft/lifecycle"):

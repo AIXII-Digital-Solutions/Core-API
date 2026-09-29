@@ -121,6 +121,12 @@ class PolicyBase(AsyncAttrs, BaseMixin, DeclarativeBase):
     metadata = MetaData(schema="policy")
 
 
+# Base class for issued certificates (insurance / reinsurance) -> schema `certificate`: the history of
+# every document issued, with the values printed on it and the PDF as sent.
+class CertificateBase(AsyncAttrs, BaseMixin, DeclarativeBase):
+    metadata = MetaData(schema="certificate")
+
+
 # Base class for the one generic change log -> schema `audit`. Every table in ref/fleet/leasing/
 # policy carries an AFTER trigger that writes here, so "what changed, when, by
 # whom" is one query against one table rather than a history table per subject.

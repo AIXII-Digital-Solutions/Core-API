@@ -386,6 +386,7 @@ class AirlineOut(BaseModel):
     iata: Optional[str]
     is_asg: bool
     logo_url: Optional[str]
+    certificate_code: Optional[str] = Field(description="The airline's code in certificate reference numbers.")
 
 
 class CountryOut(BaseModel):
@@ -509,6 +510,9 @@ class AgreementOut(BaseModel):
     name: str
     start_date: Optional[Date]
     lessor: Optional[PartyBrief]
+    contract_parties: Optional[List[PartyBrief]] = Field(
+        None, description="On the /leasing/agreements endpoints only: the Contract Party(ies) the "
+                          "certificates name, in order.")
     alternative_contract_party: Optional[str]
     other_contracts: Optional[str]
 
@@ -560,6 +564,13 @@ class PolicyOut(BaseModel):
     reinsured_amount: Optional[float] = Field(description="Percent ceded, of reinsured_amount_of.")
     reinsured_amount_of: Optional[float] = Field(description="The share, in percent, reinsured_amount is taken of (97.5 of 100).")
     cut_through_clause: Optional[str]
+    period_wording: str
+    geographical_limits: str
+    hull_war_clause: str
+    war_exclusion_clause: str
+    war_exclusion_exception: Optional[str]
+    war_liability_clause: str
+    fifty_fifty_clause: str
     created_at: Optional[DateTime]
     updated_at: Optional[DateTime]
 
@@ -650,6 +661,56 @@ class AuditEntry(BaseModel):
     changes: List[FieldChange]
     old_row: Optional[dict[str, Any]]
     new_row: Optional[dict[str, Any]]
+
+
+# ── certificates ─────────────────────────────────────────────────────────────────────────────
+
+class CertificateAlert(BaseModel):
+    code: str
+    msg: str
+
+
+class CertificateError(BaseModel):
+    field: str = Field(description="certificate.<name> — the value that is missing.")
+    msg: str
+
+
+class CertificateIssuer(BaseModel):
+    id: Optional[str]
+    email: Optional[str]
+    name: Optional[str]
+
+
+class ReinsuranceCertificateOut(BaseModel):
+    id: int
+    reference_number: str = Field(description="CY<yy>/<airline code>/<nnnnn>")
+    date_of_issue: Date
+    date_of_issue_source: str = Field(description="system | user")
+    variant: str = Field(description="retrocession | standard")
+    registration: Optional[str]
+    msn: Optional[str]
+    aircraft_id: Optional[int]
+    policy_id: Optional[int]
+    aircraft_lease_id: Optional[int]
+    alerts: List[CertificateAlert]
+    issued_by: Optional[str]
+    issued_by_user: Optional[CertificateIssuer]
+    created_at: Optional[DateTime]
+    pdf_url: str
+
+
+class ReinsuranceCertificateFull(ReinsuranceCertificateOut):
+    data: dict[str, Any] = Field(description="Every value the certificate printed, as resolved at issue.")
+
+
+class ReinsurancePreview(BaseModel):
+    reference_number: Optional[str] = Field(description="With the sequence masked: CY25/SCAT/#####.")
+    date_of_issue: Date
+    variant: str
+    data: dict[str, Any]
+    alerts: List[CertificateAlert]
+    errors: List[CertificateError] = Field(description="What stops it being issued; empty = it can be.")
+    can_issue: bool
 
 
 # ── which operation returns what ──────────────────────────────────────────────────────────────
@@ -762,6 +823,10 @@ RESPONSE_DATA: dict[tuple[str, str], Any] = {
 
     ("GET", "/ref/countries"): Page[CountryOut],
     ("GET", "/ref/countries/{country_id}"): CountryOut,
+    ("POST", "/certificates/reinsurance/preview"): ReinsurancePreview,
+    ("POST", "/certificates/reinsurance"): ReinsuranceCertificateFull,
+    ("GET", "/certificates/reinsurance"): Page[ReinsuranceCertificateOut],
+    ("GET", "/certificates/reinsurance/{certificate_id}"): ReinsuranceCertificateFull,
     ("GET", "/policy/policies"): Page[PolicyOut],
     ("POST", "/policy/policies"): PolicyWithAircraft,
     ("GET", "/policy/policies/{policy_id}"): PolicyWithAircraft,

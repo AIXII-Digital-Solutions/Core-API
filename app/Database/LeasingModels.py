@@ -23,7 +23,7 @@ from decimal import Decimal
 from typing import Optional, List
 
 from sqlalchemy import (
-    String, Text, BigInteger, Numeric, Date, ForeignKey, Computed,
+    String, Text, BigInteger, SmallInteger, Numeric, Date, ForeignKey, Computed,
     UniqueConstraint, CheckConstraint, Index, text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -67,12 +67,43 @@ class Agreement(Base):
     aircraft_leases: Mapped[List["AircraftLease"]] = relationship(
         "AircraftLease", back_populates="agreement", lazy="raise_on_sql",
     )
+    contract_parties: Mapped[List["AgreementParty"]] = relationship(
+        "AgreementParty", back_populates="agreement", lazy="raise_on_sql",
+        order_by="(AgreementParty.position, AgreementParty.id)", cascade="all, delete-orphan",
+    )
 
     __table_args__ = (
         UniqueConstraint(
             "name_normalized", "start_date", name="uq_agreement_name_start",
             postgresql_nulls_not_distinct=True,
         ),
+    )
+
+
+class AgreementParty(Base):
+    """A Contract Party the certificates name for this agreement (AVN 67B section 8(a)) — the
+    lessor, and whoever else the lessor asks to be named: its parent, a security trustee, a
+    financier. In schedule order; the notice addresses for each are the party's own contacts in
+    ref.party_contact. Empty means "the lessor alone"."""
+    __tablename__ = "agreement_party"
+
+    agreement_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("leasing.agreement.id", ondelete="CASCADE"), nullable=False,
+        index=False,   # uq_agreement_party leads with it
+    )
+    party_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey(Party.__table__.c.id, ondelete="RESTRICT"), nullable=False,
+        index=True,
+    )
+    position: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default=text("1"))
+
+    agreement: Mapped["Agreement"] = relationship("Agreement", back_populates="contract_parties",
+                                                  lazy="raise_on_sql")
+    party: Mapped["Party"] = relationship(Party, lazy="raise_on_sql")
+
+    __table_args__ = (
+        UniqueConstraint("agreement_id", "party_id", name="uq_agreement_party"),
+        CheckConstraint("position >= 1", name="ck_agreement_party_position"),
     )
 
 

@@ -17,7 +17,7 @@ usage (an EXISTS over the referencing tables), not a flag stored here.
 from typing import Optional
 
 from fastapi import Request, Response, Depends, Query, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select, func, or_, exists
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
@@ -84,6 +84,15 @@ class AirlineIn(BaseModel):
     iata: Optional[str] = Field(default=None, max_length=8)
     is_asg: bool = True
     logo_url: Optional[str] = Field(default=None, max_length=2048)
+    certificate_code: Optional[str] = Field(
+        default=None, max_length=16, pattern=r"^[A-Za-z0-9][A-Za-z0-9-]*$",
+        description="The airline's code in certificate reference numbers (CY25/SCAT/00063). Stored "
+                    "upper-case; unique. A certificate cannot be issued without it.")
+
+    @field_validator("certificate_code")
+    @classmethod
+    def _upper_code(cls, value):
+        return value.upper() if value else value
 
 
 class AirlinePatch(BaseModel):
@@ -92,6 +101,15 @@ class AirlinePatch(BaseModel):
     iata: Optional[str] = Field(default=None, max_length=8)
     is_asg: Optional[bool] = None
     logo_url: Optional[str] = Field(default=None, max_length=2048)
+    certificate_code: Optional[str] = Field(
+        default=None, max_length=16, pattern=r"^[A-Za-z0-9][A-Za-z0-9-]*$",
+        description="The airline's code in certificate reference numbers (CY25/SCAT/00063). Stored "
+                    "upper-case; unique. A certificate cannot be issued without it.")
+
+    @field_validator("certificate_code")
+    @classmethod
+    def _upper_code(cls, value):
+        return value.upper() if value else value
 
 
 class ContactIn(BaseModel):
@@ -257,7 +275,8 @@ async def create_airline(request: Request, response: Response, body: AirlineIn,
                                         msg=f"Airline '{clash.airline_name}' already exists (id {clash.id}).",
                                         status_code=status.HTTP_409_CONFLICT)
             row = Airline(airline_name=body.airline_name.strip(), icao=body.icao, iata=body.iata,
-                          is_asg=body.is_asg, logo_url=body.logo_url)
+                          is_asg=body.is_asg, logo_url=body.logo_url,
+                          certificate_code=body.certificate_code)
             session.add(row)
             await session.flush()
             data = airline_json(row)

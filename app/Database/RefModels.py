@@ -64,6 +64,11 @@ class Airline(Base):
     airline_name: Mapped[str] = mapped_column(String, index=True)
     icao: Mapped[Optional[str]] = mapped_column(String, index=True, nullable=True, default=None)
     iata: Mapped[Optional[str]] = mapped_column(String, index=True, nullable=True, default=None)
+    certificate_code: Mapped[Optional[str]] = mapped_column(
+        String(16), nullable=True, default=None, unique=True,
+        comment="The airline's code in certificate reference numbers (CY25/SCAT/00063). Upper-case "
+                "letters, digits and hyphens; a certificate cannot be issued without it.",
+    )
     is_asg: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("true"),
         comment="TRUE = an ASG airline (cirium.asg_*); FALSE = insured but not ASG "

@@ -55,6 +55,13 @@ SLOW_REQUEST_MS: int = int(require_env("SLOW_REQUEST_MS", 750))
 # shape that produces a slow endpoint later, under a worse network, and it is worth naming early.
 BUSY_REQUEST_QUERIES: int = int(require_env("BUSY_REQUEST_QUERIES", 8))
 
+# How certificate reference numbers (CY25/SCAT/00063) are counted: `per_type` — the reinsurance and
+# the insurance certificates each have their own counter — or `shared`, one sequence for both.
+# Switching either way never reuses a number (Certificates/numbering.py).
+CERTIFICATE_COUNTER_MODE: str = str(require_env("CERTIFICATE_COUNTER_MODE", "per_type")).lower()
+if CERTIFICATE_COUNTER_MODE not in ("per_type", "shared"):
+    raise RuntimeError("CERTIFICATE_COUNTER_MODE must be per_type or shared")
+
 SELF_HOST: str = require_env("SELF_HOST", "api.aixii.com")
 SELF_PORT: int = int(require_env("SELF_PORT", 8000))
 
