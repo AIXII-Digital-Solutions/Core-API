@@ -50,19 +50,6 @@ from .RefModels import Party, CURRENCY_VALUES
 from .FleetModels import Aircraft
 
 
-# The market-standard wording the certificate columns default to. Plain ASCII, no quote characters:
-# they are embedded in a server_default.
-DEFAULT_PERIOD_WORDING = "both days inclusive, local standard time at the address of the Insured"
-DEFAULT_GEOGRAPHICAL_LIMITS = (
-    "Worldwide excluding Ukraine and the region of Crimea, Iran, North Korea and Syria. However, "
-    "coverage is granted (a) for the overflight of any excluded country where the flight is within "
-    "an internationally recognised air corridor and is performed in accordance with I.C.A.O. "
-    "recommendations; or (b) in circumstances where an insured Aircraft has landed in an excluded "
-    "country as a direct consequence and exclusively as a result of force majeure. However "
-    "Worldwide in respect of Products Legal Liability"
-)
-
-
 class PartyRole(PyEnum):
     """The part an entity plays in one policy. Stored as the VALUE."""
     INSURED = "insured"
@@ -131,29 +118,10 @@ class Policy(Base):
 
     cut_through_clause: Mapped[Optional[str]] = mapped_column(Text, nullable=True, default=None)
 
-    # --- wording the certificates quote from the policy. Each defaults to the market-standard form
-    # and is edited per policy where the schedule says otherwise (revision certificates_schema).
-    period_wording: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default=text(f"'{DEFAULT_PERIOD_WORDING}'"),
-        comment="How the period is qualified after its two dates.")
-    geographical_limits: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default=text(f"'{DEFAULT_GEOGRAPHICAL_LIMITS}'"),
-        comment="The Geographical Limits paragraph, as the policy words it.")
-    hull_war_clause: Mapped[str] = mapped_column(
-        String, nullable=False, server_default=text("'LSW 555D'"),
-        comment="The hull war and allied perils wording the cover is in accordance with.")
-    war_exclusion_clause: Mapped[str] = mapped_column(
-        String, nullable=False, server_default=text("'AVN 48B'"),
-        comment="The war and allied perils exclusion clause the liability cover writes back.")
-    war_exclusion_exception: Mapped[Optional[str]] = mapped_column(
-        String, nullable=True, server_default=text("'sub-paragraph(s) (b) of AVN48B'"),
-        comment="What of the exclusion is NOT written back, e.g. sub-paragraph(s) (b) of AVN48B.")
-    war_liability_clause: Mapped[str] = mapped_column(
-        String, nullable=False, server_default=text("'AVN 52E'"),
-        comment="The extended coverage endorsement for war liability.")
-    fifty_fifty_clause: Mapped[str] = mapped_column(
-        String, nullable=False, server_default=text("'AVS103A'"),
-        comment="The 50/50 provisional claims settlement clause.")
+    # The certificate wording columns (period_wording, geographical_limits, hull_war_clause,
+    # war_exclusion_clause, war_exclusion_exception, war_liability_clause, fifty_fifty_clause) are
+    # still in the table but no longer mapped or read: the wording moved to certificate.settings and
+    # the certificate itself (revision certificate_wording). They are dropped in a later revision.
 
     parties: Mapped[List["PolicyParty"]] = relationship(
         "PolicyParty", back_populates="policy", lazy="raise_on_sql",

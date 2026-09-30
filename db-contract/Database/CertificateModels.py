@@ -142,10 +142,38 @@ class ReferenceCounter(Base):
     )
 
 
+# The market-standard wording a certificate quotes unless the company's settings or the certificate
+# itself say otherwise. Plain ASCII, no quote characters: they are embedded in a server_default.
+MARKET_WORDING = {
+    "period_wording": "both days inclusive, local standard time at the address of the Insured",
+    "geographical_limits": (
+        "Worldwide excluding Ukraine and the region of Crimea, Iran, North Korea and Syria. However, "
+        "coverage is granted (a) for the overflight of any excluded country where the flight is within "
+        "an internationally recognised air corridor and is performed in accordance with I.C.A.O. "
+        "recommendations; or (b) in circumstances where an insured Aircraft has landed in an excluded "
+        "country as a direct consequence and exclusively as a result of force majeure. However "
+        "Worldwide in respect of Products Legal Liability"),
+    "hull_war_clause": "LSW 555D",
+    "war_exclusion_clause": "AVN 48B",
+    "war_exclusion_exception": "sub-paragraph(s) (b) of AVN48B",
+    "war_liability_clause": "AVN 52E",
+    "fifty_fifty_clause": "AVS103A",
+}
+WORDING_FIELDS = tuple(MARKET_WORDING)
+
+
+def _wording(key: str, kind, comment: str):
+    return mapped_column(kind, nullable=False, server_default=text(f"'{MARKET_WORDING[key]}'"),
+                         comment=comment)
+
+
 class Settings(Base):
     """The issuing company as the certificates print it — ONE row (id = 1), edited from the portal's
     admin. The images (logo, stamp) are rows of `Asset`, not columns here, so this row stays small and
-    its audit entries readable."""
+    its audit entries readable.
+
+    The WORDING columns are the company's defaults for what a certificate quotes; a certificate may
+    override each of them in its own request (revision certificate_wording moved them off the policy)."""
     __tablename__ = "settings"
 
     company_name: Mapped[Optional[str]] = mapped_column(
@@ -162,6 +190,22 @@ class Settings(Base):
     brand_accent: Mapped[str] = mapped_column(
         String(7), nullable=False, server_default=text("'#D5E28D'"),
         comment="The rule above the page number, #RRGGBB.")
+
+    period_wording: Mapped[str] = _wording(
+        "period_wording", Text, "How the policy period is qualified after its two dates.")
+    geographical_limits: Mapped[str] = _wording(
+        "geographical_limits", Text, "The Geographical Limits paragraph.")
+    hull_war_clause: Mapped[str] = _wording(
+        "hull_war_clause", String, "The hull war and allied perils wording the cover is in accordance with.")
+    war_exclusion_clause: Mapped[str] = _wording(
+        "war_exclusion_clause", String, "The war and allied perils exclusion the liability cover writes back.")
+    war_exclusion_exception: Mapped[str] = _wording(
+        "war_exclusion_exception", String,
+        "What of the exclusion is NOT written back; empty = no exception.")
+    war_liability_clause: Mapped[str] = _wording(
+        "war_liability_clause", String, "The extended coverage endorsement for war liability.")
+    fifty_fifty_clause: Mapped[str] = _wording(
+        "fifty_fifty_clause", String, "The 50/50 provisional claims settlement clause.")
 
     __table_args__ = (
         CheckConstraint("id = 1", name="ck_certificate_settings_single_row"),

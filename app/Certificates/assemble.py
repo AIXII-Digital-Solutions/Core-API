@@ -36,7 +36,7 @@ from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.orm import joinedload, selectinload
 
-from Database.CertificateModels import ISSUED, ReinsuranceCertificate
+from Database.CertificateModels import ISSUED, MARKET_WORDING, ReinsuranceCertificate
 from Database.FleetModels import Aircraft, AircraftType
 from Database.LeasingModels import Agreement, AgreementParty, AircraftLease
 from Database.PolicyModels import Coverage, Policy, PolicyParty, PartyRole
@@ -101,11 +101,16 @@ def r_start(row) -> date:
 
 async def assemble(session, kind: str, *, aircraft_id: int, date_of_issue: date,
                    policy_id: Optional[int] = None, overrides: Optional[Overrides] = None,
-                   signed_by: str = "broker") -> Draft:
-    """Everything a certificate of `kind` prints for this aircraft, as of `date_of_issue`."""
+                   signed_by: str = "broker", wording: Optional[dict] = None) -> Draft:
+    """Everything a certificate of `kind` prints for this aircraft, as of `date_of_issue`.
+
+    `wording` is the clauses, period wording and geographical limits, already resolved (the
+    certificate's override, else the company's setting, else the market text — issuer.resolve_wording);
+    the policy is not read for them."""
     if kind not in KINDS:
         raise ValueError(f"unknown certificate kind {kind!r}")
     o = overrides or Overrides()
+    w = {**MARKET_WORDING, **(wording or {})}
     errors, alerts = [], []
 
     aircraft = (await session.execute(
@@ -326,25 +331,25 @@ async def assemble(session, kind: str, *, aircraft_id: int, date_of_issue: date,
         "insurer": reinsured if kind == INSURANCE else [],
         "period": {"from": policy.period_from.isoformat(),
                    "to": policy.period_to.isoformat() if policy.period_to else None,
-                   "wording": policy.period_wording},
+                   "wording": w["period_wording"]},
         "equipment": {"description": equipment, "msn": aircraft.msn,
                       "registration": aircraft.registration,
                       "agreed_value": _num(agreed_value), "agreed_value_currency": lcur,
                       "agreed_value_source": agreed_source},
-        "geographical_limits": policy.geographical_limits,
+        "geographical_limits": w["geographical_limits"],
         "policy_currency": pcur,
         "hull": {"deductible": hull_deductible, "spares_deductible": spares_deductible},
         "share": share,
-        "hull_war": {"clause": policy.hull_war_clause, "confiscation_limit": confiscation,
+        "hull_war": {"clause": w["hull_war_clause"], "confiscation_limit": confiscation,
                      "selected_country": policy.selected_country if country_limit is not None else None,
                      "selected_country_limit": country_limit, "overall_limit": overall,
                      "spares_limit": spares_limit},
-        "fifty_fifty_clause": policy.fifty_fifty_clause,
+        "fifty_fifty_clause": w["fifty_fifty_clause"],
         "cut_through_clause": policy.cut_through_clause,
         "liability": {"combined_single_limit": csl,
-                      "war_exclusion_clause": policy.war_exclusion_clause,
-                      "war_exclusion_exception": policy.war_exclusion_exception,
-                      "war_liability_clause": policy.war_liability_clause,
+                      "war_exclusion_clause": w["war_exclusion_clause"],
+                      "war_exclusion_exception": w["war_exclusion_exception"] or None,
+                      "war_liability_clause": w["war_liability_clause"],
                       "war_combined_single_limit": war_csl},
         "hull_deductible": ({"buy_down": buy_down, "aggregate": aggregate}
                             if buy_down is not None else None),

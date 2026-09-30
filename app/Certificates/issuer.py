@@ -1,5 +1,6 @@
 """The company that issues the certificates (certificate.settings) and its images (certificate.asset:
-logo, stamp) — data, edited from the portal's admin.
+logo, stamp) — data, edited from the portal's admin. The settings also hold the company's default
+certificate WORDING (clauses, period wording, geographical limits), which a certificate may override.
 
 The signatory is not here: the portal sends the issuing user's name, title, phone and e-mail with the
 request, and they sign the printed certificate by hand. An issued certificate keeps what it printed in
@@ -13,7 +14,7 @@ from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.orm import undefer
 
-from Database.CertificateModels import Asset, Settings
+from Database.CertificateModels import MARKET_WORDING, WORDING_FIELDS, Asset, Settings
 
 # Used only when the settings row is missing (a fresh database before the migration seeded it).
 DEFAULTS = {
@@ -23,8 +24,10 @@ DEFAULTS = {
     "legal_footer": None,
     "brand_primary": "#1F3B33",
     "brand_accent": "#D5E28D",
+    **MARKET_WORDING,
 }
 SETTINGS_FIELDS = tuple(DEFAULTS)
+COMPANY_FIELDS = tuple(k for k in SETTINGS_FIELDS if k not in WORDING_FIELDS)
 
 MAX_IMAGE_BYTES = 2 * 1024 * 1024
 IMAGE_TYPES = ("image/png", "image/jpeg", "image/svg+xml")
@@ -84,12 +87,28 @@ async def load_settings(session) -> dict:
     return {k: getattr(row, k) for k in SETTINGS_FIELDS} if row else dict(DEFAULTS)
 
 
-async def load(session) -> tuple[dict, dict]:
-    """(issuer, images): the company as a certificate prints it, and the logo / stamp bytes the
-    renderer draws. `issuer` names the images by sha256 so a certificate records which it used."""
+def resolve_wording(request: dict, settings: dict) -> dict:
+    """Each wording field as a certificate prints it: the certificate's own override, else the
+    company's setting, else the market text. An override of "" is kept — for
+    `war_exclusion_exception` it means "no exception"."""
+    out = {}
+    for key in WORDING_FIELDS:
+        for source in (request.get(key), settings.get(key), MARKET_WORDING[key]):
+            if source is not None:
+                out[key] = source
+                break
+    return out
+
+
+async def load(session) -> tuple[dict, dict, dict]:
+    """(issuer, wording, images): the company as a certificate prints it, the company's default
+    wording, and the logo / stamp bytes the renderer draws. `issuer` names the images by sha256 so a
+    certificate records which it used."""
     settings = await load_settings(session)
     rows = (await session.execute(
         select(Asset).where(Asset.key.in_(COMPANY_ASSETS)).options(undefer(Asset.data))
     )).scalars().all()
     images = {r.key: Image(r.content_type, bytes(r.data), r.sha256) for r in rows}
-    return {**settings, "images": {k: v.sha256 for k, v in images.items()}}, images
+    issuer = {k: settings[k] for k in COMPANY_FIELDS}
+    wording = {k: settings[k] for k in WORDING_FIELDS}
+    return {**issuer, "images": {k: v.sha256 for k, v in images.items()}}, wording, images

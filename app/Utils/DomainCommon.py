@@ -799,13 +799,6 @@ def policy_json(p: Optional[Policy]) -> Optional[dict]:
         "reinsured_amount": num(p.reinsured_amount),
         "reinsured_amount_of": num(p.reinsured_amount_of),
         "cut_through_clause": p.cut_through_clause,
-        "period_wording": p.period_wording,
-        "geographical_limits": p.geographical_limits,
-        "hull_war_clause": p.hull_war_clause,
-        "war_exclusion_clause": p.war_exclusion_clause,
-        "war_exclusion_exception": p.war_exclusion_exception,
-        "war_liability_clause": p.war_liability_clause,
-        "fifty_fifty_clause": p.fifty_fifty_clause,
         "created_at": iso(p.created_at),
         "updated_at": iso(p.updated_at),
     }
