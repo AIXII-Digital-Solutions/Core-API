@@ -95,8 +95,12 @@ for this certificate only, and is kept with it:
 | `contracts` | the contracts list: a list of strings, the full text of each item |
 | `addressees` | the notice addresses: a list of `{company, contacts, email}` |
 
+A second collapsed block **"Certificate wording"**: the seven wording fields of §7.3. Each one is
+optional; a field left out takes the company default from `/certificates/settings`.
+
 On `PATCH`, only the fields you send change. Sending a field as `null` drops that override, and the
-stored value applies again. The inputs as saved are returned in `request`, so the edit form fills
+stored value (for wording: the company default) applies again. `war_exclusion_exception: ""` is
+not "empty": it is a real override meaning "no exception", and it is kept. The inputs as saved are returned in `request`, so the edit form fills
 from it.
 
 ### 3.2 The record
@@ -193,6 +197,7 @@ sequence. The portal never builds or changes it.
 - **Load** — `GET /certificates/settings` returns:
   - `company_name`, `company_legal_name`, `address_line`, `legal_footer`;
   - `brand_primary`, `brand_accent`;
+  - the seven wording fields of §7.3, the company defaults;
   - `logo`, `stamp`: each is `{url, content_type, size, sha256, updated_at}`, or `null`.
 - **Form**
 
@@ -206,6 +211,10 @@ sequence. The portal never builds or changes it.
 
   Save with `PATCH /certificates/settings`, sending only the fields that changed. `null` or `""`
   clears the optional ones.
+- **Certificate wording** — a section of the same page with the seven fields of §7.3, the company
+  defaults every certificate starts from. Show the section when the response has the key
+  `hull_war_clause`. Sending a field as `null` returns it to the market text (offer "Reset to
+  market"); `war_exclusion_exception: ""` means no exception.
 - **Logo and stamp**
   - preview: `GET /certificates/settings/logo` (or `/stamp`) returns the image itself;
   - upload: `PUT /certificates/settings/logo` (or `/stamp`) as `multipart/form-data`, field `file`.
@@ -241,19 +250,27 @@ a certificate. SCAT is set (`SCAT`).
 - `other_contracts`: **one line = one item** of the certificate's Contracts list, after the lease
   agreement itself.
 
-### 7.3 Policy — "Certificate wording"
-New editable fields on the policy, each defaulting to the market-standard text from the client's
-sample. Put them in a "Certificate wording" section of the policy form:
+### 7.3 Certificate wording — fields of the certificate, company defaults in `/certificates/settings`
+The wording a certificate quotes is **not on the policy any more**. Each field resolves as:
+**the certificate's own override** (sent in its body, §3.1) → **the company default** (admin,
+§6) → **the market text**.
 
-| field | default |
-|---|---|
-| `period_wording` | both days inclusive, local standard time at the address of the Insured |
-| `geographical_limits` | Worldwide excluding Ukraine and the region of Crimea, Iran, North Korea and Syria. … (multi-line) |
-| `hull_war_clause` | LSW 555D |
-| `war_exclusion_clause` | AVN 48B |
-| `war_exclusion_exception` | sub-paragraph(s) (b) of AVN48B — `""` = no exception |
-| `war_liability_clause` | AVN 52E |
-| `fifty_fifty_clause` | AVS103A |
+| field | market text | limit |
+|---|---|---|
+| `period_wording` | both days inclusive, local standard time at the address of the Insured | 2000 |
+| `geographical_limits` | Worldwide excluding Ukraine and the region of Crimea, Iran, North Korea and Syria. … (multi-line) | 2000 |
+| `hull_war_clause` | LSW 555D | 256 |
+| `war_exclusion_clause` | AVN 48B | 256 |
+| `war_exclusion_exception` | sub-paragraph(s) (b) of AVN48B. `""` = no exception | 256 |
+| `war_liability_clause` | AVN 52E | 256 |
+| `fifty_fifty_clause` | AVS103A | 256 |
+
+Where the certificate prints them (`data`): `period.wording`, `geographical_limits`,
+`hull_war.clause`, `liability.war_exclusion_clause`, `liability.war_exclusion_exception` (`null` =
+none), `liability.war_liability_clause`, `fifty_fifty_clause`.
+
+**Remove the "Certificate wording" section from the policy form.** The policy endpoints no longer
+return these fields, and ignore them if sent.
 
 ---
 
@@ -276,6 +293,8 @@ sample. Put them in a "Certificate wording" section of the policy form:
 - `/certificates/signatory*` (the signatory profile and the signature upload): the signatory now
   comes with the request (§1), and the signature is made by hand.
 - `POST /certificates/reinsurance/preview/pdf`: create a draft and open its PDF instead.
+- The seven wording fields on `/policy/policies*` (request and response): they are now certificate
+  fields, with company defaults (§7.3).
 - `POST /certificates/reinsurance` no longer issues directly. It creates a draft, and
   `/{id}/issue` issues it.
 
@@ -302,3 +321,4 @@ sample. Put them in a "Certificate wording" section of the policy form:
 | 2026-09-29 | Reinsurance certificate: preview, issue, history, PDF; reference numbers; airline `certificate_code`; policy certificate wording; agreement `contract_parties`. |
 | 2026-09-29 | Signatory = the issuing portal user (+ profile at `/certificates/signatory`); company branding and images moved to the database (`/certificates/settings`); DRAFT PDF preview. |
 | 2026-09-30 | **Draft → issued.** A certificate is created as a draft, edited (`PATCH`), drawn marked DRAFT, then issued (`/{id}/issue`) and frozen. **Insurance certificate** (`/certificates/insurance`, `signed_by`). Signatory details come with the request; the signature profile and signature upload were removed. The stamp is printed only when uploaded. "Certificate settings" moved to the admin panel. |
+| 2026-09-30 | **Certificate wording moved off the policy.** `period_wording`, `geographical_limits` and the five clause fields are company defaults in `/certificates/settings` (admin), overridable per certificate in its body; the policy no longer takes or returns them. `war_exclusion_exception: ""` = no exception. |

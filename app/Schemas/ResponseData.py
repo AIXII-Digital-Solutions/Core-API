@@ -564,13 +564,6 @@ class PolicyOut(BaseModel):
     reinsured_amount: Optional[float] = Field(description="Percent ceded, of reinsured_amount_of.")
     reinsured_amount_of: Optional[float] = Field(description="The share, in percent, reinsured_amount is taken of (97.5 of 100).")
     cut_through_clause: Optional[str]
-    period_wording: str
-    geographical_limits: str
-    hull_war_clause: str
-    war_exclusion_clause: str
-    war_exclusion_exception: Optional[str]
-    war_liability_clause: str
-    fifty_fifty_clause: str
     created_at: Optional[DateTime]
     updated_at: Optional[DateTime]
 
@@ -745,6 +738,13 @@ class CertificateSettingsOut(BaseModel):
     legal_footer: Optional[str]
     brand_primary: str
     brand_accent: str
+    period_wording: Optional[str] = Field(description="Company default; a certificate may override it.")
+    geographical_limits: Optional[str]
+    hull_war_clause: Optional[str] = Field(description="e.g. LSW 555D.")
+    war_exclusion_clause: Optional[str] = Field(description="e.g. AVN 48B.")
+    war_exclusion_exception: Optional[str] = Field(description="\"\" = no exception.")
+    war_liability_clause: Optional[str] = Field(description="e.g. AVN 52E.")
+    fifty_fifty_clause: Optional[str] = Field(description="e.g. AVS103A.")
     logo: Optional[CertificateImage]
     stamp: Optional[CertificateImage]
 

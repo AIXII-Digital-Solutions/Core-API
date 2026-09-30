@@ -11,7 +11,8 @@ Both documents share one flow, one set of endpoints per kind:
     DELETE /certificates/{kind}/{id}         discard a draft (409 once issued; the number is not reused)
     GET    /certificates/{kind}/{id}/pdf     a draft drawn live and marked DRAFT; an issued one as sent
 
-    GET/PATCH      /certificates/settings                the issuing company as printed (admin)
+    GET/PATCH      /certificates/settings                the issuing company as printed, and its default
+                                                          certificate wording (admin)
     PUT/GET/DELETE /certificates/settings/{logo|stamp}   its images (admin)
 
 DRAFT vs ISSUED. A draft is a living document: its values are resolved from the policy, the lease and
@@ -36,8 +37,8 @@ from Certificates import assemble as assembly, issuer as issuer_mod, numbering
 from Certificates.render import render
 from Config import setup_logger
 from Database import ApiToken
-from Database.CertificateModels import (DRAFT, ISSUED, Asset, InsuranceCertificate,
-                                        ReinsuranceCertificate, Settings)
+from Database.CertificateModels import (DRAFT, ISSUED, MARKET_WORDING, WORDING_FIELDS, Asset,
+                                        InsuranceCertificate, ReinsuranceCertificate, Settings)
 from api_auth import authorize, current_actor, SCOPE_INSURANCE_READ, SCOPE_INSURANCE_WRITE
 from settings import Router
 from Utils import error_response, success_response, warning_response
@@ -73,9 +74,32 @@ class SignatoryIn(BaseModel):
     email: Optional[str] = Field(default=None, max_length=256)
 
 
-class _Inputs(BaseModel):
+class _Wording(BaseModel):
+    """The wording a certificate quotes. Each defaults to the company's setting
+    (`/certificates/settings`), which defaults to the market-standard text."""
+    period_wording: Optional[str] = Field(
+        default=None, min_length=1, max_length=2000,
+        description="How the policy period is qualified after its two dates.")
+    geographical_limits: Optional[str] = Field(
+        default=None, min_length=1, max_length=2000, description="The Geographical Limits paragraph.")
+    hull_war_clause: Optional[str] = Field(default=None, min_length=1, max_length=256,
+                                           description="e.g. LSW 555D.")
+    war_exclusion_clause: Optional[str] = Field(default=None, min_length=1, max_length=256,
+                                                description="e.g. AVN 48B.")
+    war_exclusion_exception: Optional[str] = Field(
+        default=None, max_length=256,
+        description="What of the exclusion is not written back, e.g. 'sub-paragraph(s) (b) of "
+                    "AVN48B'. \"\" = no exception.")
+    war_liability_clause: Optional[str] = Field(default=None, min_length=1, max_length=256,
+                                                description="e.g. AVN 52E.")
+    fifty_fifty_clause: Optional[str] = Field(default=None, min_length=1, max_length=256,
+                                              description="e.g. AVS103A.")
+
+
+class _Inputs(_Wording):
     """Everything a certificate's inputs can say besides the aircraft. On PATCH, a field sent
-    replaces the draft's; sent as null, it drops the override and the stored value applies again."""
+    replaces the draft's; sent as null, it drops the override and the stored value (or the company's
+    wording) applies again. `war_exclusion_exception: ""` is an override ("no exception"), not null."""
     policy_id: Optional[int] = Field(
         default=None, description="Default: the policy covering the aircraft on the date of issue, "
                                   "else the next one to start.")
@@ -110,9 +134,11 @@ class CertificatePatch(_Inputs):
     another certificate."""
 
 
-class SettingsPatch(BaseModel):
-    """The issuing company as the certificates print it. Only the fields sent change; send
-    `company_name`, `address_line` or `legal_footer` as null (or "") to leave them off."""
+class SettingsPatch(_Wording):
+    """The issuing company as the certificates print it, and its default certificate wording. Only
+    the fields sent change; send `company_name`, `address_line` or `legal_footer` as null (or "") to
+    leave them off. A wording field sent as null returns to the market-standard text;
+    `war_exclusion_exception: ""` means no exception."""
     company_name: Optional[str] = Field(default=None, max_length=128,
                                         description="Beside the logo in the page header.")
     company_legal_name: Optional[str] = Field(
@@ -153,11 +179,13 @@ async def _resolve(session, kind: str, aircraft_id: int, req: dict, *, issuing_o
     signatory, and the images to draw it with."""
     date_of_issue = (date.fromisoformat(req["date_of_issue"]) if req.get("date_of_issue")
                      else issuing_on or date.today())
+    issuer, company_wording, images = await issuer_mod.load(session)
     draft = await assembly.assemble(
         session, kind, aircraft_id=aircraft_id, date_of_issue=date_of_issue,
         policy_id=req.get("policy_id"), overrides=_overrides(req),
-        signed_by=req.get("signed_by") or "broker")
-    draft.data["issuer"], images = await issuer_mod.load(session)
+        signed_by=req.get("signed_by") or "broker",
+        wording=issuer_mod.resolve_wording(req, company_wording))
+    draft.data["issuer"] = issuer
     signatory = req.get("signatory")
     if not signatory:
         _kind, user = current_actor()
@@ -371,6 +399,7 @@ def _register(kind: str) -> None:
                 if row.status == ISSUED:
                     return _is_issued(request, response, row)
                 req = {**row.request, **_stored_inputs(body, exclude_unset=True)}
+                # null drops an override; "" is kept (war_exclusion_exception: no exception)
                 req = {k: v for k, v in req.items() if v is not None}
                 r = await _resolve(session, kind, row.aircraft_id, req)
                 _apply(row, kind, r, req)
@@ -536,7 +565,8 @@ def _company_asset(kind: str) -> str:
 
 @router.get(path="/settings",
             description="The issuing company as the certificates print it: names, address line, "
-                        "legal footer, colours, and the logo and stamp (metadata + URL).",
+                        "legal footer, colours, the logo and stamp (metadata + URL), and the default "
+                        "certificate wording (period wording, geographical limits, clauses).",
             responses=build_responses(include=_OK), dependencies=_READ)
 async def get_settings(request: Request, response: Response):
     try:
@@ -548,8 +578,10 @@ async def get_settings(request: Request, response: Response):
 
 
 @router.patch(path="/settings",
-              description="Change how the issuing company is printed. Only the fields sent change. "
-                          "Issued certificates keep what they printed; drafts pick it up at once.",
+              description="Change how the issuing company is printed and its default certificate "
+                          "wording. Only the fields sent change; a wording field sent as null returns "
+                          "to the market text. Issued certificates keep what they printed; drafts "
+                          "pick it up at once.",
               responses=build_responses(include=_OK))
 async def update_settings(request: Request, response: Response, body: SettingsPatch,
                           token: Optional[ApiToken] = Depends(authorize(SCOPE_INSURANCE_WRITE))):
@@ -561,6 +593,9 @@ async def update_settings(request: Request, response: Response, body: SettingsPa
         for key in ("company_legal_name", "brand_primary", "brand_accent"):
             if key in fields and fields[key] is None:
                 fields.pop(key)
+        for key in WORDING_FIELDS:
+            if key in fields and fields[key] is None:
+                fields[key] = MARKET_WORDING[key]
         async with request.app.state.db_client.session(DB) as session:
             await set_actor(session, token)
             row = (await session.execute(select(Settings).where(Settings.id == 1))).scalar_one_or_none()
