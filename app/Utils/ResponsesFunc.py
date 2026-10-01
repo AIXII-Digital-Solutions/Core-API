@@ -105,15 +105,19 @@ def _safe_msg(*, request: Request, exc: Optional[Exception], msg: Optional[str],
 def warning_response(*, request: Request, response: Response,
                      exc: Optional[Exception] = None,
                      msg: Optional[str] = None,
-                     status_code: status = status.HTTP_400_BAD_REQUEST) -> DefaultResponse[T]:
+                     status_code: status = status.HTTP_400_BAD_REQUEST,
+                     code: Optional[str] = None, data=None) -> DefaultResponse[T]:
+    """`code` goes to `details.code` for a client to branch on; `data` replaces the empty list (e.g.
+    the `{field, msg}` entries of a refusal)."""
     if not exc and not msg:
         raise ValueError("'exc' or 'msg' must be provided")
     response.status_code = status_code
     client_msg = _safe_msg(request=request, exc=exc, msg=msg, status_code=status_code, generic="Request error")
     return _render(request, DefaultResponse(
         status_code=status_code,
-        details=DetailField(msg=client_msg, correlationId=getattr(request.state, "correlation_id", None)),
-        data=[]
+        details=DetailField(msg=client_msg, correlationId=getattr(request.state, "correlation_id", None),
+                            code=code),
+        data=[] if data is None else data
     ), status_code)
 
 
@@ -127,6 +131,7 @@ def error_response(*, request: Request, response: Response,
     client_msg = _safe_msg(request=request, exc=exc, msg=msg, status_code=status_code, generic="Internal server error")
     return _render(request, DefaultResponse(
         status_code=status_code,
-        details=DetailField(msg=client_msg, correlationId=getattr(request.state, "correlation_id", None)),
+        details=DetailField(msg=client_msg, correlationId=getattr(request.state, "correlation_id", None),
+                            code="internal_error"),
         data=[]
     ), status_code)

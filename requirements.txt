@@ -30,6 +30,9 @@ numpy==1.26.4
 openpyxl==3.1.5
 reportlab==4.5.1
 svglib==2.2.0
+# certificates: the signature field on the prepared PDF and the check of the signed upload
+pyHanko==0.37.0
+pyhanko-certvalidator==0.32.1
 
 # DB migrations
 alembic==1.18.4

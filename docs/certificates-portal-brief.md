@@ -5,7 +5,7 @@ every change the portal has to follow. Read the [change log](#11-change-log) fir
 since you last looked, and [open items](#10-open-items) for what is not built yet.
 
 What it covers: the **Reinsurance certificate** and the **Insurance certificate** (both AVN 67B) —
-drafting, editing, issuing, history — the issuing company's branding (admin panel), and the fields
+drafting, review, electronic signature, history — the issuing company's branding (admin panel), and the fields
 elsewhere in the domain the certificates read.
 
 The general API contract — base URL, the response envelope, error shapes, conventions — is in
@@ -13,64 +13,124 @@ The general API contract — base URL, the response envelope, error shapes, conv
 
 ---
 
-## 1. Who is calling — the signatory
+## 1. Who is calling — the people in the review
 
 Every request carries the service token and the portal user it is made for:
 
 | header | value |
 |---|---|
 | `X-Service-Token` | the portal's service token |
-| `X-Portal-User-Id` | the portal user's UUID |
+| `X-Portal-User-Id` | the portal user's **UUID** — the API compares people by it |
 | `X-Portal-User-Email` | their e-mail |
 | `X-Portal-User-Name` | their full name, percent-encoded UTF-8 (`urllib.parse.quote`) |
 
-**A certificate is signed by hand by the portal user who issues it.** No signature is uploaded: the
-printed certificate has an empty space above the signatory's name, and they sign the paper copy
-after issuing. The certificate prints the signatory's details, which the portal **sends with the
-request**:
+The headers are trusted only together with the service token. Every step that a person takes
+(submit, approve, return, prepare, issue) needs them; without them the answer is **422
+`portal_user_required`**. Users on a certificate are always `{id, email, name}`, `id` being that UUID.
+
+**Three roles, at least two people:**
+
+- the **author** creates and edits the draft and submits it;
+- the **reviewer** approves it, or returns it. The reviewer must not be the person who submitted it
+  (`same_person`);
+- the **signer** prepares the final PDF and signs it electronically. The signer must not be the
+  person who approved it (`same_person`). The author may sign.
+
+**The signatory is whoever signs.** Their details are sent when the PDF is prepared for signing
+(§2, step 4), not earlier, and are printed under the signature:
 
 ```json
 "signatory": {"full_name": "Jane Doe", "title": "Head of Insurance",
               "phone": "+7 700 000 0000", "email": "j.doe@ai12.example"}
 ```
 
-Only `full_name` is required. Fill the block from the current user's portal profile and let them
-edit it in the form. If it is not sent, the draft takes the name and e-mail from the
-`X-Portal-User-*` headers when it is created and keeps them. With neither, the certificate cannot be
-issued (`certificate.signatory`). The headers are trusted only together with the service token.
+Only `full_name` is required. Fill it from the signer's portal profile and let them edit it. A draft
+has no signatory and no error for it.
 
 ---
 
-## 2. Draft → issued
+## 2. The life of a certificate
 
-Every certificate starts as a **draft** and ends as **issued**. `status` says which.
+```
+draft ──submit──▶ in_review ──approve──▶ approved ──issue/prepare + issue──▶ issued
+  ▲                   │                      │
+  └──────return───────┴──────────return──────┘
+```
 
-| | draft | issued |
-|---|---|---|
-| reference number | allocated when the draft is created, kept through every edit | the same |
-| values | re-resolved from the policy, lease and aircraft **every time** it is read or drawn | frozen as printed |
-| editing | `PATCH` its inputs; `DELETE` discards it | **impossible** — 409; the database refuses it too |
-| PDF | drawn on request, **DRAFT across every page** | the file as issued, no mark |
-| `errors` | what still blocks issuing (`can_issue: false`) | always `[]` |
+| | draft | in_review | approved | issued |
+|---|---|---|---|---|
+| values | re-resolved **every time** it is read or drawn | re-resolved | re-resolved | frozen as signed |
+| `PATCH`, `DELETE` | yes | 409 `wrong_status` | 409 `wrong_status` | 409 `wrong_status` |
+| PDF | drawn on request, **DRAFT across every page** | DRAFT | DRAFT | the **signed file, byte for byte** |
 
-Issuing is final. A correction to an issued certificate is a **new draft, with a new number**. A
-discarded draft's number is not reused.
+The reference number is allocated when the draft is created and kept to the end. Issuing is final: a
+correction to an issued certificate is a **new draft, with a new number**. A discarded draft's number
+is not reused.
+
+### The steps
+
+1. **Create** — `POST /certificates/{kind}` → a `draft` (201).
+2. **Submit** — `POST …/{id}/submit`, body `{comment?}`: draft → `in_review`. 422 `incomplete` while
+   it has errors. Clears `returned`.
+3. **Review**:
+   - **Approve** — `POST …/{id}/approve`, body `{comment?}`: in_review → `approved`. 409 `same_person`
+     if the approver submitted it. 422 `incomplete` if errors appeared since. Approval records the
+     values as they resolved then.
+   - **Return** — `POST …/{id}/return`, body `{comment}` (**required**, 1–2000 characters):
+     in_review **or** approved → `draft`. The comment is kept in `returned` and in `events`.
+4. **Prepare for signing** — `POST …/{id}/issue/prepare`, body `{signatory}` (§1). Approved only.
+   - 409 `same_person` if the signer approved it.
+   - The values are resolved once more. **If they changed since approval** (the policy, lease,
+     aircraft or company wording was edited in between), the certificate goes **back to
+     `in_review`** and the answer is 409 `changed_since_approval`. Show it to the reviewer again.
+   - Otherwise `data` is `{issue_token, expires_at, signature_field: "Signatory", pdf_base64}`: the
+     **final PDF** — no DRAFT mark, the date of issue (today unless one was set), the signatory
+     printed — with an **empty signature field named `Signatory`** over the signature box.
+   - The token is **single use** and lives **15 minutes**. A new prepare replaces the previous token
+     (and its PDF).
+5. **Sign** — on the portal side: sign the field `Signatory` of exactly that PDF, as an incremental
+   update (what every PDF signing tool does). Do not change anything else in the file: no flattening,
+   no re-saving, no other annotations.
+6. **Issue** — `POST …/{id}/issue`, **`multipart/form-data`**:
+
+   | part | content |
+   |---|---|
+   | `issue_token` | the token from prepare |
+   | `file` | the signed PDF |
+   | `signature` | a JSON string: `{signer_name, signer_email, subject, issuer, serial, valid_from, valid_to, signed_at, timestamped, level}` as your signing tool reports them. Don't send `sha256`: the API computes it |
+
+   The API checks that:
+   - the token is the latest one, unused and unexpired;
+   - the file **starts byte for byte with the prepared PDF** and is longer than it;
+   - the field `Signatory` is signed and the signature is intact. The certificate chain does **not**
+     have to be trusted;
+   - the update changes **nothing but the signature**.
+
+   It then stores the signed bytes as the issued PDF, freezes the values and fills `signature`
+   (+ `sha256`) and `issued_by_user` (the uploader). The certificate is now `issued`.
+
+   A `POST …/issue` without a file answers 409 `signature_required`.
 
 ---
 
 ## 3. Endpoints
 
-`{kind}` is `reinsurance` or `insurance`. Both have the same endpoints and bodies.
+`{kind}` is `reinsurance` or `insurance`. Both have the same endpoints and bodies. Each transition
+answers with the updated certificate in `data`.
 
 | method | path | what |
 |---|---|---|
 | `POST` | `/certificates/{kind}/preview` | what it would say, nothing saved (reference masked `CY25/SCAT/#####`) |
 | `POST` | `/certificates/{kind}` | create a **draft** → 201 |
-| `GET` | `/certificates/{kind}` | list: `aircraft_id`, `policy_id`, `registration`, `status=draft\|issued`, `limit`, `offset` → `{items, total}` |
-| `GET` | `/certificates/{kind}/{id}` | one, with `data` |
-| `PATCH` | `/certificates/{kind}/{id}` | change a draft's inputs → 409 if issued |
-| `POST` | `/certificates/{kind}/{id}/issue` | issue → 409 if already issued, 422 while it has errors |
-| `DELETE` | `/certificates/{kind}/{id}` | discard a draft → 409 if issued |
+| `GET` | `/certificates/{kind}` | list: `aircraft_id`, `policy_id`, `registration`, `status=draft\|in_review\|approved\|issued`, `limit`, `offset` → `{items, total}` |
+| `GET` | `/certificates/{kind}/{id}` | one, with `data` and `events` |
+| `PATCH` | `/certificates/{kind}/{id}` | change a draft's inputs |
+| `DELETE` | `/certificates/{kind}/{id}` | discard a draft |
+| `POST` | `/certificates/{kind}/{id}/submit` | draft → in_review |
+| `POST` | `/certificates/{kind}/{id}/approve` | in_review → approved |
+| `POST` | `/certificates/{kind}/{id}/return` | in_review / approved → draft |
+| `POST` | `/certificates/{kind}/{id}/issue/prepare` | the PDF to sign + token |
+| `POST` | `/certificates/{kind}/{id}/issue` | upload the signed PDF → issued |
 | `GET` | `/certificates/{kind}/{id}/pdf` | the PDF (`?download=true` to save) |
 
 ### 3.1 The body (create, preview; PATCH takes the same fields except `aircraft_id`)
@@ -79,8 +139,7 @@ discarded draft's number is not reused.
 |---|---|---|
 | `aircraft_id` | yes (create / preview) | cannot change on a draft: another aircraft is another certificate |
 | `policy_id` | no | default: the policy covering the aircraft on the date of issue, else the next one to start |
-| `date_of_issue` | no | default: the day it is **issued** (system-generated); a draft shows today until then |
-| `signatory` | see §1 | `{full_name, title, phone, email}` |
+| `date_of_issue` | no | default: the day the PDF is prepared for signing (system-generated); until then it shows today |
 | `signed_by` | insurance only | `broker` (default) or `insurer` — see §4 |
 
 A collapsed block **"Overrides (from e-mail / rider / mark-up)"**. Each one replaces the stored value
@@ -99,54 +158,84 @@ A second collapsed block **"Certificate wording"**: the seven wording fields of 
 optional; a field left out takes the company default from `/certificates/settings`.
 
 On `PATCH`, only the fields you send change. Sending a field as `null` drops that override, and the
-stored value (for wording: the company default) applies again. `war_exclusion_exception: ""` is
-not "empty": it is a real override meaning "no exception", and it is kept. The inputs as saved are returned in `request`, so the edit form fills
-from it.
+stored value (for wording: the company default) applies again. `war_exclusion_exception: ""` is not
+"empty": it is a real override meaning "no exception", and it is kept. The inputs as saved are
+returned in `request`, so the edit form fills from it.
 
 ### 3.2 The record
 
 `id, kind, status, reference_number, date_of_issue, date_of_issue_source (system|user), variant,
-registration, msn, aircraft_id, policy_id, aircraft_lease_id, alerts[], errors[], can_issue,
-created_by_user {id, name}, created_at, updated_at, issued_at, issued_by, issued_by_user {id, email,
-name}, request, pdf_url` plus `data` (every value it prints) on everything except the list.
+registration, msn, aircraft_id, policy_id, aircraft_lease_id, alerts[], errors[], can_submit,
+can_issue, created_by_user, created_at, updated_at, submitted_by_user, submitted_at,
+approved_by_user, approved_at, returned, issued_at, issued_by, issued_by_user, signature, request,
+pdf_url`. A single certificate (and every transition's answer) adds `data` (every value it prints)
+and `events`.
 
-- `alerts[]` — `{code, msg}`, shown as yellow warnings. They do **not** block issuing (§8).
+- Users (`created_by_user`, `submitted_by_user`, `approved_by_user`, `issued_by_user`, `by_user`) are
+  `{id, email, name}`.
+- `returned` — the last return to draft, `{by_user, at, comment, from_status}`, or `null`. Show it as
+  a banner on the draft ("Returned by Bob: …"). It is cleared on the next submit.
+- `events` — the trail, oldest first: `[{action, by_user, at, comment}]`, where `action` is
+  `created | submitted | approved | returned | issued`.
+- `signature` — on an issued certificate: `{signer_name, signer_email, subject, issuer, serial,
+  valid_from, valid_to, signed_at, timestamped, level, sha256}`.
+- `can_submit` — a draft without errors. `can_issue` — approved without errors (show **Sign**).
+- `alerts[]` — `{code, msg}`, shown as yellow warnings. They do **not** block anything (§8).
 - `errors[]` — `{field: "certificate.<name>", msg}`, shown in red. While there are any, disable
-  **Issue** and **PDF**.
+  **Submit**, **Approve** and **PDF**.
 
 Where to send the user for an error:
 
 | `field` | fix it in |
 |---|---|
-| `certificate.certificate_code`, `certificate.airline` | the airline (§7.1). Without these no draft can be created (422): there is no reference number to give it |
+| `certificate.certificate_code`, `certificate.airline` | the airline (§7.1). Without these no draft can be created (422 `incomplete`): there is no reference number to give it |
 | `certificate.lease`, `agreed_value`, `contract_parties`, `effective_date`, `agreement_start_date` | the aircraft's lease / agreement (§7.2) |
 | policy fields (`hull_all_risks_deductible`, `combined_single_limit`, …) | the policy |
 | `certificate.insured` / `reinsured` / `insurer` / `period_to` | the policy |
 | `certificate.equipment` / `msn` | the aircraft |
-| `certificate.signatory` | the signatory block of the form (§1) |
 
-### 3.3 The screens
+### 3.3 Errors — `details.code`
+
+Every refusal carries a machine-readable `details.code`. Branch on it, not on `msg`.
+
+| HTTP | `details.code` | when |
+|---|---|---|
+| 404 | `not_found` | no such certificate (or aircraft / policy) |
+| 409 | `wrong_status` | the step does not apply in this status, e.g. `PATCH` outside draft |
+| 409 | `same_person` | the approver submitted it, or the signer approved it |
+| 409 | `changed_since_approval` | prepare found the values changed; the certificate is back in review |
+| 409 | `signature_required` | `issue` without a signed file |
+| 409 | `token_invalid` | not the token of the latest prepare (or none was made) |
+| 409 | `token_used` | the token was used: the certificate is issued |
+| 409 | `token_expired` | more than 15 minutes since prepare; prepare again |
+| 422 | `incomplete` | required values missing; `data` lists `{field, msg}` |
+| 422 | `signature_invalid` | the file is not the prepared PDF validly signed in `Signatory`; `msg` says why |
+| 422 | `portal_user_required` | a person's step without the `X-Portal-User-*` headers |
+| 422 | `validation_error` | the body is malformed (e.g. `return` without a comment); `data` lists the fields |
+| 500 | `internal_error` | |
+
+### 3.4 The screens
 
 1. **Aircraft card / policy page** → "New reinsurance certificate" / "New insurance certificate".
    The form (§3.1) opens; use `preview` for a live check as the user fills it in (optional).
-2. **Create** → `POST /certificates/{kind}`. You now have a draft with its number. Open its page.
-3. **Draft page**:
-   - the values (`data`) as a summary;
-   - alerts and errors;
-   - an **Edit** form (`PATCH`);
-   - **View PDF** (opens inline, marked DRAFT);
-   - **Issue** (confirm first: "This is final. The certificate can no longer be changed");
-   - **Discard**.
-4. **Issued page**:
-   - read-only;
-   - **PDF** and **Download**;
-   - "Issued by {issued_by_user.name} on {issued_at}";
-   - the alerts it was issued with.
-5. **History tab** on the aircraft card and the policy page: `GET /certificates/{kind}?aircraft_id=`
-   (or `policy_id=`). Columns: reference, status badge (Draft / Issued), date of issue, registration,
-   created by / issued by, alert count, PDF.
+2. **Create** → you now have a draft with its number. Open its page.
+3. **Certificate page**, by status:
+   - **draft** — values, alerts, errors, `returned` banner; **Edit**, **View PDF** (DRAFT),
+     **Submit for review** (with optional comment), **Discard**;
+   - **in_review** — read-only. For anyone but the submitter: **Approve** / **Return** (comment
+     required). For the submitter: "Waiting for review";
+   - **approved** — read-only. For anyone but the approver: **Sign and issue**. It sends
+     prepare → opens the PDF in the signing tool → uploads to `issue`. **Return** is available too.
+     On `changed_since_approval`, reload the page: the certificate is back in review;
+   - **issued** — read-only; **PDF** / **Download** (the signed file); "Issued by … on …"; the
+     signature details; the alerts it was issued with.
+   - A **History** panel from `events`.
+4. **History tab** on the aircraft card and the policy page: `GET /certificates/{kind}?aircraft_id=`
+   (or `policy_id=`). Columns: reference, status badge (Draft / In review / Approved / Issued), date of
+   issue, registration, created by, issued by, alert count, PDF.
 
-PDF file names: `Reinsurance-Certificate-CY25-SCAT-00001.pdf`, a draft with `-DRAFT` appended.
+PDF file names: `Reinsurance-Certificate-CY25-SCAT-00001.pdf`; a certificate not yet issued has
+`-DRAFT` appended.
 
 ---
 
@@ -291,8 +380,11 @@ return these fields, and ignore them if sent.
 ## 9. What was removed
 
 - `/certificates/signatory*` (the signatory profile and the signature upload): the signatory now
-  comes with the request (§1), and the signature is made by hand.
+  is sent to `issue/prepare` (§1), and the PDF is signed electronically.
 - `POST /certificates/reinsurance/preview/pdf`: create a draft and open its PDF instead.
+- The signatory on create / `PATCH`: it is sent to `issue/prepare` (§1).
+- Issuing in one call (`POST …/issue` without a file): issuing now goes through review and an
+  electronic signature (§2); the handwritten-signature flow is gone.
 - The seven wording fields on `/policy/policies*` (request and response): they are now certificate
   fields, with company defaults (§7.3).
 - `POST /certificates/reinsurance` no longer issues directly. It creates a draft, and
@@ -302,9 +394,13 @@ return these fields, and ignore them if sent.
 
 ## 10. Open items
 
-- **Insurer-signed insurance certificate — whose details?** The certificate prints whatever
-  `signatory` the request carries. When the Insurer signs, send the Insurer's signatory details, not
-  the portal user's. To confirm with the client.
+- **Insurer-signed insurance certificate — who signs?** The certificate prints the `signatory` sent
+  to `issue/prepare`, and the PDF is signed on the portal. When the Insurer signs, it is their
+  signatory and their signature; how the Insurer gets the PDF to sign is still to be agreed with the
+  client.
+- **One signature field.** `Signatory` sits over the certificate's own signature box. The Letter of
+  Undertaking repeats the signature block, but has no field of its own: the one signature covers the
+  whole file, letter included.
 - **Real company details** — the legal name, address line and legal footer still have to be entered
   in the admin panel. No stamp has been uploaded yet.
 - **Letter of Undertaking / Schedule of Parties** are always part of the certificate PDF (the last
@@ -322,3 +418,4 @@ return these fields, and ignore them if sent.
 | 2026-09-29 | Signatory = the issuing portal user (+ profile at `/certificates/signatory`); company branding and images moved to the database (`/certificates/settings`); DRAFT PDF preview. |
 | 2026-09-30 | **Draft → issued.** A certificate is created as a draft, edited (`PATCH`), drawn marked DRAFT, then issued (`/{id}/issue`) and frozen. **Insurance certificate** (`/certificates/insurance`, `signed_by`). Signatory details come with the request; the signature profile and signature upload were removed. The stamp is printed only when uploaded. "Certificate settings" moved to the admin panel. |
 | 2026-09-30 | **Certificate wording moved off the policy.** `period_wording`, `geographical_limits` and the five clause fields are company defaults in `/certificates/settings` (admin), overridable per certificate in its body; the policy no longer takes or returns them. `war_exclusion_exception: ""` = no exception. |
+| 2026-10-01 | **Review and electronic signature.** Statuses `draft → in_review → approved → issued`; `submit`, `approve`, `return`, `issue/prepare` (PDF with an empty `Signatory` field + single-use token), `issue` (multipart upload of the signed PDF, verified). Four-eyes rules (`same_person`), `changed_since_approval`. New fields: `submitted_*`, `approved_*`, `returned`, `events`, `signature`, `can_submit`; users carry `{id, email, name}`. Every error has `details.code`. The signatory is given at prepare; no `certificate.signatory` error on drafts. An issued PDF is the signed file, byte for byte. |

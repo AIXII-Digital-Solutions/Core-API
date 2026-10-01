@@ -675,14 +675,43 @@ class CertificateIssuer(BaseModel):
 
 
 class CertificateUser(BaseModel):
-    id: Optional[str]
+    id: Optional[str] = Field(description="The portal user's UUID.")
+    email: Optional[str]
     name: Optional[str]
+
+
+class CertificateReturn(BaseModel):
+    by_user: CertificateUser
+    at: DateTime
+    comment: str
+    from_status: str = Field(description="in_review | approved")
+
+
+class CertificateEvent(BaseModel):
+    action: str = Field(description="created | submitted | approved | returned | issued")
+    by_user: Optional[CertificateUser]
+    at: DateTime
+    comment: Optional[str]
+
+
+class CertificateSignature(BaseModel):
+    signer_name: Optional[str]
+    signer_email: Optional[str]
+    subject: Optional[str]
+    issuer: Optional[str]
+    serial: Optional[str]
+    valid_from: Optional[DateTime]
+    valid_to: Optional[DateTime]
+    signed_at: Optional[DateTime]
+    timestamped: bool
+    level: Optional[str]
+    sha256: str = Field(description="sha256 of the stored signed PDF, computed by the API.")
 
 
 class CertificateOut(BaseModel):
     id: int
     kind: str = Field(description="reinsurance | insurance")
-    status: str = Field(description="draft (editable, drawn marked DRAFT) | issued (final)")
+    status: str = Field(description="draft | in_review | approved | issued (final). Only a draft is editable.")
     reference_number: str = Field(description="CY<yy>/<airline code>/<nnnnn>; allocated with the draft.")
     date_of_issue: Date = Field(description="A draft left to the system shows today; issued = as printed.")
     date_of_issue_source: str = Field(description="system | user")
@@ -693,22 +722,37 @@ class CertificateOut(BaseModel):
     policy_id: Optional[int]
     aircraft_lease_id: Optional[int]
     alerts: List[CertificateAlert]
-    errors: List[CertificateError] = Field(description="What stops the draft being issued; [] once issued.")
-    can_issue: bool
+    errors: List[CertificateError] = Field(description="What is missing; [] once issued.")
+    can_submit: bool = Field(description="A draft without errors.")
+    can_issue: bool = Field(description="Approved and without errors: ready for issue/prepare.")
     created_by_user: Optional[CertificateUser]
     created_at: Optional[DateTime]
     updated_at: Optional[DateTime]
+    submitted_by_user: Optional[CertificateUser]
+    submitted_at: Optional[DateTime]
+    approved_by_user: Optional[CertificateUser]
+    approved_at: Optional[DateTime]
+    returned: Optional[CertificateReturn] = Field(description="The last return to draft; null after the next submit.")
     issued_at: Optional[DateTime]
     issued_by: Optional[str] = Field(description="The API credential that issued it.")
     issued_by_user: Optional[CertificateIssuer]
+    signature: Optional[CertificateSignature] = Field(description="Issued only.")
     request: dict[str, Any] = Field(description="The inputs as stored: policy_id, date_of_issue, "
                                                 "signed_by, signatory, overrides.")
     pdf_url: str
 
 
 class CertificateFull(CertificateOut):
-    data: dict[str, Any] = Field(description="Every value it prints: a draft as resolved now, an "
-                                             "issued certificate as printed.")
+    data: dict[str, Any] = Field(description="Every value it prints: not yet issued — as resolved now; "
+                                             "issued — as signed.")
+    events: List[CertificateEvent] = Field(description="The trail, oldest first.")
+
+
+class CertificateIssuePrepared(BaseModel):
+    issue_token: str = Field(description="Single use; send it with the signed PDF to /issue.")
+    expires_at: DateTime = Field(description="15 minutes after prepare.")
+    signature_field: str = Field(description="Always `Signatory`: the field to sign.")
+    pdf_base64: str = Field(description="The PDF to sign, base64.")
 
 
 class CertificateDiscarded(BaseModel):
@@ -755,8 +799,8 @@ class CertificatePreview(BaseModel):
     variant: str
     data: dict[str, Any]
     alerts: List[CertificateAlert]
-    errors: List[CertificateError] = Field(description="What stops it being issued; empty = it can be.")
-    can_issue: bool
+    errors: List[CertificateError] = Field(description="What is missing; empty = it can be submitted.")
+    can_submit: bool
 
 
 # ── which operation returns what ──────────────────────────────────────────────────────────────
@@ -875,6 +919,10 @@ RESPONSE_DATA: dict[tuple[str, str], Any] = {
     ("GET", "/certificates/reinsurance/{certificate_id}"): CertificateFull,
     ("PATCH", "/certificates/reinsurance/{certificate_id}"): CertificateFull,
     ("POST", "/certificates/reinsurance/{certificate_id}/issue"): CertificateFull,
+    ("POST", "/certificates/reinsurance/{certificate_id}/submit"): CertificateFull,
+    ("POST", "/certificates/reinsurance/{certificate_id}/approve"): CertificateFull,
+    ("POST", "/certificates/reinsurance/{certificate_id}/return"): CertificateFull,
+    ("POST", "/certificates/reinsurance/{certificate_id}/issue/prepare"): CertificateIssuePrepared,
     ("DELETE", "/certificates/reinsurance/{certificate_id}"): CertificateDiscarded,
     ("POST", "/certificates/insurance/preview"): CertificatePreview,
     ("POST", "/certificates/insurance"): CertificateFull,
@@ -882,6 +930,10 @@ RESPONSE_DATA: dict[tuple[str, str], Any] = {
     ("GET", "/certificates/insurance/{certificate_id}"): CertificateFull,
     ("PATCH", "/certificates/insurance/{certificate_id}"): CertificateFull,
     ("POST", "/certificates/insurance/{certificate_id}/issue"): CertificateFull,
+    ("POST", "/certificates/insurance/{certificate_id}/submit"): CertificateFull,
+    ("POST", "/certificates/insurance/{certificate_id}/approve"): CertificateFull,
+    ("POST", "/certificates/insurance/{certificate_id}/return"): CertificateFull,
+    ("POST", "/certificates/insurance/{certificate_id}/issue/prepare"): CertificateIssuePrepared,
     ("DELETE", "/certificates/insurance/{certificate_id}"): CertificateDiscarded,
     ("GET", "/certificates/settings"): CertificateSettingsOut,
     ("PATCH", "/certificates/settings"): CertificateSettingsOut,

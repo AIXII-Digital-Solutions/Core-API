@@ -2,43 +2,56 @@
 
 Both documents share one flow, one set of endpoints per kind:
 
-    POST   /certificates/{kind}/preview      what it would say — values, alerts, errors — nothing saved
-    POST   /certificates/{kind}              create a DRAFT; its reference number is allocated now
-    GET    /certificates/{kind}              the certificates of that kind, newest first
-    GET    /certificates/{kind}/{id}         one — a draft re-resolved live, an issued one as frozen
-    PATCH  /certificates/{kind}/{id}         change a draft's inputs (409 once issued)
-    POST   /certificates/{kind}/{id}/issue   issue it: freeze values, alerts and the PDF (409 once issued)
-    DELETE /certificates/{kind}/{id}         discard a draft (409 once issued; the number is not reused)
-    GET    /certificates/{kind}/{id}/pdf     a draft drawn live and marked DRAFT; an issued one as sent
+    POST   /certificates/{kind}/preview              what it would say — nothing saved
+    POST   /certificates/{kind}                      create a DRAFT; its reference number is allocated now
+    GET    /certificates/{kind}                      the certificates of that kind, newest first
+    GET    /certificates/{kind}/{id}                 one, with its trail (`events`)
+    PATCH  /certificates/{kind}/{id}                 change a draft's inputs            (draft only)
+    DELETE /certificates/{kind}/{id}                 discard a draft                    (draft only)
+    POST   /certificates/{kind}/{id}/submit          draft -> in_review
+    POST   /certificates/{kind}/{id}/approve         in_review -> approved              (not the submitter)
+    POST   /certificates/{kind}/{id}/return          in_review | approved -> draft      (comment required)
+    POST   /certificates/{kind}/{id}/issue/prepare   the final PDF with an empty signature field + a token
+    POST   /certificates/{kind}/{id}/issue           upload the signed PDF: approved -> issued
+    GET    /certificates/{kind}/{id}/pdf             not yet issued: drawn now, marked DRAFT; issued: as signed
 
     GET/PATCH      /certificates/settings                the issuing company as printed, and its default
                                                           certificate wording (admin)
     PUT/GET/DELETE /certificates/settings/{logo|stamp}   its images (admin)
 
-DRAFT vs ISSUED. A draft is a living document: its values are resolved from the policy, the lease and
-the aircraft whenever it is read or drawn, and every PDF of it says DRAFT on every page. Issuing it is
-final — the database refuses any later change to the row.
+THE REVIEW. Two people: one submits, another approves (`same_person` otherwise), and the one who signs
+is not the approver. Approval records the hash of the values as they resolved (`signing.approved_hash`);
+preparing the signature re-resolves them and sends the certificate back to review if they changed.
 
-THE SIGNATORY is the portal user issuing the certificate, who signs the printed copy by hand. The
-portal sends `signatory: {full_name, title, phone, email}` with the request; without it the name and
-e-mail of the X-Portal-User-* headers are used, and with neither the certificate cannot be issued.
+THE SIGNATURE. `issue/prepare` draws the final PDF — no DRAFT mark, the signatory printed — with an
+empty AcroForm signature field `Signatory`, and hands out a single-use token (15 minutes). The portal
+signs that field electronically and uploads the result to `issue` with the token; the file must be the
+prepared PDF plus a valid signature and nothing else (`signing.verify_signed`). The signed bytes are
+the issued PDF: never re-drawn, since any re-render would break the signature.
+
+The people come from the X-Portal-User-* headers (`current_actor()`); a step without a portal user is
+refused (`portal_user_required`). Every refusal carries `details.code`.
 """
+import base64
+import json
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Literal, Optional
 
-from fastapi import Depends, File, Query, Request, Response, UploadFile, status
+from fastapi import Depends, File, Form, Query, Request, Response, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import delete, func, select
+from sqlalchemy.orm import undefer
 
-from Certificates import assemble as assembly, issuer as issuer_mod, numbering
-from Certificates.render import render
+from Certificates import assemble as assembly, issuer as issuer_mod, numbering, signing
+from Certificates.render import SIGNATURE_FIELD, render
 from Config import setup_logger
 from Database import ApiToken
-from Database.CertificateModels import (DRAFT, ISSUED, MARKET_WORDING, WORDING_FIELDS, Asset,
-                                        InsuranceCertificate, ReinsuranceCertificate, Settings)
+from Database.CertificateModels import (APPROVED, DRAFT, IN_REVIEW, ISSUED, MARKET_WORDING,
+                                        WORDING_FIELDS, Asset, InsuranceCertificate,
+                                        ReinsuranceCertificate, Settings)
 from api_auth import authorize, current_actor, SCOPE_INSURANCE_READ, SCOPE_INSURANCE_WRITE
 from settings import Router
 from Utils import error_response, success_response, warning_response
@@ -54,6 +67,7 @@ _OK = {status.HTTP_200_OK, status.HTTP_400_BAD_REQUEST, status.HTTP_404_NOT_FOUN
        status.HTTP_409_CONFLICT, status.HTTP_500_INTERNAL_SERVER_ERROR}
 MODELS = {assembly.REINSURANCE: ReinsuranceCertificate, assembly.INSURANCE: InsuranceCertificate}
 _TITLE = {assembly.REINSURANCE: "Reinsurance", assembly.INSURANCE: "Insurance"}
+MAX_SIGNED_BYTES = 20 * 1024 * 1024
 
 
 # ==============================================================================================
@@ -67,7 +81,7 @@ class Addressee(BaseModel):
 
 
 class SignatoryIn(BaseModel):
-    """Who signs the printed certificate by hand — the portal user issuing it."""
+    """Who signs the certificate — printed under the signature."""
     full_name: str = Field(min_length=1, max_length=256)
     title: Optional[str] = Field(default=None, max_length=128, description="e.g. Head of Insurance.")
     phone: Optional[str] = Field(default=None, max_length=64)
@@ -99,18 +113,16 @@ class _Wording(BaseModel):
 class _Inputs(_Wording):
     """Everything a certificate's inputs can say besides the aircraft. On PATCH, a field sent
     replaces the draft's; sent as null, it drops the override and the stored value (or the company's
-    wording) applies again. `war_exclusion_exception: ""` is an override ("no exception"), not null."""
+    wording) applies again. `war_exclusion_exception: ""` is an override ("no exception"), not null.
+    The signatory is not an input: it is given when the PDF is prepared for signing."""
     policy_id: Optional[int] = Field(
         default=None, description="Default: the policy covering the aircraft on the date of issue, "
                                   "else the next one to start.")
     date_of_issue: Optional[date] = Field(
-        default=None, description="Default: the day it is issued (system-generated).")
+        default=None, description="Default: the day the PDF is prepared for signing (system-generated).")
     signed_by: Optional[Literal["broker", "insurer"]] = Field(
         default=None, description="Insurance certificate only: who signs it — `broker` (us, as the "
                                   "Insured's insurance broker; default) or `insurer`.")
-    signatory: Optional[SignatoryIn] = Field(
-        default=None, description="The signatory printed on it. Default: the portal user's name and "
-                                  "e-mail from the X-Portal-User-* headers.")
     agreed_value: Optional[Decimal] = Field(default=None, ge=0,
                                             description="Override of the lease's agreed value (A10).")
     equipment: Optional[str] = Field(default=None, max_length=256,
@@ -132,6 +144,33 @@ class CertificateIn(_Inputs):
 class CertificatePatch(_Inputs):
     """Only the fields sent change. The aircraft cannot: a certificate for another aircraft is
     another certificate."""
+
+
+class CommentIn(BaseModel):
+    comment: Optional[str] = Field(default=None, max_length=2000)
+
+
+class ReturnIn(BaseModel):
+    comment: str = Field(min_length=1, max_length=2000, description="Why it goes back to draft.")
+
+
+class PrepareIn(BaseModel):
+    signatory: SignatoryIn
+
+
+class SignatureIn(BaseModel):
+    """The signature as the portal's signing tool reports it. `sha256` is not sent: the API computes
+    it over the file it stores."""
+    signer_name: Optional[str] = Field(default=None, max_length=256)
+    signer_email: Optional[str] = Field(default=None, max_length=256)
+    subject: Optional[str] = Field(default=None, max_length=1000, description="The certificate subject DN.")
+    issuer: Optional[str] = Field(default=None, max_length=1000, description="The certificate issuer DN.")
+    serial: Optional[str] = Field(default=None, max_length=128)
+    valid_from: Optional[datetime] = None
+    valid_to: Optional[datetime] = None
+    signed_at: Optional[datetime] = None
+    timestamped: bool = False
+    level: Optional[str] = Field(default=None, max_length=32, description="e.g. PAdES-B-T.")
 
 
 class SettingsPatch(_Wording):
@@ -174,11 +213,11 @@ class _Resolved:
         self.draft, self.images, self.date_of_issue, self.errors = draft, images, date_of_issue, errors
 
 
-async def _resolve(session, kind: str, aircraft_id: int, req: dict, *, issuing_on: Optional[date] = None):
-    """The certificate as its inputs make it today: values, alerts, errors, the issuer and the
-    signatory, and the images to draw it with."""
-    date_of_issue = (date.fromisoformat(req["date_of_issue"]) if req.get("date_of_issue")
-                     else issuing_on or date.today())
+async def _resolve(session, kind: str, aircraft_id: int, req: dict, *,
+                   signatory: Optional[dict] = None) -> _Resolved:
+    """The certificate as its inputs make it today: values, alerts, errors, the issuer, and the
+    images to draw it with. The signatory is printed only once it is known (`issue/prepare`)."""
+    date_of_issue = date.fromisoformat(req["date_of_issue"]) if req.get("date_of_issue") else date.today()
     issuer, company_wording, images = await issuer_mod.load(session)
     draft = await assembly.assemble(
         session, kind, aircraft_id=aircraft_id, date_of_issue=date_of_issue,
@@ -186,32 +225,66 @@ async def _resolve(session, kind: str, aircraft_id: int, req: dict, *, issuing_o
         signed_by=req.get("signed_by") or "broker",
         wording=issuer_mod.resolve_wording(req, company_wording))
     draft.data["issuer"] = issuer
-    signatory = req.get("signatory")
-    if not signatory:
-        _kind, user = current_actor()
-        signatory = ({"full_name": user.name, "title": None, "phone": None, "email": user.email}
-                     if user is not None and user.name else None)
     draft.data["signatory"] = signatory
-    errors = list(draft.errors)
-    if not signatory or not signatory.get("full_name"):
-        errors.append({"field": "signatory", "msg": "No signatory: send `signatory.full_name` (or "
-                                                     "call as a portal user)."})
-    return _Resolved(draft, images, date_of_issue, errors)
+    return _Resolved(draft, images, date_of_issue, list(draft.errors))
 
 
 def _errors_out(errors) -> list:
     return [{"field": f"certificate.{e['field']}", "msg": e["msg"]} for e in errors]
 
 
-def _as_422(errors) -> RequestValidationError:
-    return RequestValidationError([{"loc": ("certificate", e["field"]), "msg": e["msg"],
-                                    "type": "value_error"} for e in errors])
-
-
 _NUMBERING_FIELDS = {"airline", "certificate_code"}
 
 
+# ==============================================================================================
+# people, refusals, the record
+# ==============================================================================================
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _portal_user() -> Optional[dict]:
+    _kind, user = current_actor()
+    return {"id": user.id, "email": user.email, "name": user.name} if user is not None else None
+
+
+def _same(a: Optional[dict], b: Optional[dict]) -> bool:
+    return bool(a and b and a.get("id") and a.get("id") == b.get("id"))
+
+
+def _event(row, action: str, user: Optional[dict], comment: Optional[str] = None) -> None:
+    row.events = [*(row.events or []),
+                  {"action": action, "by_user": user, "at": _now().isoformat(), "comment": comment}]
+
+
+def _fail(request, response, http: int, code: str, msg: str, data=None):
+    return warning_response(request=request, response=response, msg=msg, status_code=http,
+                            code=code, data=data)
+
+
+def _not_found(request, response, kind, certificate_id):
+    return _fail(request, response, status.HTTP_404_NOT_FOUND, "not_found",
+                 f"{_TITLE[kind]} certificate {certificate_id} not found")
+
+
+def _wrong_status(request, response, row, allowed: str):
+    return _fail(request, response, status.HTTP_409_CONFLICT, "wrong_status",
+                 f"Certificate {row.reference_number} is {row.status}; this needs it {allowed}.")
+
+
+def _incomplete(request, response, errors):
+    return _fail(request, response, status.HTTP_422_UNPROCESSABLE_ENTITY, "incomplete",
+                 "The certificate is missing required values.", data=_errors_out(errors))
+
+
+def _no_user(request, response):
+    return _fail(request, response, status.HTTP_422_UNPROCESSABLE_ENTITY, "portal_user_required",
+                 "This step is taken by a person: send the X-Portal-User-* headers.")
+
+
 def _record(kind: str, row, *, live: Optional[_Resolved] = None, with_data: bool = True) -> dict:
+    errors = live.errors if live else row.errors
     out = {
         "id": row.id,
         "kind": kind,
@@ -226,28 +299,37 @@ def _record(kind: str, row, *, live: Optional[_Resolved] = None, with_data: bool
         "policy_id": live.draft.policy_id if live else row.policy_id,
         "aircraft_lease_id": live.draft.aircraft_lease_id if live else row.aircraft_lease_id,
         "alerts": live.draft.alerts if live else row.alerts,
-        "errors": _errors_out(live.errors) if live else _errors_out(row.errors),
-        "can_issue": row.status == DRAFT and not (live.errors if live else row.errors),
-        "created_by_user": ({"id": row.created_by_user_id, "name": row.created_by_user_name}
+        "errors": _errors_out(errors),
+        "can_submit": row.status == DRAFT and not errors,
+        "can_issue": row.status == APPROVED and not errors,
+        "created_by_user": ({"id": row.created_by_user_id, "email": row.created_by_user_email,
+                             "name": row.created_by_user_name}
                             if row.created_by_user_id or row.created_by_user_name else None),
         "created_at": iso(row.created_at),
         "updated_at": iso(row.updated_at),
+        "submitted_by_user": row.submitted_by_user,
+        "submitted_at": iso(row.submitted_at),
+        "approved_by_user": row.approved_by_user,
+        "approved_at": iso(row.approved_at),
+        "returned": row.returned,
         "issued_at": iso(row.issued_at),
         "issued_by": row.issued_by,
         "issued_by_user": ({"id": row.issued_by_user_id, "email": row.issued_by_user_email,
                             "name": row.issued_by_user_name}
                            if row.issued_by_user_id or row.issued_by_user_name else None),
+        "signature": row.signature,
         "request": row.request,
         "pdf_url": f"/certificates/{kind}/{row.id}/pdf",
     }
-    if with_data:
+    if with_data:      # a single certificate: its values and its trail
         out["data"] = live.draft.data if live else row.data
+        out["events"] = row.events or []
     return out
 
 
 def _apply(row, kind: str, resolved: _Resolved, req: dict) -> None:
-    """Write a resolution onto a draft row. The sequence number stays; the reference is rebuilt in
-    case the policy (contract year) or the airline code changed."""
+    """Write a resolution onto a row not yet issued. The sequence number stays; the reference is
+    rebuilt in case the policy (contract year) or the airline code changed."""
     d = resolved.draft
     row.request = req
     row.data, row.alerts, row.errors = d.data, d.alerts, resolved.errors
@@ -262,23 +344,25 @@ def _apply(row, kind: str, resolved: _Resolved, req: dict) -> None:
                                                           row.sequence_no)
 
 
-async def _load(session, kind: str, certificate_id: int, *, lock: bool = False):
+def _clear_approval(row) -> None:
+    row.approved_by_user = row.approved_at = row.approved_hash = None
+    row.issue_prep = None
+
+
+async def _load(session, kind: str, certificate_id: int, *, lock: bool = False, prep: bool = False):
     stmt = select(MODELS[kind]).where(MODELS[kind].id == certificate_id)
+    if prep:
+        stmt = stmt.options(undefer(MODELS[kind].issue_prep))
     if lock:
         stmt = stmt.with_for_update()
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
-def _not_found(request, response, kind, certificate_id):
-    return warning_response(request=request, response=response,
-                            msg=f"{_TITLE[kind]} certificate {certificate_id} not found",
-                            status_code=status.HTTP_404_NOT_FOUND)
-
-
-def _is_issued(request, response, row):
-    return warning_response(request=request, response=response,
-                            msg=f"Certificate {row.reference_number} is issued and cannot be changed.",
-                            status_code=status.HTTP_409_CONFLICT)
+async def _live(session, kind: str, row) -> Optional[_Resolved]:
+    """A certificate not yet issued is shown as it resolves now; an issued one as frozen."""
+    if row.status == ISSUED or row.aircraft_id is None:
+        return None
+    return await _resolve(session, kind, row.aircraft_id, row.request)
 
 
 # ==============================================================================================
@@ -290,6 +374,9 @@ def _register(kind: str) -> None:
     title = _TITLE[kind]
     base = f"/{kind}"
 
+    def not_found(request, response, ex):
+        return _fail(request, response, status.HTTP_404_NOT_FOUND, "not_found", str(ex))
+
     async def preview(request: Request, response: Response, body: CertificateIn):
         try:
             async with request.app.state.db_client.read_session(DB) as session:
@@ -300,10 +387,9 @@ def _register(kind: str) -> None:
             return success_response(request=request, response=response, data={
                 "reference_number": ref, "date_of_issue": r.date_of_issue.isoformat(),
                 "variant": r.draft.variant, "data": r.draft.data, "alerts": r.draft.alerts,
-                "errors": _errors_out(r.errors), "can_issue": not r.errors})
+                "errors": _errors_out(r.errors), "can_submit": not r.errors})
         except assembly.NotFound as _ex:
-            return warning_response(request=request, response=response, msg=str(_ex),
-                                    status_code=status.HTTP_404_NOT_FOUND)
+            return not_found(request, response, _ex)
         except Exception as _ex:
             return error_response(request=request, exc=_ex, response=response)
 
@@ -311,23 +397,21 @@ def _register(kind: str) -> None:
                      token: Optional[ApiToken] = Depends(authorize(SCOPE_INSURANCE_WRITE))):
         try:
             req = _stored_inputs(body, exclude_unset=True)
-            _kind, user = current_actor()
-            if not req.get("signatory") and user is not None and user.name:
-                # kept with the draft, so it prints the same whoever opens it later
-                req["signatory"] = {"full_name": user.name, "title": None, "phone": None,
-                                    "email": user.email}
+            user = _portal_user()
             async with request.app.state.db_client.session(DB) as session:
                 await set_actor(session, token)
                 r = await _resolve(session, kind, body.aircraft_id, req)
                 blocking = [e for e in r.errors if e["field"] in _NUMBERING_FIELDS]
                 if blocking:   # without an airline code there is no reference number to give it
-                    raise _as_422(blocking)
+                    return _incomplete(request, response, blocking)
                 scope, sequence = await numbering.next_sequence(session, kind)
                 row = Model(status=DRAFT, sequence_no=sequence, counter_scope=scope,
                             aircraft_id=body.aircraft_id,
-                            created_by_user_id=user.id if user else None,
-                            created_by_user_name=user.name if user else None)
+                            created_by_user_id=user["id"] if user else None,
+                            created_by_user_email=user["email"] if user else None,
+                            created_by_user_name=user["name"] if user else None)
                 _apply(row, kind, r, req)
+                _event(row, "created", user)
                 session.add(row)
                 await session.flush()
                 await session.refresh(row)
@@ -335,18 +419,16 @@ def _register(kind: str) -> None:
             return success_response(request=request, response=response, data=data,
                                     msg=f"Draft {row.reference_number} created",
                                     status_code=status.HTTP_201_CREATED)
-        except RequestValidationError:
-            raise
         except assembly.NotFound as _ex:
-            return warning_response(request=request, response=response, msg=str(_ex),
-                                    status_code=status.HTTP_404_NOT_FOUND)
+            return not_found(request, response, _ex)
         except Exception as _ex:
             return error_response(request=request, exc=_ex, response=response)
 
     async def list_(request: Request, response: Response,
                     aircraft_id: Optional[int] = Query(None), policy_id: Optional[int] = Query(None),
                     registration: Optional[str] = Query(None, max_length=32),
-                    status_: Optional[Literal["draft", "issued"]] = Query(None, alias="status"),
+                    status_: Optional[Literal["draft", "in_review", "approved", "issued"]] = Query(
+                        None, alias="status"),
                     limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)):
         try:
             conds = []
@@ -377,14 +459,10 @@ def _register(kind: str) -> None:
                 row = await _load(session, kind, certificate_id)
                 if row is None:
                     return _not_found(request, response, kind, certificate_id)
-                live = None
-                if row.status == DRAFT and row.aircraft_id is not None:
-                    live = await _resolve(session, kind, row.aircraft_id, row.request)
-                data = _record(kind, row, live=live)
+                data = _record(kind, row, live=await _live(session, kind, row))
             return success_response(request=request, response=response, data=data)
         except assembly.NotFound as _ex:
-            return warning_response(request=request, response=response, msg=str(_ex),
-                                    status_code=status.HTTP_404_NOT_FOUND)
+            return not_found(request, response, _ex)
         except Exception as _ex:
             return error_response(request=request, exc=_ex, response=response)
 
@@ -396,8 +474,8 @@ def _register(kind: str) -> None:
                 row = await _load(session, kind, certificate_id, lock=True)
                 if row is None:
                     return _not_found(request, response, kind, certificate_id)
-                if row.status == ISSUED:
-                    return _is_issued(request, response, row)
+                if row.status != DRAFT:
+                    return _wrong_status(request, response, row, "draft")
                 req = {**row.request, **_stored_inputs(body, exclude_unset=True)}
                 # null drops an override; "" is kept (war_exclusion_exception: no exception)
                 req = {k: v for k, v in req.items() if v is not None}
@@ -408,44 +486,7 @@ def _register(kind: str) -> None:
                 data = _record(kind, row, live=r)
             return success_response(request=request, response=response, data=data)
         except assembly.NotFound as _ex:
-            return warning_response(request=request, response=response, msg=str(_ex),
-                                    status_code=status.HTTP_404_NOT_FOUND)
-        except Exception as _ex:
-            return error_response(request=request, exc=_ex, response=response)
-
-    async def issue(request: Request, response: Response, certificate_id: int,
-                    token: Optional[ApiToken] = Depends(authorize(SCOPE_INSURANCE_WRITE))):
-        try:
-            _kind, user = current_actor()
-            async with request.app.state.db_client.session(DB) as session:
-                await set_actor(session, token)
-                row = await _load(session, kind, certificate_id, lock=True)
-                if row is None:
-                    return _not_found(request, response, kind, certificate_id)
-                if row.status == ISSUED:
-                    return _is_issued(request, response, row)
-                r = await _resolve(session, kind, row.aircraft_id, row.request, issuing_on=date.today())
-                if r.errors:
-                    raise _as_422(r.errors)
-                _apply(row, kind, r, row.request)
-                row.pdf = await run_in_threadpool(render, r.draft.data,
-                                                  reference_number=row.reference_number,
-                                                  date_of_issue=r.date_of_issue, images=r.images)
-                row.status, row.issued_at, row.errors = ISSUED, datetime.now(timezone.utc), []
-                row.issued_by = token.name if token is not None else "service-token"
-                row.issued_by_user_id = user.id if user else None
-                row.issued_by_user_email = user.email if user else None
-                row.issued_by_user_name = user.name if user else None
-                await session.flush()
-                await session.refresh(row)
-                data = _record(kind, row)
-            return success_response(request=request, response=response, data=data,
-                                    msg=f"Certificate {row.reference_number} issued")
-        except RequestValidationError:
-            raise
-        except assembly.NotFound as _ex:
-            return warning_response(request=request, response=response, msg=str(_ex),
-                                    status_code=status.HTTP_404_NOT_FOUND)
+            return not_found(request, response, _ex)
         except Exception as _ex:
             return error_response(request=request, exc=_ex, response=response)
 
@@ -457,13 +498,221 @@ def _register(kind: str) -> None:
                 row = await _load(session, kind, certificate_id, lock=True)
                 if row is None:
                     return _not_found(request, response, kind, certificate_id)
-                if row.status == ISSUED:
-                    return _is_issued(request, response, row)
+                if row.status != DRAFT:
+                    return _wrong_status(request, response, row, "draft")
                 reference = row.reference_number
                 await session.delete(row)
             return success_response(request=request, response=response,
                                     data={"id": certificate_id, "reference_number": reference},
                                     msg=f"Draft {reference} discarded")
+        except Exception as _ex:
+            return error_response(request=request, exc=_ex, response=response)
+
+    async def submit(request: Request, response: Response, certificate_id: int,
+                     body: Optional[CommentIn] = None,
+                     token: Optional[ApiToken] = Depends(authorize(SCOPE_INSURANCE_WRITE))):
+        try:
+            user = _portal_user()
+            if user is None:
+                return _no_user(request, response)
+            async with request.app.state.db_client.session(DB) as session:
+                await set_actor(session, token)
+                row = await _load(session, kind, certificate_id, lock=True)
+                if row is None:
+                    return _not_found(request, response, kind, certificate_id)
+                if row.status != DRAFT:
+                    return _wrong_status(request, response, row, "draft")
+                r = await _resolve(session, kind, row.aircraft_id, row.request)
+                if r.errors:
+                    return _incomplete(request, response, r.errors)
+                _apply(row, kind, r, row.request)
+                row.status, row.submitted_by_user, row.submitted_at = IN_REVIEW, user, _now()
+                row.returned = None
+                _event(row, "submitted", user, body.comment if body else None)
+                await session.flush()
+                await session.refresh(row)
+                data = _record(kind, row, live=r)
+            return success_response(request=request, response=response, data=data,
+                                    msg=f"Certificate {row.reference_number} submitted for review")
+        except assembly.NotFound as _ex:
+            return not_found(request, response, _ex)
+        except Exception as _ex:
+            return error_response(request=request, exc=_ex, response=response)
+
+    async def approve(request: Request, response: Response, certificate_id: int,
+                      body: Optional[CommentIn] = None,
+                      token: Optional[ApiToken] = Depends(authorize(SCOPE_INSURANCE_WRITE))):
+        try:
+            user = _portal_user()
+            if user is None:
+                return _no_user(request, response)
+            async with request.app.state.db_client.session(DB) as session:
+                await set_actor(session, token)
+                row = await _load(session, kind, certificate_id, lock=True)
+                if row is None:
+                    return _not_found(request, response, kind, certificate_id)
+                if row.status != IN_REVIEW:
+                    return _wrong_status(request, response, row, "in_review")
+                if _same(user, row.submitted_by_user):
+                    return _fail(request, response, status.HTTP_409_CONFLICT, "same_person",
+                                 "The certificate must be approved by someone other than who submitted it.")
+                r = await _resolve(session, kind, row.aircraft_id, row.request)
+                if r.errors:
+                    return _incomplete(request, response, r.errors)
+                _apply(row, kind, r, row.request)
+                row.status, row.approved_by_user, row.approved_at = APPROVED, user, _now()
+                row.approved_hash = signing.approved_hash(r.draft.data)
+                _event(row, "approved", user, body.comment if body else None)
+                await session.flush()
+                await session.refresh(row)
+                data = _record(kind, row, live=r)
+            return success_response(request=request, response=response, data=data,
+                                    msg=f"Certificate {row.reference_number} approved")
+        except assembly.NotFound as _ex:
+            return not_found(request, response, _ex)
+        except Exception as _ex:
+            return error_response(request=request, exc=_ex, response=response)
+
+    async def return_(request: Request, response: Response, certificate_id: int, body: ReturnIn,
+                      token: Optional[ApiToken] = Depends(authorize(SCOPE_INSURANCE_WRITE))):
+        try:
+            user = _portal_user()
+            if user is None:
+                return _no_user(request, response)
+            async with request.app.state.db_client.session(DB) as session:
+                await set_actor(session, token)
+                row = await _load(session, kind, certificate_id, lock=True)
+                if row is None:
+                    return _not_found(request, response, kind, certificate_id)
+                if row.status not in (IN_REVIEW, APPROVED):
+                    return _wrong_status(request, response, row, "in_review or approved")
+                at = _now()
+                row.returned = {"by_user": user, "at": at.isoformat(), "comment": body.comment,
+                                "from_status": row.status}
+                row.status = DRAFT
+                _clear_approval(row)
+                _event(row, "returned", user, body.comment)
+                await session.flush()
+                await session.refresh(row)
+                data = _record(kind, row, live=await _live(session, kind, row))
+            return success_response(request=request, response=response, data=data,
+                                    msg=f"Certificate {row.reference_number} returned to draft")
+        except assembly.NotFound as _ex:
+            return not_found(request, response, _ex)
+        except Exception as _ex:
+            return error_response(request=request, exc=_ex, response=response)
+
+    async def prepare(request: Request, response: Response, certificate_id: int, body: PrepareIn,
+                      token: Optional[ApiToken] = Depends(authorize(SCOPE_INSURANCE_WRITE))):
+        try:
+            user = _portal_user()
+            if user is None:
+                return _no_user(request, response)
+            async with request.app.state.db_client.session(DB) as session:
+                await set_actor(session, token)
+                row = await _load(session, kind, certificate_id, lock=True, prep=True)
+                if row is None:
+                    return _not_found(request, response, kind, certificate_id)
+                if row.status != APPROVED:
+                    return _wrong_status(request, response, row, "approved")
+                if _same(user, row.approved_by_user):
+                    return _fail(request, response, status.HTTP_409_CONFLICT, "same_person",
+                                 "The certificate must be signed by someone other than who approved it.")
+                signatory = body.signatory.model_dump()
+                r = await _resolve(session, kind, row.aircraft_id, row.request, signatory=signatory)
+                if r.errors or signing.approved_hash(r.draft.data) != row.approved_hash:
+                    # what the reviewer approved is not what would be signed: back to review
+                    row.status = IN_REVIEW
+                    _clear_approval(row)
+                    return _fail(request, response, status.HTTP_409_CONFLICT, "changed_since_approval",
+                                 "The certificate's values changed after it was approved; it is back "
+                                 "in review.")
+                _apply(row, kind, r, row.request)
+                pdf = await run_in_threadpool(render, r.draft.data, reference_number=row.reference_number,
+                                              date_of_issue=r.date_of_issue, images=r.images,
+                                              signature_field=True)
+                issue_token, token_hash, expires_at = signing.new_token()
+                row.issue_prep = {
+                    "token_hash": token_hash, "expires_at": expires_at.isoformat(),
+                    "sha256": signing.sha256(pdf), "length": len(pdf),
+                    "prepared_at": _now().isoformat(), "prepared_by_user": user,
+                    "date_of_issue": r.date_of_issue.isoformat(),
+                    "data": r.draft.data, "alerts": r.draft.alerts,
+                }
+            return success_response(request=request, response=response, data={
+                "issue_token": issue_token, "expires_at": expires_at.isoformat(),
+                "signature_field": SIGNATURE_FIELD, "pdf_base64": base64.b64encode(pdf).decode()},
+                msg=f"Certificate {row.reference_number} prepared for signing")
+        except assembly.NotFound as _ex:
+            return not_found(request, response, _ex)
+        except Exception as _ex:
+            return error_response(request=request, exc=_ex, response=response)
+
+    async def issue(request: Request, response: Response, certificate_id: int,
+                    issue_token: Optional[str] = Form(None),
+                    file: Optional[UploadFile] = File(None, description="The signed PDF."),
+                    signature: Optional[str] = Form(None, description="JSON: the signature details."),
+                    token: Optional[ApiToken] = Depends(authorize(SCOPE_INSURANCE_WRITE))):
+        try:
+            if not issue_token or file is None:
+                return _fail(request, response, status.HTTP_409_CONFLICT, "signature_required",
+                             "A certificate is issued by uploading the signed PDF: prepare it with "
+                             "issue/prepare, sign the Signatory field, and send issue_token, file and "
+                             "signature as multipart.")
+            user = _portal_user()
+            if user is None:
+                return _no_user(request, response)
+            try:
+                sig = SignatureIn.model_validate(json.loads(signature or "{}"))
+            except (ValueError, ValidationError) as ex:
+                return _fail(request, response, status.HTTP_422_UNPROCESSABLE_ENTITY, "validation_error",
+                             f"`signature` must be a JSON object of the signature details: {ex}")
+            signed = await file.read(MAX_SIGNED_BYTES + 1)
+            if len(signed) > MAX_SIGNED_BYTES:
+                return _fail(request, response, status.HTTP_422_UNPROCESSABLE_ENTITY, "signature_invalid",
+                             "The signed file is larger than 20 MB.")
+            async with request.app.state.db_client.session(DB) as session:
+                await set_actor(session, token)
+                row = await _load(session, kind, certificate_id, lock=True, prep=True)
+                if row is None:
+                    return _not_found(request, response, kind, certificate_id)
+                prep = row.issue_prep
+                if not prep or not signing.token_matches(issue_token, prep["token_hash"]):
+                    return _fail(request, response, status.HTTP_409_CONFLICT, "token_invalid",
+                                 "The token is not the one handed out by the latest issue/prepare.")
+                if prep.get("used_at") or row.status == ISSUED:
+                    return _fail(request, response, status.HTTP_409_CONFLICT, "token_used",
+                                 "This token was already used: the certificate is issued.")
+                if row.status != APPROVED:
+                    return _wrong_status(request, response, row, "approved")
+                if datetime.fromisoformat(prep["expires_at"]) <= _now():
+                    return _fail(request, response, status.HTTP_409_CONFLICT, "token_expired",
+                                 "The token has expired: prepare the PDF again and sign the new one.")
+                if _same(user, row.approved_by_user):
+                    return _fail(request, response, status.HTTP_409_CONFLICT, "same_person",
+                                 "The certificate must be signed by someone other than who approved it.")
+                try:
+                    await signing.verify_signed(signed, prepared_sha256=prep["sha256"],
+                                                prepared_length=prep["length"])
+                except signing.SignatureInvalid as ex:
+                    return _fail(request, response, status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                 "signature_invalid", str(ex))
+                at = _now()
+                row.pdf = signed
+                row.data, row.alerts, row.errors = prep["data"], prep["alerts"], []
+                row.date_of_issue = date.fromisoformat(prep["date_of_issue"])
+                row.status, row.issued_at = ISSUED, at
+                row.issued_by = token.name if token is not None else "service-token"
+                row.issued_by_user_id, row.issued_by_user_email, row.issued_by_user_name = (
+                    user["id"], user["email"], user["name"])
+                row.signature = {**sig.model_dump(mode="json"), "sha256": signing.sha256(signed)}
+                row.issue_prep = {**prep, "used_at": at.isoformat()}
+                _event(row, "issued", user)
+                await session.flush()
+                await session.refresh(row)
+                data = _record(kind, row)
+            return success_response(request=request, response=response, data=data,
+                                    msg=f"Certificate {row.reference_number} issued")
         except Exception as _ex:
             return error_response(request=request, exc=_ex, response=response)
 
@@ -475,13 +724,14 @@ def _register(kind: str) -> None:
                 if row is None:
                     return _not_found(request, response, kind, certificate_id)
                 if row.status == ISSUED:
+                    # the bytes as signed: any re-render would break the signature
                     content = (await session.execute(select(Model.pdf).where(Model.id == row.id))
                                ).scalar_one()
                     suffix = ""
                 else:
                     r = await _resolve(session, kind, row.aircraft_id, row.request)
                     if r.errors:
-                        raise _as_422(r.errors)
+                        return _incomplete(request, response, r.errors)
                     content = await run_in_threadpool(render, r.draft.data,
                                                       reference_number=row.reference_number,
                                                       date_of_issue=r.date_of_issue, images=r.images,
@@ -491,45 +741,58 @@ def _register(kind: str) -> None:
             return Response(content=bytes(content), media_type="application/pdf",
                             headers={"Content-Disposition":
                                      f'{"attachment" if download else "inline"}; filename="{name}"'})
-        except RequestValidationError:
-            raise
         except assembly.NotFound as _ex:
-            return warning_response(request=request, response=response, msg=str(_ex),
-                                    status_code=status.HTTP_404_NOT_FOUND)
+            return not_found(request, response, _ex)
         except Exception as _ex:
             return error_response(request=request, exc=_ex, response=response)
 
     what = f"{kind} certificate"
+    one = f"{base}/{{certificate_id}}"
     routes = (
-        (f"{base}/preview", preview, ["POST"], None, _READ,
-         f"What the {what} would say — `data`, `alerts`, `errors`, `can_issue` — without creating "
+        (f"{base}/preview", preview, ["POST"], None, _READ, "preview",
+         f"What the {what} would say — `data`, `alerts`, `errors`, `can_submit` — without creating "
          f"anything. The reference is shown masked (CY25/SCAT/#####)."),
-        (base, create, ["POST"], status.HTTP_201_CREATED, None,
+        (base, create, ["POST"], status.HTTP_201_CREATED, None, "create",
          f"Create a DRAFT {what}. Its reference number is allocated now and kept through every edit "
-         f"(422 if the airline has no certificate code). A draft may still have `errors`; it can be "
-         f"edited, drawn (marked DRAFT) and issued once they are resolved."),
-        (base, list_, ["GET"], None, _READ,
+         f"(422 `incomplete` if the airline has no certificate code)."),
+        (base, list_, ["GET"], None, _READ, "list",
          f"The {what}s, newest first. Filters: `aircraft_id`, `policy_id`, `registration` "
-         f"(separator-insensitive), `status` (draft | issued). Returns `{{items, total}}`."),
-        (f"{base}/{{certificate_id}}", get_one, ["GET"], None, _READ,
-         f"One {what}. A draft is re-resolved from the current policy, lease and aircraft; an issued "
-         f"one is returned exactly as issued."),
-        (f"{base}/{{certificate_id}}", update, ["PATCH"], None, None,
-         f"Change a DRAFT's inputs — policy, date of issue, signatory, overrides. Only the fields sent "
-         f"change; null drops an override. 409 once issued."),
-        (f"{base}/{{certificate_id}}/issue", issue, ["POST"], None, None,
-         f"Issue the draft: resolve it one last time, refuse with 422 while anything required is "
-         f"missing (`certificate.<field>`), then freeze its values, alerts and the PDF. A date of "
-         f"issue left to the system becomes today. Final: no later change is accepted (409)."),
-        (f"{base}/{{certificate_id}}", discard, ["DELETE"], None, None,
-         f"Discard a DRAFT. 409 once issued. Its reference number is not reused."),
-        (f"{base}/{{certificate_id}}/pdf", pdf, ["GET"], None, _READ,
-         f"The PDF: a draft drawn now and marked DRAFT on every page (422 while it has errors), an "
-         f"issued one exactly as sent. `download=true` asks the browser to save it."),
+         f"(separator-insensitive), `status` (draft | in_review | approved | issued). "
+         f"Returns `{{items, total}}`."),
+        (one, get_one, ["GET"], None, _READ, "get",
+         f"One {what}, with `data` and its trail `events`. Not yet issued: re-resolved from the current "
+         f"policy, lease and aircraft; issued: exactly as signed."),
+        (one, update, ["PATCH"], None, None, "update",
+         f"Change a DRAFT's inputs — policy, date of issue, overrides, wording. Only the fields sent "
+         f"change; null drops an override. 409 `wrong_status` unless draft."),
+        (one, discard, ["DELETE"], None, None, "discard",
+         f"Discard a DRAFT. 409 `wrong_status` unless draft. Its reference number is not reused."),
+        (f"{one}/submit", submit, ["POST"], None, None, "submit",
+         f"draft -> in_review. Body `{{comment?}}`. 422 `incomplete` while it has errors."),
+        (f"{one}/approve", approve, ["POST"], None, None, "approve",
+         f"in_review -> approved, recording the hash of the values approved. Body `{{comment?}}`. "
+         f"409 `same_person` if the approver submitted it; 422 `incomplete` if errors appeared."),
+        (f"{one}/return", return_, ["POST"], None, None, "return",
+         f"in_review | approved -> draft. Body `{{comment}}` (1-2000 characters), kept in `returned`."),
+        (f"{one}/issue/prepare", prepare, ["POST"], None, None, "issue_prepare",
+         f"approved only. Body `{{signatory}}`. Draws the final PDF (no DRAFT mark, the signatory "
+         f"printed, an empty signature field `Signatory`) and returns `{{issue_token, expires_at, "
+         f"signature_field, pdf_base64}}`; the token is single use, lives 15 minutes, and a new prepare "
+         f"replaces it. 409 `same_person` if the signer approved it; 409 `changed_since_approval` (and "
+         f"back to in_review) if the values changed since approval."),
+        (f"{one}/issue", issue, ["POST"], None, None, "issue",
+         f"Issue by uploading the signed PDF: multipart `issue_token`, `file`, `signature` (JSON). The "
+         f"file must be the prepared PDF plus a valid signature in `Signatory` (422 `signature_invalid`); "
+         f"409 `token_invalid` / `token_used` / `token_expired` / `same_person`; without a file 409 "
+         f"`signature_required`. The signed bytes become the issued PDF."),
+        (f"{one}/pdf", pdf, ["GET"], None, _READ, "pdf",
+         f"The PDF: not yet issued — drawn now and marked DRAFT on every page (422 `incomplete` while it "
+         f"has errors); issued — the signed file, byte for byte. `download=true` asks the browser to "
+         f"save it."),
     )
-    for path, endpoint, methods, code, deps, description in routes:
+    for path, endpoint, methods, code, deps, name, description in routes:
         kwargs = {"methods": methods, "description": description, "dependencies": deps or [],
-                  "operation_id": f"{kind}_certificate_{endpoint.__name__.rstrip('_')}",
+                  "operation_id": f"{kind}_certificate_{name}",
                   "responses": build_responses(include=_OK | ({code} if code else set()))}
         if code:
             kwargs["status_code"] = code

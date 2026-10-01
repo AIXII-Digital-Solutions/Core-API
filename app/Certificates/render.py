@@ -4,7 +4,12 @@ The layout follows the market form the client supplied (Reinsurance Certificates
 "Reinsurance certificate"): the certificate (sections 1-8, signature), the Letter of Undertaking and
 the Schedule of Parties to whom Notice is to be Given — with the issuing company's header, footer
 and images (certificate.settings / certificate.asset) and the issuing user as signatory, in place of
-the broker's. `data["issuer"]` carries the text; `images` the logo, stamp and signature bytes.
+the broker's. `data["issuer"]` carries the text; `images` the logo and stamp bytes.
+
+THE SIGNATURE. Above the signatory's name there is an empty box. A PDF prepared for signing carries an
+empty AcroForm signature field named `Signatory` over the certificate's box (`signature_field=True`):
+the signer signs that field electronically, as an incremental update, so the prepared bytes stay the
+prefix of the signed file.
 
 Everything here is a pure function of its arguments: the same snapshot and images always draw the
 same document, which is what lets the history keep the values beside the PDF and trust them.
@@ -18,14 +23,15 @@ from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
-from reportlab.platypus import (Image, KeepTogether, PageBreak, Paragraph, SimpleDocTemplate,
-                                Spacer, Table, TableStyle)
+from reportlab.platypus import (Flowable, Image, KeepTogether, PageBreak, Paragraph,
+                                SimpleDocTemplate, Spacer, Table, TableStyle)
 
 from reportlab.graphics import renderPDF
 from reportlab.lib.utils import ImageReader
 
 from .formatting import join_names, long_date, money, percent_number, percent_words, roman
 
+SIGNATURE_FIELD = "Signatory"
 PAGE_W, PAGE_H = A4
 MARGIN_X = 20 * mm
 TOP = 38 * mm
@@ -232,26 +238,41 @@ def _page_callbacks(issuer: dict, images: dict, draft: bool):
     return first_page, later_page
 
 
-def _signature_block(data: dict, images: dict, date_of_issue: str, lead=None):
-    """Room for the signatory to sign by hand, the company stamp beside it when one is uploaded and
-    the document is ours to stamp, then who signs."""
+class _SignatureBox(Flowable):
+    """The empty room for the signature. Drawn as nothing; it records where it landed (page index and
+    rectangle in PDF points) so the signature field can be put exactly over it."""
+
+    def __init__(self, width, height, boxes: list):
+        super().__init__()
+        self.width, self.height, self._boxes = width, height, boxes
+
+    def draw(self):
+        x, y = self.canv.absolutePosition(0, 0)
+        self._boxes.append((self.canv.getPageNumber() - 1, (x, y, x + self.width, y + self.height)))
+
+
+def _signature_block(data: dict, images: dict, date_of_issue: str, boxes: list, lead=None):
+    """Room for the signatory to sign, the company stamp beside it when one is uploaded and the
+    document is ours to stamp, then who signs."""
     signer, ours = _signer(data)
     stamp = _flowable(images.get("stamp"), 24 * mm, 24 * mm) if ours else None
-    if stamp is not None:
-        image_row = Table([[Spacer(48 * mm, 20 * mm), stamp]], hAlign="LEFT")
-        image_row.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                                       ("LEFTPADDING", (0, 0), (-1, -1), 0)]))
-    else:
-        image_row = Spacer(1, 20 * mm)
+    box = _SignatureBox(52 * mm, 20 * mm, boxes)
+    image_row = Table([[box, stamp] if stamp is not None else [box]], hAlign="LEFT")
+    image_row.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                                   ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                                   ("TOPPADDING", (0, 0), (-1, -1), 0),
+                                   ("BOTTOMPADDING", (0, 0), (-1, -1), 0)]))
     who = data.get("signatory") or {}
-    lines = [f"<b>{_e(who.get('full_name') or '[Signatory]')}</b>"]
+    lines = [f"<b>{_e(who['full_name'])}</b>"] if who.get("full_name") else []
     if who.get("title"):
         lines.append(_e(who["title"]))
     if who.get("phone"):
         lines.append(f"<b>Tel: {_e(who['phone'])}</b>")
     if who.get("email"):
         lines.append(f"<font color='#1F5FBF'><b>{_e(who['email'])}</b></font>")
-    right = [image_row, _p("Authorised Signatory", _BASE), _p("<br/>".join(lines), _BASE)]
+    right = [image_row, _p("Authorised Signatory", _BASE)]
+    if lines:
+        right.append(_p("<br/>".join(lines), _BASE))
     left = _p(f"Date of issue {_e(date_of_issue)}", _BASE)
     table = Table([[left, right]], colWidths=[(PAGE_W - 2 * MARGIN_X) * 0.5] * 2)
     table.setStyle(TableStyle([("VALIGN", (0, 0), (0, 0), "BOTTOM"),
@@ -287,9 +308,10 @@ def _label_table(rows, label_width, indent=0, bold_values=True):
 # ==============================================================================================
 
 def render(data: dict, *, reference_number: str, date_of_issue: date, images: dict,
-           draft: bool = False) -> bytes:
+           draft: bool = False, signature_field: bool = False) -> bytes:
     """`images`: {"logo"|"stamp": issuer.Image}. `draft` marks DRAFT across every page — every PDF
-    of a certificate not yet issued."""
+    of a certificate not yet issued. `signature_field` adds the empty `Signatory` field over the
+    certificate's signature box: the PDF prepared for signing."""
     issuer = data["issuer"]
     insurance = data["document"] == "insurance"
     signer, _ours = _signer(data)
@@ -435,7 +457,8 @@ def render(data: dict, *, reference_number: str, date_of_issue: date, images: di
     add(Spacer(1, 4 * mm))
     add(_p(_e(_SEVERAL)))
     add(Spacer(1, 5 * mm))
-    add(_signature_block(data, images, issued))
+    boxes: list = []
+    add(_signature_block(data, images, issued, boxes))
     add(Spacer(1, 3 * mm))
     add(_p(_e(_SEVERAL_SMALL), _SMALL))
 
@@ -508,7 +531,7 @@ def render(data: dict, *, reference_number: str, date_of_issue: date, images: di
            "disputes arising out of or in any way connected with this undertaking shall be submitted "
            "to the exclusive jurisdiction of the English courts.", _LETTER))
     add(Spacer(1, 8 * mm))
-    add(_signature_block(data, images, issued, lead=[
+    add(_signature_block(data, images, issued, boxes, lead=[
         _p("Yours faithfully,", ParagraphStyle("yf", parent=_BASE, alignment=TA_CENTER)),
         Spacer(1, 4 * mm)]))
 
@@ -549,4 +572,31 @@ def render(data: dict, *, reference_number: str, date_of_issue: date, images: di
                             author=issuer.get("company_legal_name") or "")
     first_page, later_page = _page_callbacks(issuer, images, draft)
     doc.build(story, onFirstPage=first_page, onLaterPages=later_page)
-    return buffer.getvalue()
+    if not signature_field:
+        return buffer.getvalue()
+    page, rect = boxes[0]       # the certificate's own signature box, not the letter's
+    return add_signature_field(buffer.getvalue(), page, rect)
+
+
+def add_signature_field(pdf: bytes, page: int, rect: tuple) -> bytes:
+    """`pdf` with an empty signature field `Signatory` over `rect` on `page`, as an incremental update.
+
+    /SigFlags is set to 3 (SignaturesExist | AppendOnly) here rather than by the signing tool, so the
+    signing revision changes nothing but the field itself — which is what lets the issue step prove,
+    by diff analysis, that the signer added a signature and nothing else."""
+    from pyhanko.pdf_utils import generic
+    from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
+    from pyhanko.sign.fields import SigFieldSpec, append_signature_field
+
+    writer = IncrementalPdfFileWriter(io.BytesIO(pdf))
+    append_signature_field(writer, SigFieldSpec(sig_field_name=SIGNATURE_FIELD, on_page=page,
+                                                box=tuple(round(v, 2) for v in rect)))
+    form_ref = writer.root.raw_get("/AcroForm")
+    form = writer.root["/AcroForm"]
+    form[generic.NameObject("/SigFlags")] = generic.NumberObject(3)
+    if isinstance(form_ref, generic.IndirectObject):
+        writer.mark_update(form_ref)
+    writer.update_root()
+    out = io.BytesIO()
+    writer.write(out)
+    return out.getvalue()
