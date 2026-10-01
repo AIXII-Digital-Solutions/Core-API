@@ -4,14 +4,19 @@ An insured aircraft needs two documents, issued on request and re-issued wheneve
 changes: the INSURANCE certificate and the REINSURANCE certificate (AVN 67B). Each table holds one of
 them, every certificate from its first draft on.
 
-A CERTIFICATE HAS TWO STATES (`status`):
+A CERTIFICATE MOVES THROUGH FOUR STATES (`status`):
 
-  * `draft`   being prepared. Its inputs (`request`: policy, date of issue, overrides, signatory) can
-              still change; its values are re-resolved from the policy, the lease and the aircraft
-              whenever it is read, and every PDF drawn of it is marked DRAFT on every page.
-  * `issued`  final. Its values (`data`), checks (`alerts`) and the PDF as sent (`pdf`) are frozen —
-              a database trigger refuses any UPDATE or DELETE of an issued row — so it reproduces
-              exactly what was sent however the policy, the lease or the aircraft change later.
+  * `draft`      being prepared. Its inputs (`request`: policy, date of issue, overrides, wording) can
+                 still change; its values are re-resolved from the policy, the lease and the aircraft
+                 whenever it is read, and every PDF drawn of it is marked DRAFT on every page.
+  * `in_review`  submitted for review by a second person; no longer editable. Returned -> draft.
+  * `approved`   the reviewer approved the values as they resolved then (`approved_hash`). Issuing
+                 re-checks them; if they changed since, it goes back to review.
+  * `issued`     signed electronically and final. Its values (`data`), checks (`alerts`) and the signed
+                 PDF (`pdf`, byte for byte as signed) are frozen — a database trigger refuses any
+                 UPDATE or DELETE of an issued row.
+
+Every step is recorded in `events`; the last return to draft in `returned`.
 
 THE REFERENCE NUMBER is allocated when the draft is created, so a draft circulated for review already
 carries the number it will be issued under: `CY<yy>/<airline code>/<nnnnn>` — the year of the policy's
@@ -44,7 +49,8 @@ from .FleetModels import Aircraft
 from .PolicyModels import Policy
 from .LeasingModels import AircraftLease
 
-DRAFT, ISSUED = "draft", "issued"
+DRAFT, IN_REVIEW, APPROVED, ISSUED = "draft", "in_review", "approved", "issued"
+STATUSES = (DRAFT, IN_REVIEW, APPROVED, ISSUED)
 
 
 class _Certificate:
@@ -52,7 +58,7 @@ class _Certificate:
 
     status: Mapped[str] = mapped_column(
         String, nullable=False, server_default=text("'draft'"),
-        comment="draft (still editable, drawn marked DRAFT) or issued (frozen).")
+        comment="draft -> in_review -> approved -> issued (frozen). Only a draft is editable.")
     reference_number: Mapped[str] = mapped_column(String, nullable=False)
     contract_year: Mapped[int] = mapped_column(Integer, nullable=False)
     airline_code: Mapped[str] = mapped_column(String, nullable=False)
@@ -80,7 +86,32 @@ class _Certificate:
     pdf: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True, deferred=True)
 
     created_by_user_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    created_by_user_email: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     created_by_user_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    # --- the review: who submitted / approved, and the trail ({id, email, name} users)
+    submitted_by_user: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    submitted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    approved_by_user: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    approved_hash: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True,
+        comment="sha256 of the canonical JSON of the values approved; issuing re-checks it.")
+    returned: Mapped[Optional[dict]] = mapped_column(
+        JSONB, nullable=True,
+        comment="The last return to draft: {by_user, at, comment, from_status}; cleared on submit.")
+    events: Mapped[list] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb"),
+        comment="[{action, by_user, at, comment}] oldest first: created/submitted/approved/returned/issued.")
+
+    # --- the electronic signature
+    issue_prep: Mapped[Optional[dict]] = mapped_column(
+        JSONB, nullable=True, deferred=True,
+        comment="The PDF prepared for signing: token hash, expiry, sha256 + length of its bytes, the "
+                "values and signatory it was drawn with.")
+    signature: Mapped[Optional[dict]] = mapped_column(
+        JSONB, nullable=True,
+        comment="The signature of the issued PDF as the portal reported it, + sha256 of the stored file.")
     issued_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     issued_by: Mapped[Optional[str]] = mapped_column(String, nullable=True,
                                                      comment="The API credential, as in audit.change_log.")
@@ -109,8 +140,8 @@ def _table_args(name: str, what: str):
     return (
         UniqueConstraint("reference_number", name=f"uq_{name}_reference_number"),
         CheckConstraint("date_of_issue_source IN ('system', 'user')", name=f"ck_{name}_date_source"),
-        CheckConstraint("status IN ('draft', 'issued')", name=f"ck_{name}_status"),
-        CheckConstraint("status = 'draft' OR (pdf IS NOT NULL AND issued_at IS NOT NULL)",
+        CheckConstraint("status IN ('draft', 'in_review', 'approved', 'issued')", name=f"ck_{name}_status"),
+        CheckConstraint("status <> 'issued' OR (pdf IS NOT NULL AND issued_at IS NOT NULL)",
                         name=f"ck_{name}_issued_complete"),
         {"comment": f"Every {what} certificate, from draft to issued. An issued row is frozen "
                     f"(trigger): its values, alerts and the PDF as sent."},

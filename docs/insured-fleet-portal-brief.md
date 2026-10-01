@@ -66,6 +66,10 @@ On an error, `data` is `[]` and `details.msg` is the message to show the user:
 "that aircraft is already covered by a policy over part of this period", not "constraint violation".
 Show it. Do not map status codes to your own strings; you will say less than the API already did.
 
+**`details.code`** — some errors also carry a machine-readable reason to branch on (e.g.
+`"code": "same_person"` on the certificates' review steps, `validation_error` on every 422 from body
+validation, `internal_error` on a 500). It is absent when there is none; never parse `msg` instead.
+
 **Log `correlationId` on every failure.** It is the only way anybody can find that request in the
 server logs. The same value is on the `X-Correlation-ID` response header of every response,
 success or not, so a client can log it without parsing the body.

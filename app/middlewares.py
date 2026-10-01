@@ -219,7 +219,8 @@ def register_middlewares(app):
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             details=DetailField(
                 msg="Validation error",
-                correlationId=correlation_id
+                correlationId=correlation_id,
+                code="validation_error"
             ),
             data=details
         )
@@ -240,7 +241,8 @@ def register_middlewares(app):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             details=DetailField(
                 msg="Internal server error",
-                correlationId=correlation_id
+                correlationId=correlation_id,
+                code="internal_error"
             ),
             data=None
         )

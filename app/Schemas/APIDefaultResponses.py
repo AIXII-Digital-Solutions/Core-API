@@ -1,9 +1,9 @@
 import inspect
 import sys
-from typing import TypeVar, Generic
+from typing import Generic, Optional, TypeVar
 
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_serializer
 from uuid import UUID
 
 
@@ -12,6 +12,17 @@ T = TypeVar("T")
 class DetailField(BaseModel):
     msg: str
     correlationId: UUID
+    code: Optional[str] = Field(
+        default=None, description="A machine-readable reason for an error (e.g. `same_person`); "
+                                  "left out when there is none.")
+
+    @model_serializer(mode="wrap")
+    def _without_empty_code(self, handler):
+        # an envelope without a code serializes exactly as it did before `code` existed
+        out = handler(self)
+        if out.get("code") is None:
+            out.pop("code", None)
+        return out
 
 
 class DefaultResponse(BaseModel, Generic[T]):
